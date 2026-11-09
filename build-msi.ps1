@@ -16,7 +16,7 @@ if (!(Test-Path $outDir)) {
 }
 
 $wixObj = Join-Path $outDir "main.wixobj"
-$msiOut = Join-Path $outDir "AgentPowerGuard-1.0.0-x64.msi"
+$msiOut = Join-Path $outDir "AgentPowerGuard-1.0.1-x64.msi"
 
 Write-Host "Compiling WiX source..."
 & $candle -arch x64 "-dSourceExe=$exePath" -out $wixObj "wix\main.wxs"

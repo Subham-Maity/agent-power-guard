@@ -39,7 +39,7 @@ jobs:
         run: |
           New-Item -ItemType Directory -Path dist -Force | Out-Null
           Copy-Item target\x86_64-pc-windows-msvc\release\agent-power-guard.exe dist\agent-power-guard-windows-x64.exe
-          Copy-Item target\installer\AgentPowerGuard-1.0.0-x64.msi dist\AgentPowerGuard-windows-x64.msi
+          Copy-Item target\installer\*.msi dist\AgentPowerGuard-windows-x64.msi
 
       - name: Upload Windows Artifacts
         uses: actions/upload-artifact@v4
