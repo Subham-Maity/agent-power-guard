@@ -1,0 +1,33 @@
+{
+  "version": "1.1.0",
+  "description": "Intelligent keep-awake watchdog utility for workstations running autonomous AI coding agents.",
+  "homepage": "https://github.com/shashankmaity/agent-power-guard",
+  "license": "MIT",
+  "architecture": {
+    "64bit": {
+      "url": "https://github.com/shashankmaity/agent-power-guard/releases/download/v1.1.0/agent-power-guard-windows-x64.exe",
+      "hash": "0000000000000000000000000000000000000000000000000000000000000000",
+      "bin": [
+        [
+          "agent-power-guard-windows-x64.exe",
+          "agent-power-guard"
+        ]
+      ],
+      "shortcuts": [
+        [
+          "agent-power-guard-windows-x64.exe",
+          "Agent Power Guard"
+        ]
+      ]
+    }
+  },
+  "checkver": "github",
+  "autoupdate": {
+    "architecture": {
+      "64bit": {
+        "url": "https://github.com/shashankmaity/agent-power-guard/releases/download/v$version/agent-power-guard-windows-x64.exe"
+      }
+    }
+  }
+}
+

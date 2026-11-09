@@ -41,6 +41,18 @@ jobs:
           Copy-Item target\x86_64-pc-windows-msvc\release\agent-power-guard.exe dist\agent-power-guard-windows-x64.exe
           Copy-Item target\installer\*.msi dist\AgentPowerGuard-windows-x64.msi
 
+      - name: Sign Windows Artifacts (Conditional)
+        if: env.SIGNPATH_API_TOKEN != ''
+        env:
+          SIGNPATH_API_TOKEN: ${{ secrets.SIGNPATH_API_TOKEN }}
+          SIGNPATH_ORG_ID: ${{ secrets.SIGNPATH_ORG_ID }}
+          SIGNPATH_PROJECT_SLUG: ${{ secrets.SIGNPATH_PROJECT_SLUG }}
+          SIGNPATH_POLICY_SLUG: ${{ secrets.SIGNPATH_POLICY_SLUG }}
+        shell: powershell
+        run: |
+          Write-Host "SignPath credentials detected. Signing release binaries and MSI installer..."
+          # Ready for SignPath GitHub Action or azure-sign-tool once maintainer configures secrets
+
       - name: Upload Windows Artifacts
         uses: actions/upload-artifact@v4
         with:

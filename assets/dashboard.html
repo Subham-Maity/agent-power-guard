@@ -83,6 +83,21 @@
       </div>
     </header>
 
+    <!-- Unauthorized Alert Modal / Banner -->
+    <div id="auth-banner" class="card" style="display:none; background: rgba(239, 68, 68, 0.15); border: 1px solid #ef4444; padding: 18px; margin-bottom: 16px;">
+      <div style="display: flex; align-items: center; gap: 10px; margin-bottom: 8px;">
+        <span style="font-size: 1.4rem;">🔒</span>
+        <strong style="color: #f87171; font-size: 1.05rem;">Authentication Required</strong>
+      </div>
+      <p style="font-size: 0.9rem; color: #cbd5e1; margin-bottom: 12px; line-height: 1.4;">
+        This Agent Power Guard instance is protected by a 256-bit API token. Please open the dashboard link from the <strong>Web & Mobile Remote</strong> tab in the app, or paste your API token below:
+      </p>
+      <div style="display: flex; gap: 8px;">
+        <input type="password" id="token-input" placeholder="Paste 64-char hex token" style="flex: 1; background: #0f141c; border: 1px solid #334155; color: #fff; padding: 8px 12px; border-radius: 8px; font-family: monospace; font-size: 0.85rem;" />
+        <button class="btn btn-accent" style="padding: 8px 16px; font-size: 0.9rem;" onclick="saveManualToken()">Connect</button>
+      </div>
+    </div>
+
     <!-- Main Status Card -->
     <div class="card hero">
       <div id="status-badge" class="status-pill status-passing">EVALUATING</div>
@@ -222,6 +237,43 @@
   <script>
     let lastState = null;
 
+    // -------------------------------------------------------------------------
+    // API Authentication Token Management
+    // -------------------------------------------------------------------------
+    let authToken = localStorage.getItem('apg_token') || '';
+
+    // Extract token from URL fragment (e.g. #t=0123456789abcdef... or #token=...)
+    if (window.location.hash) {
+      const match = window.location.hash.match(/[#&](?:t|token)=([a-fA-F0-9]+)/);
+      if (match && match[1]) {
+        authToken = match[1];
+        localStorage.setItem('apg_token', authToken);
+        history.replaceState(null, '', window.location.pathname + window.location.search);
+      }
+    }
+
+    function getAuthHeaders() {
+      const headers = { 'Accept': 'application/json' };
+      if (authToken) {
+        headers['Authorization'] = `Bearer ${authToken}`;
+      }
+      return headers;
+    }
+
+    function saveManualToken() {
+      const input = document.getElementById('token-input');
+      const val = (input.value || '').trim();
+      if (val.length >= 16) {
+        authToken = val;
+        localStorage.setItem('apg_token', val);
+        document.getElementById('auth-banner').style.display = 'none';
+        showToast('Token saved! Reconnecting...');
+        fetchStatus();
+      } else {
+        alert('Please enter a valid API token.');
+      }
+    }
+
     function showToast(msg) {
       const t = document.getElementById('toast');
       t.innerText = msg;
@@ -231,7 +283,19 @@
 
     async function apiAction(endpoint) {
       try {
-        const res = await fetch(endpoint, { method: 'POST' });
+        const res = await fetch(endpoint, {
+          method: 'POST',
+          headers: getAuthHeaders()
+        });
+        if (res.status === 401) {
+          document.getElementById('auth-banner').style.display = 'block';
+          showToast('🔒 Unauthorized: Invalid or missing token');
+          return;
+        }
+        if (res.status === 429) {
+          showToast('⚠️ Rate limit exceeded. Try again in 1 minute.');
+          return;
+        }
         const data = await res.json();
         showToast(data.message || 'Action executed');
         fetchStatus();
@@ -260,8 +324,25 @@
 
     async function fetchStatus() {
       try {
-        const res = await fetch('/api/status');
+        const res = await fetch('/api/status', {
+          headers: getAuthHeaders()
+        });
+
+        if (res.status === 401) {
+          document.getElementById('auth-banner').style.display = 'block';
+          const badge = document.getElementById('status-badge');
+          badge.className = 'status-pill status-blocked';
+          badge.innerText = 'UNAUTHORIZED';
+          document.getElementById('countdown').innerText = '🔒 LOCKED';
+          document.getElementById('blocker-banner').innerText = 'Access restricted: Please provide the API token to view live status.';
+          return;
+        }
+
         if (!res.ok) return;
+
+        // If authenticated successfully, ensure banner is hidden
+        document.getElementById('auth-banner').style.display = 'none';
+
         const s = await res.json();
         lastState = s;
 

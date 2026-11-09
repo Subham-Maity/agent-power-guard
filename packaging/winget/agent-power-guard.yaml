@@ -1,0 +1,14 @@
+PackageIdentifier: Antigravity.AgentPowerGuard
+PackageVersion: 1.1.0
+PackageName: Agent Power Guard
+Publisher: Antigravity
+License: MIT
+ShortDescription: Intelligent keep-awake watchdog utility for workstations running autonomous AI coding agents.
+Installers:
+  - Architecture: x64
+    InstallerType: msi
+    InstallerUrl: https://github.com/shashankmaity/agent-power-guard/releases/download/v1.1.0/AgentPowerGuard-windows-x64.msi
+    InstallerSha256: 0000000000000000000000000000000000000000000000000000000000000000
+ManifestType: singleton
+ManifestVersion: 1.6.0
+

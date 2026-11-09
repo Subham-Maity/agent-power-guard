@@ -25,6 +25,7 @@ winit = { version = "0.30", features = ["x11", "wayland"] }
 windows-sys = { version = "0.61.2", features = [
     "Win32_Foundation",
     "Win32_Security",
+    "Win32_Security_Cryptography",
     "Win32_System_Power",
     "Win32_System_ProcessStatus",
     "Win32_System_SystemInformation",

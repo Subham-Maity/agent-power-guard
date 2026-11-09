@@ -5,14 +5,12 @@ on:
     branches: [ main ]
     paths-ignore:
       - 'README.md'
-      - '*.md'
       - 'LICENSE'
       - '.gitignore'
   pull_request:
     branches: [ main ]
     paths-ignore:
       - 'README.md'
-      - '*.md'
       - 'LICENSE'
       - '.gitignore'
   workflow_dispatch:
@@ -22,7 +20,7 @@ env:
 
 jobs:
   build-and-test:
-    name: Build on ${{ matrix.os }} (${{ matrix.target }})
+    name: Build & Test on ${{ matrix.os }} (${{ matrix.target }})
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -43,6 +41,12 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
+          components: rustfmt, clippy
+
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
 
       - name: Install Linux GUI build dependencies
         if: runner.os == 'Linux'
@@ -50,9 +54,27 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y pkg-config libx11-dev libxext-dev libxrandr-dev libxinerama-dev libxcursor-dev libxi-dev libgl1-mesa-dev libglu1-mesa-dev libxss-dev libxkbcommon-dev libwayland-dev xprintidle libgtk-3-dev libayatana-appindicator3-dev
 
+      - name: Formatting Check
+        run: cargo fmt --all -- --check
+
+      - name: Clippy Lints
+        run: cargo clippy --target ${{ matrix.target }} --all-targets -- -D warnings
+
       - name: Cargo Check
         run: cargo check --target ${{ matrix.target }}
 
+      - name: Run Unit Tests
+        run: cargo test --target ${{ matrix.target }}
+
       - name: Cargo Build (Release)
         run: cargo build --release --target ${{ matrix.target }}
+
+  security-audit:
+    name: Security & Dependency Audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check advisories
 
