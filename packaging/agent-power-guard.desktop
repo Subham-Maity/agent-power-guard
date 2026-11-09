@@ -1,0 +1,9 @@
+[Desktop Entry]
+Name=Agent Power Guard
+Comment=Native watchdog that sleeps the PC only when you and your coding agents are idle
+Exec=agent-power-guard
+Icon=agent-power-guard
+Terminal=false
+Type=Application
+Categories=Utility;System;
+Keywords=power;sleep;agent;watchdog;energy;

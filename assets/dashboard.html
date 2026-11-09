@@ -115,8 +115,20 @@
       </div>
     </header>
 
-    <!-- Unauthorized Alert Modal / Banner -->
-    <div id="auth-banner" class="card" style="display:none; background: rgba(239, 68, 68, 0.15); border: 1px solid #ef4444; padding: 18px; margin-bottom: 16px;">
+    <!-- View Switcher Tabs (Phase 5.3) -->
+    <div style="display: flex; gap: 8px; margin-bottom: 16px;">
+      <button id="tab-btn-local" class="btn btn-accent" style="flex: 1; padding: 10px; font-size: 0.9rem;" onclick="switchTab('local')">
+        💻 This Machine
+      </button>
+      <button id="tab-btn-fleet" class="btn btn-outline" style="flex: 1; padding: 10px; font-size: 0.9rem;" onclick="switchTab('fleet')">
+        🌐 Multi-Machine Fleet (<span id="fleet-count">0</span>)
+      </button>
+    </div>
+
+    <!-- Local Machine View -->
+    <div id="view-local">
+      <!-- Unauthorized Alert Modal / Banner -->
+      <div id="auth-banner" class="card" style="display:none; background: rgba(239, 68, 68, 0.15); border: 1px solid #ef4444; padding: 18px; margin-bottom: 16px;">
       <div style="display: flex; align-items: center; gap: 10px; margin-bottom: 8px;">
         <span style="font-size: 1.4rem;">🔒</span>
         <strong style="color: #f87171; font-size: 1.05rem;">Authentication Required</strong>
@@ -310,6 +322,65 @@
         </div>
       </div>
     </div>
+  </div> <!-- /view-local -->
+
+  <!-- Multi-Machine Fleet View (Phase 5.3) -->
+  <div id="view-fleet" style="display: none;">
+    <div class="card" style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 14px;">
+      <div>
+        <div style="font-weight: 700; font-size: 1.1rem; color: #fff;">🌐 Multi-Machine Fleet</div>
+        <div style="font-size: 0.85rem; color: var(--text-muted); margin-top: 2px;">Monitor and control your workstations, servers & laptops</div>
+      </div>
+      <button class="btn btn-accent" style="padding: 8px 14px; font-size: 0.85rem;" onclick="toggleAddPeerModal(true)">
+        + Add PC
+      </button>
+    </div>
+
+    <!-- Add Peer Modal / Form Card -->
+    <div id="add-peer-card" class="card" style="display: none; border-color: var(--primary); margin-bottom: 14px;">
+      <div class="section-title">
+        <span>Add Remote Machine</span>
+        <button class="btn btn-outline" style="padding: 2px 8px; font-size: 0.8rem;" onclick="toggleAddPeerModal(false)">✕ Close</button>
+      </div>
+      <div style="display: flex; flex-direction: column; gap: 10px; margin-top: 10px;">
+        <div>
+          <label style="font-size: 0.8rem; color: var(--text-muted); display: block; margin-bottom: 4px;">Machine Name</label>
+          <input type="text" id="peer-name" placeholder="e.g. Home Server, Office Desktop" style="width: 100%; background: #0f141c; border: 1px solid #334155; color: #fff; padding: 8px 12px; border-radius: 8px; font-size: 0.9rem;" />
+        </div>
+        <div>
+          <label style="font-size: 0.8rem; color: var(--text-muted); display: block; margin-bottom: 4px;">Remote URL (with port)</label>
+          <input type="text" id="peer-url" placeholder="http://192.168.1.100:49281 or https://machine.tailnet.ts.net" style="width: 100%; background: #0f141c; border: 1px solid #334155; color: #fff; padding: 8px 12px; border-radius: 8px; font-size: 0.9rem; font-family: monospace;" />
+        </div>
+        <div>
+          <label style="font-size: 0.8rem; color: var(--text-muted); display: block; margin-bottom: 4px;">API Token</label>
+          <input type="password" id="peer-token" placeholder="64-character auth token" style="width: 100%; background: #0f141c; border: 1px solid #334155; color: #fff; padding: 8px 12px; border-radius: 8px; font-size: 0.9rem; font-family: monospace;" />
+        </div>
+        <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 10px;">
+          <div>
+            <label style="font-size: 0.8rem; color: var(--text-muted); display: block; margin-bottom: 4px;">Permission Mode</label>
+            <select id="peer-perm" style="width: 100%; background: #0f141c; border: 1px solid #334155; color: #fff; padding: 8px 12px; border-radius: 8px; font-size: 0.9rem;">
+              <option value="control">Full Control (Sleep, Postpone, Leases)</option>
+              <option value="view">View-Only (Status Observation)</option>
+            </select>
+          </div>
+          <div>
+            <label style="font-size: 0.8rem; color: var(--text-muted); display: block; margin-bottom: 4px;">MAC Address (Optional, for WoL)</label>
+            <input type="text" id="peer-mac" placeholder="00:11:22:33:44:55" style="width: 100%; background: #0f141c; border: 1px solid #334155; color: #fff; padding: 8px 12px; border-radius: 8px; font-size: 0.9rem; font-family: monospace;" />
+          </div>
+        </div>
+        <div style="display: flex; justify-content: flex-end; gap: 8px; margin-top: 8px;">
+          <button class="btn btn-outline" onclick="toggleAddPeerModal(false)">Cancel</button>
+          <button class="btn btn-accent" onclick="savePeerMachine()">Add to Fleet</button>
+        </div>
+      </div>
+    </div>
+
+    <div id="fleet-list">
+      <div style="text-align: center; color: var(--text-muted); padding: 30px;" class="card">
+        No remote machines configured yet. Click <strong>+ Add PC</strong> to monitor and control other machines running Agent Power Guard.
+      </div>
+    </div>
+  </div> <!-- /view-fleet -->
   </div>
 
   <div id="toast" class="toast">Command delivered</div>
@@ -569,8 +640,245 @@
       }
     }
 
+    // -------------------------------------------------------------------------
+    // Phase 5.3: Multi-Machine Dashboard Fleet Management
+    // -------------------------------------------------------------------------
+    let currentTab = 'local';
+    let fleetPeers = [];
+
+    function switchTab(tab) {
+      currentTab = tab;
+      const btnLocal = document.getElementById('tab-btn-local');
+      const btnFleet = document.getElementById('tab-btn-fleet');
+      const viewLocal = document.getElementById('view-local');
+      const viewFleet = document.getElementById('view-fleet');
+
+      if (tab === 'local') {
+        btnLocal.className = 'btn btn-accent';
+        btnFleet.className = 'btn btn-outline';
+        viewLocal.style.display = 'block';
+        viewFleet.style.display = 'none';
+      } else {
+        btnLocal.className = 'btn btn-outline';
+        btnFleet.className = 'btn btn-accent';
+        viewLocal.style.display = 'none';
+        viewFleet.style.display = 'block';
+        fetchPeers();
+        pollFleet();
+      }
+    }
+
+    function toggleAddPeerModal(show) {
+      document.getElementById('add-peer-card').style.display = show ? 'block' : 'none';
+    }
+
+    async function fetchPeers() {
+      try {
+        const res = await fetch('/api/peers', { headers: getAuthHeaders() });
+        if (res.ok) {
+          const data = await res.json();
+          fleetPeers = data.peers || [];
+        } else {
+          fleetPeers = JSON.parse(localStorage.getItem('apg_fleet_peers') || '[]');
+        }
+      } catch (e) {
+        fleetPeers = JSON.parse(localStorage.getItem('apg_fleet_peers') || '[]');
+      }
+      document.getElementById('fleet-count').innerText = fleetPeers.length;
+      renderFleetCards();
+    }
+
+    async function savePeerMachine() {
+      const name = (document.getElementById('peer-name').value || '').trim();
+      const url = (document.getElementById('peer-url').value || '').trim();
+      const token = (document.getElementById('peer-token').value || '').trim();
+      const permission = document.getElementById('peer-perm').value || 'control';
+      const mac = (document.getElementById('peer-mac').value || '').trim();
+
+      if (!name || !url) {
+        alert('Please specify a machine name and valid URL.');
+        return;
+      }
+
+      try {
+        const query = `/api/peers/add?name=${encodeURIComponent(name)}&url=${encodeURIComponent(url)}&token=${encodeURIComponent(token)}&permission=${encodeURIComponent(permission)}${mac ? '&mac=' + encodeURIComponent(mac) : ''}`;
+        const res = await fetch(query, { method: 'POST', headers: getAuthHeaders() });
+        if (res.ok) {
+          const data = await res.json();
+          fleetPeers = data.peers || [];
+        }
+      } catch (e) {
+        // Fallback to local storage
+        fleetPeers.push({ id: Date.now().toString(), name, url, token, permission, mac });
+        localStorage.setItem('apg_fleet_peers', JSON.stringify(fleetPeers));
+      }
+
+      toggleAddPeerModal(false);
+      document.getElementById('peer-name').value = '';
+      document.getElementById('peer-url').value = '';
+      document.getElementById('peer-token').value = '';
+      document.getElementById('peer-mac').value = '';
+      showToast('Added machine to fleet!');
+      fetchPeers();
+      pollFleet();
+    }
+
+    async function deletePeerMachine(id) {
+      if (!confirm('Remove this machine from your fleet?')) return;
+      try {
+        await fetch(`/api/peers/remove?id=${encodeURIComponent(id)}`, { method: 'POST', headers: getAuthHeaders() });
+      } catch (e) {}
+      fleetPeers = fleetPeers.filter(p => p.id !== id);
+      localStorage.setItem('apg_fleet_peers', JSON.stringify(fleetPeers));
+      showToast('Machine removed from fleet.');
+      fetchPeers();
+    }
+
+    async function peerAction(peerUrl, peerToken, path) {
+      try {
+        const fullUrl = peerUrl.replace(/\/+$/, '') + path;
+        const res = await fetch(fullUrl, {
+          method: 'POST',
+          headers: {
+            'Accept': 'application/json',
+            'Authorization': peerToken ? `Bearer ${peerToken}` : ''
+          }
+        });
+        if (res.ok) {
+          showToast('Peer command delivered!');
+          pollFleet();
+        } else {
+          showToast(`Error (${res.status}): Action failed.`);
+        }
+      } catch (err) {
+        showToast('Peer connection error: ' + err.message);
+      }
+    }
+
+    async function wakePeer(mac, bcast) {
+      try {
+        const url = `/api/wol?mac=${encodeURIComponent(mac)}${bcast ? '&bcast=' + encodeURIComponent(bcast) : ''}`;
+        const res = await fetch(url, { method: 'POST', headers: getAuthHeaders() });
+        if (res.ok) {
+          showToast(`Magic packet sent to ${mac}!`);
+        } else {
+          showToast('Failed to send magic packet.');
+        }
+      } catch (e) {
+        showToast('Wake error: ' + e.message);
+      }
+    }
+
+    function renderFleetCards() {
+      const container = document.getElementById('fleet-list');
+      if (!fleetPeers || fleetPeers.length === 0) {
+        container.innerHTML = '<div style="text-align: center; color: var(--text-muted); padding: 30px;" class="card">No remote machines configured yet. Click <strong>+ Add PC</strong> to monitor and control other machines running Agent Power Guard.</div>';
+        return;
+      }
+
+      let html = '';
+      for (const peer of fleetPeers) {
+        const isControl = peer.permission === 'control';
+        html += `
+          <div class="card" id="peer-card-${peer.id}" style="margin-bottom: 12px;">
+            <div style="display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 8px;">
+              <div>
+                <div style="font-weight: 700; font-size: 1.05rem; color: #fff;">${peer.name}</div>
+                <div style="font-size: 0.8rem; color: var(--text-muted); font-family: monospace;">${peer.url}</div>
+              </div>
+              <div style="display: flex; align-items: center; gap: 8px;">
+                <span class="badge-agent" style="${isControl ? 'background:rgba(16,185,129,0.15);color:#34d399;border-color:#10b981;' : 'background:rgba(148,163,184,0.15);color:#94a3b8;border-color:#64748b;'}">
+                  ${isControl ? 'CONTROL' : 'VIEW-ONLY'}
+                </span>
+                <span id="peer-badge-${peer.id}" class="status-pill status-paused" style="font-size: 0.75rem; padding: 2px 8px;">
+                  POLLING...
+                </span>
+                <button class="btn-sm" onclick="deletePeerMachine('${peer.id}')" title="Remove machine" style="color:#f87171; border-color:#ef4444;">✕</button>
+              </div>
+            </div>
+
+            <div id="peer-details-${peer.id}" style="font-size: 0.85rem; color: var(--text-muted); margin-bottom: 10px;">
+              Connecting to peer...
+            </div>
+
+            <div id="peer-actions-${peer.id}" style="display: flex; gap: 8px; flex-wrap: wrap;">
+              ${isControl ? `
+                <button class="btn btn-outline" style="padding: 6px 10px; font-size: 0.8rem;" onclick="peerAction('${peer.url}', '${peer.token}', '/api/postpone?mins=15')">⏳ +15m</button>
+                <button class="btn btn-danger" style="padding: 6px 10px; font-size: 0.8rem;" onclick="peerAction('${peer.url}', '${peer.token}', '/api/sleep')">⚡ Sleep</button>
+                <button class="btn btn-outline" style="padding: 6px 10px; font-size: 0.8rem;" onclick="peerAction('${peer.url}', '${peer.token}', '/api/toggle_guard')">🛡️ Toggle</button>
+              ` : ''}
+              ${peer.mac ? `
+                <button class="btn btn-primary" style="padding: 6px 10px; font-size: 0.8rem;" onclick="wakePeer('${peer.mac}')">⚡ Wake-on-LAN</button>
+              ` : ''}
+            </div>
+          </div>
+        `;
+      }
+      container.innerHTML = html;
+    }
+
+    async function pollFleet() {
+      if (currentTab !== 'fleet' || !fleetPeers || fleetPeers.length === 0) return;
+
+      for (const peer of fleetPeers) {
+        try {
+          const res = await fetch(peer.url.replace(/\/+$/, '') + '/api/status', {
+            headers: {
+              'Accept': 'application/json',
+              'Authorization': peer.token ? `Bearer ${peer.token}` : ''
+            }
+          });
+
+          const badge = document.getElementById(`peer-badge-${peer.id}`);
+          const details = document.getElementById(`peer-details-${peer.id}`);
+          if (!badge || !details) continue;
+
+          if (res.ok) {
+            const s = await res.json();
+            if (!s.guard_enabled) {
+              badge.className = 'status-pill status-paused';
+              badge.innerText = 'PAUSED';
+            } else if (s.all_conditions_pass) {
+              badge.className = 'status-pill status-passing';
+              badge.innerText = `ARMED (${s.countdown_secs}s)`;
+            } else {
+              badge.className = 'status-pill status-blocked';
+              badge.innerText = 'BLOCKED';
+            }
+
+            const cpu = s.live_agent_cpu !== undefined ? `${s.live_agent_cpu.toFixed(1)}%` : '--';
+            const gpu = s.live_gpu !== undefined ? `${s.live_gpu.toFixed(1)}%` : '--';
+            const lease = s.agent_lease_active ? ` • Lease: "${s.agent_lease_reason}"` : '';
+            const banner = s.blocker_banner_text || 'Active';
+            details.innerHTML = `
+              <div style="color: #cbd5e1; font-weight: 500;">${banner}${lease}</div>
+              <div style="font-size: 0.8rem; margin-top: 4px;">Agent CPU: ${cpu} | GPU: ${gpu} | Mode: <strong>${s.active_mode || 'Balanced'}</strong></div>
+            `;
+          } else if (res.status === 401) {
+            badge.className = 'status-pill status-blocked';
+            badge.innerText = 'UNAUTHORIZED';
+            details.innerText = 'Invalid API token configured for this peer.';
+          } else {
+            badge.className = 'status-pill status-paused';
+            badge.innerText = `HTTP ${res.status}`;
+            details.innerText = 'Peer returned an unexpected error response.';
+          }
+        } catch (err) {
+          const badge = document.getElementById(`peer-badge-${peer.id}`);
+          const details = document.getElementById(`peer-details-${peer.id}`);
+          if (badge && details) {
+            badge.className = 'status-pill status-blocked';
+            badge.innerText = 'OFFLINE / ASLEEP';
+            details.innerHTML = `Machine unreachable (sleeping or offline). ${peer.mac ? 'Use <strong>Wake-on-LAN</strong> below.' : ''}`;
+          }
+        }
+      }
+    }
+
     fetchStatus();
+    fetchPeers();
     setInterval(fetchStatus, 1000);
+    setInterval(pollFleet, 3000);
   </script>
 </body>
 </html>

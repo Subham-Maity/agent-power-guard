@@ -116,6 +116,16 @@ pub struct WakeTimer {
     pub enabled: bool,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PeerMachine {
+    pub id: String,
+    pub name: String,
+    pub url: String,
+    pub token: String,
+    pub permission: String, // "control" or "view"
+    pub mac: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AppConfig {
@@ -206,6 +216,9 @@ pub struct AppConfig {
     pub carbon_region: String,
     pub custom_carbon_g_kwh: f32,
     pub currency_symbol: String,
+
+    // Phase 5.3: Multi-Machine Dashboard Peers
+    pub peers: Vec<PeerMachine>,
 }
 
 impl Default for AppConfig {
@@ -287,6 +300,8 @@ impl Default for AppConfig {
             carbon_region: "Global Average".to_string(),
             custom_carbon_g_kwh: 436.0,
             currency_symbol: "$".to_string(),
+
+            peers: Vec::new(),
         }
     }
 }
@@ -2169,6 +2184,55 @@ pub fn get_idle_seconds() -> u32 {
 
     #[cfg(target_os = "linux")]
     {
+        // 1. D-Bus org.freedesktop.ScreenSaver (GNOME, KDE Plasma, XFCE under Wayland & X11)
+        if let Ok(output) = Command::new("dbus-send")
+            .args([
+                "--session",
+                "--dest=org.freedesktop.ScreenSaver",
+                "--type=method_call",
+                "--print-reply",
+                "/org/freedesktop/ScreenSaver",
+                "org.freedesktop.ScreenSaver.GetSessionIdleTime",
+            ])
+            .output()
+        {
+            if output.status.success() {
+                let text = String::from_utf8_lossy(&output.stdout);
+                for line in text.lines() {
+                    let trimmed = line.trim();
+                    if trimmed.starts_with("uint32") {
+                        if let Some(val_str) = trimmed.strip_prefix("uint32") {
+                            if let Ok(ms) = val_str.trim().parse::<u64>() {
+                                return (ms / 1000) as u32;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // 2. systemd-logind via loginctl
+        if let Ok(output) = Command::new("loginctl")
+            .args([
+                "show-session",
+                "self",
+                "-p",
+                "IdleSinceHintMonotonic",
+                "--value",
+            ])
+            .output()
+        {
+            if output.status.success() {
+                let s = String::from_utf8_lossy(&output.stdout);
+                if let Ok(micros) = s.trim().parse::<u64>() {
+                    if micros > 0 {
+                        return (micros / 1_000_000) as u32;
+                    }
+                }
+            }
+        }
+
+        // 3. Fallback to classic X11 xprintidle
         if let Ok(output) = Command::new("xprintidle").output() {
             if let Ok(s) = String::from_utf8(output.stdout) {
                 if let Ok(ms) = s.trim().parse::<u64>() {
@@ -3174,6 +3238,126 @@ fn handle_http_client(
         }
     }
 
+    // Phase 5.3: Multi-Machine Dashboard Peers API
+    if path == "/api/peers" || path.starts_with("/api/peers?") {
+        let s = state.lock().unwrap();
+        let body = serde_json::to_string(&serde_json::json!({
+            "status": "ok",
+            "peers": s.config.peers,
+        }))
+        .unwrap_or_else(|_| "{}".to_string());
+        let resp = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            body.len(),
+            body
+        );
+        let _ = stream.write_all(resp.as_bytes());
+        return;
+    }
+
+    if path.starts_with("/api/peers/add") {
+        let name = parse_query_param(path, "name").unwrap_or_else(|| "Remote PC".to_string());
+        let url = parse_query_param(path, "url").unwrap_or_default();
+        let token = parse_query_param(path, "token").unwrap_or_default();
+        let permission =
+            parse_query_param(path, "permission").unwrap_or_else(|| "control".to_string());
+        let mac = parse_query_param(path, "mac");
+
+        if !url.is_empty() {
+            let mut s = state.lock().unwrap();
+            let id = parse_query_param(path, "id").unwrap_or_else(|| {
+                format!(
+                    "{:x}",
+                    SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_millis()
+                )
+            });
+            s.config.peers.retain(|p| p.id != id);
+            s.config.peers.push(PeerMachine {
+                id,
+                name,
+                url,
+                token,
+                permission,
+                mac,
+            });
+            s.config_dirty = true;
+            s.config.save();
+            let body = serde_json::to_string(&serde_json::json!({
+                "status": "ok",
+                "peers": s.config.peers,
+            }))
+            .unwrap_or_else(|_| "{}".to_string());
+            let resp = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            let _ = stream.write_all(resp.as_bytes());
+            return;
+        }
+    }
+
+    if path.starts_with("/api/peers/remove") {
+        if let Some(id) = parse_query_param(path, "id") {
+            let mut s = state.lock().unwrap();
+            s.config.peers.retain(|p| p.id != id);
+            s.config_dirty = true;
+            s.config.save();
+            let body = serde_json::to_string(&serde_json::json!({
+                "status": "ok",
+                "peers": s.config.peers,
+            }))
+            .unwrap_or_else(|_| "{}".to_string());
+            let resp = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            let _ = stream.write_all(resp.as_bytes());
+            return;
+        }
+    }
+
+    // Phase 5.4: Wake-on-LAN API
+    if path.starts_with("/api/wol") {
+        if let Some(mac) = parse_query_param(path, "mac") {
+            let bcast = parse_query_param(path, "bcast");
+            match send_wol_packet(&mac, bcast.as_deref()) {
+                Ok(()) => {
+                    let body = serde_json::to_string(&serde_json::json!({
+                        "status": "sent",
+                        "mac": mac,
+                        "bcast": bcast.unwrap_or_else(|| "255.255.255.255".to_string()),
+                    }))
+                    .unwrap_or_default();
+                    let resp = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        body.len(),
+                        body
+                    );
+                    let _ = stream.write_all(resp.as_bytes());
+                    return;
+                }
+                Err(err) => {
+                    let body = serde_json::to_string(&serde_json::json!({
+                        "error": err,
+                    }))
+                    .unwrap_or_default();
+                    let resp = format!(
+                        "HTTP/1.1 400 Bad Request\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        body.len(),
+                        body
+                    );
+                    let _ = stream.write_all(resp.as_bytes());
+                    return;
+                }
+            }
+        }
+    }
+
     let body = r#"{"error":"not_found"}"#;
     let resp = format!("HTTP/1.1 404 Not Found\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", body.len(), body);
     let _ = stream.write_all(resp.as_bytes());
@@ -3675,6 +3859,26 @@ fn handle_cli_command(args: &[String]) {
                 }
             }
         }
+        "daemon" | "service-run" => {
+            run_headless_daemon();
+        }
+        "service" => {
+            let sub = args.get(2).map(|s| s.as_str()).unwrap_or("status");
+            match sub {
+                "install" => install_service(),
+                "uninstall" => uninstall_service(),
+                "run" => run_headless_daemon(),
+                "status" => service_status(),
+                _ => eprintln!("Usage: agent-power-guard service [install|uninstall|status|run]"),
+            }
+        }
+        "relay" => {
+            let port = args
+                .get(2)
+                .and_then(|p| p.parse::<u16>().ok())
+                .unwrap_or(49282);
+            run_wake_relay(port, None);
+        }
         "help" | "--help" | "-h" => {
             println!("Agent Power Guard CLI");
             println!();
@@ -3687,6 +3891,11 @@ fn handle_cli_command(args: &[String]) {
             println!("  agent-power-guard postpone [mins]                                  - Postpone sleep by N minutes");
             println!("  agent-power-guard sleep                                            - Trigger immediate system sleep");
             println!("  agent-power-guard wol <mac> [broadcast]                            - Send Wake-on-LAN magic packet to wake remote PC");
+            println!("  agent-power-guard daemon                                           - Run headless background watchdog daemon");
+            println!("  agent-power-guard service install                                  - Register autostart background service");
+            println!("  agent-power-guard service uninstall                                - Unregister background service");
+            println!("  agent-power-guard service status                                   - Check background service status");
+            println!("  agent-power-guard relay [port]                                     - Launch Wake-on-LAN micro-relay server");
             println!("  agent-power-guard help                                             - Show this help message");
         }
         _ => {
@@ -3702,451 +3911,744 @@ fn handle_cli_command(args: &[String]) {
 // Background Watchdog Engine (1 Hz Polling)
 // ----------------------------------------------------------------------------
 
-pub fn start_watchdog_thread(state: Arc<Mutex<SharedState>>, egui_ctx: egui::Context) {
+pub fn start_watchdog_thread(state: Arc<Mutex<SharedState>>, egui_ctx: Option<egui::Context>) {
     std::thread::spawn(move || {
-        let mut sys = System::new().expect("sysinfo System::new");
-        let mut nets = Networks::new_with_refreshed_list().expect("Networks::new");
-        let mut disks =
-            Disks::new_with_refreshed_list_specifics(DiskRefreshKind::nothing().with_io_usage())
-                .expect("Disks::new");
+        run_watchdog_loop(state, egui_ctx);
+    });
+}
 
-        // Warm up CPU usage
-        sys.refresh_cpu_usage();
-        std::thread::sleep(Duration::from_millis(500));
+pub fn run_watchdog_loop(state: Arc<Mutex<SharedState>>, egui_ctx: Option<egui::Context>) {
+    let mut sys = System::new().expect("sysinfo System::new");
+    let mut nets = Networks::new_with_refreshed_list().expect("Networks::new");
+    let mut disks =
+        Disks::new_with_refreshed_list_specifics(DiskRefreshKind::nothing().with_io_usage())
+            .expect("Disks::new");
 
-        // Populate MAC address once
+    // Warm up CPU usage
+    sys.refresh_cpu_usage();
+    std::thread::sleep(Duration::from_millis(500));
+
+    // Populate MAC address once
+    {
+        let mut s = state.lock().unwrap();
+        s.mac_address = get_primary_mac(&nets);
+    }
+
+    let mut cached_display_request = false;
+    let mut last_requests_check = Instant::now() - Duration::from_secs(10);
+
+    loop {
+        let loop_start = Instant::now();
+
+        // 1. Check Wall-Clock Wakeup
+        let now_wall = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+
+        let mut woke_from_sleep = false;
         {
             let mut s = state.lock().unwrap();
-            s.mac_address = get_primary_mac(&nets);
+            if s.last_wall_clock_secs > 0 && now_wall > s.last_wall_clock_secs + 10 {
+                s.countdown_secs = s.countdown_max;
+                s.set_toast("System woke from sleep! Watchdog countdown reset.");
+                s.pc_spike_sustained_counter = 0;
+                woke_from_sleep = true;
+            }
+            s.last_wall_clock_secs = now_wall;
         }
 
-        let mut cached_display_request = false;
-        let mut last_requests_check = Instant::now() - Duration::from_secs(10);
+        if woke_from_sleep {
+            std::thread::sleep(Duration::from_millis(1500));
+        }
 
-        loop {
-            let loop_start = Instant::now();
+        // 2. Sample Metrics
+        let idle_secs = get_idle_seconds();
 
-            // 1. Check Wall-Clock Wakeup
-            let now_wall = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs();
+        sys.refresh_cpu_usage();
+        sys.refresh_processes_specifics(
+            ProcessesToUpdate::All,
+            true,
+            ProcessRefreshKind::nothing().with_cpu().with_disk_usage(),
+        );
 
-            let mut woke_from_sleep = false;
-            {
-                let mut s = state.lock().unwrap();
-                if s.last_wall_clock_secs > 0 && now_wall > s.last_wall_clock_secs + 10 {
-                    s.countdown_secs = s.countdown_max;
-                    s.set_toast("System woke from sleep! Watchdog countdown reset.");
-                    s.pc_spike_sustained_counter = 0;
-                    woke_from_sleep = true;
+        disks.refresh_specifics(false, DiskRefreshKind::nothing().with_io_usage());
+        nets.refresh(false);
+
+        // Whole-PC CPU %
+        let whole_pc_cpu = sys.global_cpu_usage();
+
+        // Whole-PC Disk I/O
+        let mut total_disk_r = 0u64;
+        let mut total_disk_w = 0u64;
+        for disk in &disks {
+            let u = disk.usage();
+            total_disk_r = total_disk_r.saturating_add(u.read_bytes);
+            total_disk_w = total_disk_w.saturating_add(u.written_bytes);
+        }
+        let whole_pc_disk_kbps = (total_disk_r + total_disk_w) as f32 / 1024.0;
+
+        // Whole-PC Network I/O
+        let mut total_net_rx = 0u64;
+        let mut total_net_tx = 0u64;
+        for (_name, net) in &nets {
+            total_net_rx = total_net_rx.saturating_add(net.received());
+            total_net_tx = total_net_tx.saturating_add(net.transmitted());
+        }
+        let whole_pc_net_kbps = (total_net_rx + total_net_tx) as f32 / 1024.0;
+
+        // GPU Utilization
+        let gpu_util = get_gpu_utilization();
+
+        // Microphone & Camera Active
+        let (mic_active, cam_active, mic_cam_app) = check_mic_camera_active();
+
+        // Windows Power Requests (Sample every 3s)
+        if last_requests_check.elapsed() >= Duration::from_secs(3) {
+            let (has_disp, _has_sys) = check_power_requests();
+            cached_display_request = has_disp;
+            last_requests_check = Instant::now();
+        }
+
+        let trigger_sleep;
+
+        {
+            let mut s = state.lock().unwrap();
+
+            // Agent Keywords matching
+            let agent_keywords: Vec<String> = s
+                .config
+                .agent_keywords
+                .split(',')
+                .map(|w| w.trim().to_lowercase())
+                .filter(|w| !w.is_empty())
+                .collect();
+
+            let download_keywords: Vec<String> = s
+                .config
+                .download_keywords
+                .split(',')
+                .map(|w| w.trim().to_lowercase())
+                .filter(|w| !w.is_empty())
+                .collect();
+
+            let ignored_keywords: Vec<String> = s
+                .config
+                .ignored_processes
+                .split(',')
+                .map(|w| w.trim().to_lowercase())
+                .filter(|w| !w.is_empty())
+                .collect();
+
+            let mut max_agent_cpu = 0.0f32;
+            let mut max_agent_proc = "None".to_string();
+            let mut max_dl_kbps = 0.0f32;
+            let mut max_dl_proc = "None".to_string();
+            let mut proc_list = Vec::new();
+
+            for (_pid, proc) in sys.processes() {
+                let raw_name = proc.name().to_string_lossy().to_string();
+                let lower_name = raw_name.to_lowercase();
+                let cpu = proc.cpu_usage();
+                let is_agent = agent_keywords.iter().any(|k| lower_name.contains(k));
+                let is_ignored = ignored_keywords.iter().any(|k| lower_name.contains(k));
+
+                if cpu > 0.1 || is_agent {
+                    proc_list.push(ProcessCpuInfo {
+                        name: raw_name.clone(),
+                        cpu_pct: cpu,
+                        is_agent,
+                        is_ignored,
+                    });
                 }
-                s.last_wall_clock_secs = now_wall;
-            }
 
-            if woke_from_sleep {
-                std::thread::sleep(Duration::from_millis(1500));
-            }
+                // Phase 1.3: Ignore list
+                if is_ignored {
+                    continue;
+                }
 
-            // 2. Sample Metrics
-            let idle_secs = get_idle_seconds();
+                if is_agent && cpu > max_agent_cpu {
+                    max_agent_cpu = cpu;
+                    max_agent_proc = raw_name.clone();
+                }
 
-            sys.refresh_cpu_usage();
-            sys.refresh_processes_specifics(
-                ProcessesToUpdate::All,
-                true,
-                ProcessRefreshKind::nothing().with_cpu().with_disk_usage(),
-            );
-
-            disks.refresh_specifics(false, DiskRefreshKind::nothing().with_io_usage());
-            nets.refresh(false);
-
-            // Whole-PC CPU %
-            let whole_pc_cpu = sys.global_cpu_usage();
-
-            // Whole-PC Disk I/O
-            let mut total_disk_r = 0u64;
-            let mut total_disk_w = 0u64;
-            for disk in &disks {
-                let u = disk.usage();
-                total_disk_r = total_disk_r.saturating_add(u.read_bytes);
-                total_disk_w = total_disk_w.saturating_add(u.written_bytes);
-            }
-            let whole_pc_disk_kbps = (total_disk_r + total_disk_w) as f32 / 1024.0;
-
-            // Whole-PC Network I/O
-            let mut total_net_rx = 0u64;
-            let mut total_net_tx = 0u64;
-            for (_name, net) in &nets {
-                total_net_rx = total_net_rx.saturating_add(net.received());
-                total_net_tx = total_net_tx.saturating_add(net.transmitted());
-            }
-            let whole_pc_net_kbps = (total_net_rx + total_net_tx) as f32 / 1024.0;
-
-            // GPU Utilization
-            let gpu_util = get_gpu_utilization();
-
-            // Microphone & Camera Active
-            let (mic_active, cam_active, mic_cam_app) = check_mic_camera_active();
-
-            // Windows Power Requests (Sample every 3s)
-            if last_requests_check.elapsed() >= Duration::from_secs(3) {
-                let (has_disp, _has_sys) = check_power_requests();
-                cached_display_request = has_disp;
-                last_requests_check = Instant::now();
-            }
-
-            let trigger_sleep;
-
-            {
-                let mut s = state.lock().unwrap();
-
-                // Agent Keywords matching
-                let agent_keywords: Vec<String> = s
-                    .config
-                    .agent_keywords
-                    .split(',')
-                    .map(|w| w.trim().to_lowercase())
-                    .filter(|w| !w.is_empty())
-                    .collect();
-
-                let download_keywords: Vec<String> = s
-                    .config
-                    .download_keywords
-                    .split(',')
-                    .map(|w| w.trim().to_lowercase())
-                    .filter(|w| !w.is_empty())
-                    .collect();
-
-                let ignored_keywords: Vec<String> = s
-                    .config
-                    .ignored_processes
-                    .split(',')
-                    .map(|w| w.trim().to_lowercase())
-                    .filter(|w| !w.is_empty())
-                    .collect();
-
-                let mut max_agent_cpu = 0.0f32;
-                let mut max_agent_proc = "None".to_string();
-                let mut max_dl_kbps = 0.0f32;
-                let mut max_dl_proc = "None".to_string();
-                let mut proc_list = Vec::new();
-
-                for (_pid, proc) in sys.processes() {
-                    let raw_name = proc.name().to_string_lossy().to_string();
-                    let lower_name = raw_name.to_lowercase();
-                    let cpu = proc.cpu_usage();
-                    let is_agent = agent_keywords.iter().any(|k| lower_name.contains(k));
-                    let is_ignored = ignored_keywords.iter().any(|k| lower_name.contains(k));
-
-                    if cpu > 0.1 || is_agent {
-                        proc_list.push(ProcessCpuInfo {
-                            name: raw_name.clone(),
-                            cpu_pct: cpu,
-                            is_agent,
-                            is_ignored,
-                        });
-                    }
-
-                    // Phase 1.3: Ignore list
-                    if is_ignored {
-                        continue;
-                    }
-
-                    if is_agent && cpu > max_agent_cpu {
-                        max_agent_cpu = cpu;
-                        max_agent_proc = raw_name.clone();
-                    }
-
-                    for kw in &download_keywords {
-                        if lower_name.contains(kw) {
-                            let du = proc.disk_usage();
-                            let dl_kbps = (du.read_bytes + du.written_bytes) as f32 / 1024.0;
-                            if dl_kbps > max_dl_kbps {
-                                max_dl_kbps = dl_kbps;
-                                max_dl_proc = raw_name.clone();
-                            }
-                            break;
+                for kw in &download_keywords {
+                    if lower_name.contains(kw) {
+                        let du = proc.disk_usage();
+                        let dl_kbps = (du.read_bytes + du.written_bytes) as f32 / 1024.0;
+                        if dl_kbps > max_dl_kbps {
+                            max_dl_kbps = dl_kbps;
+                            max_dl_proc = raw_name.clone();
                         }
+                        break;
                     }
                 }
+            }
 
-                proc_list.sort_by(|a, b| {
-                    b.cpu_pct
-                        .partial_cmp(&a.cpu_pct)
-                        .unwrap_or(std::cmp::Ordering::Equal)
-                });
-                proc_list.truncate(8);
-                s.top_processes = proc_list;
+            proc_list.sort_by(|a, b| {
+                b.cpu_pct
+                    .partial_cmp(&a.cpu_pct)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
+            proc_list.truncate(8);
+            s.top_processes = proc_list;
 
-                // Update live metrics
-                s.live_idle_secs = idle_secs;
-                s.live_agent_cpu_pct = max_agent_cpu;
-                s.live_agent_process_name = max_agent_proc.clone();
-                s.live_gpu_pct = gpu_util;
-                s.live_download_kbps = max_dl_kbps;
-                s.live_download_process_name = max_dl_proc.clone();
-                s.live_pc_cpu_pct = whole_pc_cpu;
-                s.live_pc_disk_kbps = whole_pc_disk_kbps;
-                s.live_pc_net_kbps = whole_pc_net_kbps;
-                s.live_mic_active = mic_active;
-                s.live_cam_active = cam_active;
-                s.live_mic_cam_app = mic_cam_app.clone();
-                s.live_power_display_active = cached_display_request;
+            // Update live metrics
+            s.live_idle_secs = idle_secs;
+            s.live_agent_cpu_pct = max_agent_cpu;
+            s.live_agent_process_name = max_agent_proc.clone();
+            s.live_gpu_pct = gpu_util;
+            s.live_download_kbps = max_dl_kbps;
+            s.live_download_process_name = max_dl_proc.clone();
+            s.live_pc_cpu_pct = whole_pc_cpu;
+            s.live_pc_disk_kbps = whole_pc_disk_kbps;
+            s.live_pc_net_kbps = whole_pc_net_kbps;
+            s.live_mic_active = mic_active;
+            s.live_cam_active = cam_active;
+            s.live_mic_cam_app = mic_cam_app.clone();
+            s.live_power_display_active = cached_display_request;
 
-                // Update 120s rolling history
-                if s.history_agent_cpu.len() >= HISTORY_LEN {
-                    s.history_agent_cpu.pop_front();
+            // Update 120s rolling history
+            if s.history_agent_cpu.len() >= HISTORY_LEN {
+                s.history_agent_cpu.pop_front();
+            }
+            s.history_agent_cpu.push_back(max_agent_cpu);
+
+            if s.history_gpu.len() >= HISTORY_LEN {
+                s.history_gpu.pop_front();
+            }
+            s.history_gpu.push_back(gpu_util);
+
+            if s.history_pc_cpu.len() >= HISTORY_LEN {
+                s.history_pc_cpu.pop_front();
+            }
+            s.history_pc_cpu.push_back(whole_pc_cpu);
+
+            if s.history_pc_disk.len() >= HISTORY_LEN {
+                s.history_pc_disk.pop_front();
+            }
+            s.history_pc_disk.push_back(whole_pc_disk_kbps);
+
+            if s.history_pc_net.len() >= HISTORY_LEN {
+                s.history_pc_net.pop_front();
+            }
+            s.history_pc_net.push_back(whole_pc_net_kbps);
+
+            // Phase 1.1: Check PID aliveness for PID-bound lease
+            if let Some(pid) = s.agent_lease_pid {
+                let sys_pid = sysinfo::Pid::from_u32(pid);
+                if !sys.processes().contains_key(&sys_pid) {
+                    s.agent_lease_until = None;
+                    s.agent_lease_reason.clear();
+                    s.agent_lease_pid = None;
+                    s.set_toast(&format!(
+                        "PID-bound lease auto-released: Process {} exited.",
+                        pid
+                    ));
                 }
-                s.history_agent_cpu.push_back(max_agent_cpu);
+            }
 
-                if s.history_gpu.len() >= HISTORY_LEN {
-                    s.history_gpu.pop_front();
+            // Phase 3: Laptop Battery & Scheduling State
+            let batt = get_battery_status();
+            s.live_battery_status = batt;
+
+            if let Some(until) = s.config.stay_awake_until_epoch_secs {
+                if now_wall >= until {
+                    s.config.stay_awake_until_epoch_secs = None;
+                    s.config_dirty = true;
+                    s.set_toast("Scheduled stay-awake period ended.");
                 }
-                s.history_gpu.push_back(gpu_util);
+            }
 
-                if s.history_pc_cpu.len() >= HISTORY_LEN {
-                    s.history_pc_cpu.pop_front();
-                }
-                s.history_pc_cpu.push_back(whole_pc_cpu);
+            let (local_h, local_m) = get_local_hour_minute();
 
-                if s.history_pc_disk.len() >= HISTORY_LEN {
-                    s.history_pc_disk.pop_front();
-                }
-                s.history_pc_disk.push_back(whole_pc_disk_kbps);
+            // Phase 0.2 & Phase 3: Pure Condition Evaluation via evaluate()
+            let metrics = Metrics {
+                idle_secs,
+                max_agent_cpu,
+                max_agent_proc: max_agent_proc.clone(),
+                max_dl_kbps,
+                max_dl_proc: max_dl_proc.clone(),
+                whole_pc_cpu,
+                whole_pc_disk_kbps,
+                whole_pc_net_kbps,
+                gpu_util,
+                mic_active,
+                cam_active,
+                mic_cam_app: mic_cam_app.clone(),
+                display_request_active: cached_display_request,
+                sensor_error: false,
+                now_epoch_secs: now_wall,
+                local_hour: local_h,
+                local_min: local_m,
+                on_battery: batt.has_battery && !batt.on_ac_power,
+                battery_pct: batt.percent,
+                stay_awake_until: s.config.stay_awake_until_epoch_secs,
+            };
 
-                if s.history_pc_net.len() >= HISTORY_LEN {
-                    s.history_pc_net.pop_front();
-                }
-                s.history_pc_net.push_back(whole_pc_net_kbps);
+            let mut eval_state = EvaluationState {
+                countdown_secs: s.countdown_secs,
+                pc_spike_sustained_counter: s.pc_spike_sustained_counter,
+                postponed_until_epoch_secs: s.postponed_until.map(|i| {
+                    let rem = i.saturating_duration_since(Instant::now()).as_secs();
+                    now_wall + rem
+                }),
+                agent_lease_until_epoch_secs: s.agent_lease_until.map(|i| {
+                    let rem = i.saturating_duration_since(Instant::now()).as_secs();
+                    now_wall + rem
+                }),
+                agent_lease_reason: s.agent_lease_reason.clone(),
+                agent_lease_pid: s.agent_lease_pid,
+                last_wall_clock_secs: s.last_wall_clock_secs,
+                monitor_standby_start_epoch_secs: s.monitor_standby_start.map(|i| {
+                    let dur = i.elapsed().as_secs();
+                    now_wall.saturating_sub(dur)
+                }),
+            };
 
-                // Phase 1.1: Check PID aliveness for PID-bound lease
-                if let Some(pid) = s.agent_lease_pid {
-                    let sys_pid = sysinfo::Pid::from_u32(pid);
-                    if !sys.processes().contains_key(&sys_pid) {
-                        s.agent_lease_until = None;
-                        s.agent_lease_reason.clear();
-                        s.agent_lease_pid = None;
-                        s.set_toast(&format!(
-                            "PID-bound lease auto-released: Process {} exited.",
-                            pid
-                        ));
-                    }
-                }
+            let decision = evaluate(&s.config, &metrics, &mut eval_state);
 
-                // Phase 3: Laptop Battery & Scheduling State
-                let batt = get_battery_status();
-                s.live_battery_status = batt;
+            s.countdown_secs = decision.countdown_secs;
+            s.countdown_max = decision.countdown_max;
+            s.all_conditions_pass = decision.all_conditions_pass;
+            s.blocker_banner_text = decision.blocker_banner_text;
+            s.pc_spike_sustained_counter = eval_state.pc_spike_sustained_counter;
+            s.grace_active = decision.trigger_grace_banner;
+            s.cond1_idle = decision.cond1_idle;
+            s.cond2_agent_cpu = decision.cond2_agent_cpu;
+            s.cond3_download = decision.cond3_download;
+            s.cond4_pc_cpu = decision.cond4_pc_cpu;
+            s.cond5_pc_disk = decision.cond5_pc_disk;
+            s.cond6_pc_net = decision.cond6_pc_net;
+            s.cond7_spike_filter = decision.cond7_spike_filter;
+            s.cond8_monitor_timeout = decision.cond8_monitor_timeout;
+            s.cond9_power_requests = decision.cond9_power_requests;
+            s.cond10_gpu = decision.cond10_gpu;
+            s.cond11_mic_cam = decision.cond11_mic_cam;
+            trigger_sleep = decision.trigger_sleep;
 
-                if let Some(until) = s.config.stay_awake_until_epoch_secs {
-                    if now_wall >= until {
-                        s.config.stay_awake_until_epoch_secs = None;
-                        s.config_dirty = true;
-                        s.set_toast("Scheduled stay-awake period ended.");
-                    }
-                }
+            if let Some(dur) = decision.log_monitor_off_duration {
+                s.log_energy_event("monitor_off", dur);
+            }
 
-                let (local_h, local_m) = get_local_hour_minute();
-
-                // Phase 0.2 & Phase 3: Pure Condition Evaluation via evaluate()
-                let metrics = Metrics {
-                    idle_secs,
-                    max_agent_cpu,
-                    max_agent_proc: max_agent_proc.clone(),
-                    max_dl_kbps,
-                    max_dl_proc: max_dl_proc.clone(),
-                    whole_pc_cpu,
-                    whole_pc_disk_kbps,
-                    whole_pc_net_kbps,
-                    gpu_util,
-                    mic_active,
-                    cam_active,
-                    mic_cam_app: mic_cam_app.clone(),
-                    display_request_active: cached_display_request,
-                    sensor_error: false,
-                    now_epoch_secs: now_wall,
-                    local_hour: local_h,
-                    local_min: local_m,
-                    on_battery: batt.has_battery && !batt.on_ac_power,
-                    battery_pct: batt.percent,
-                    stay_awake_until: s.config.stay_awake_until_epoch_secs,
-                };
-
-                let mut eval_state = EvaluationState {
-                    countdown_secs: s.countdown_secs,
-                    pc_spike_sustained_counter: s.pc_spike_sustained_counter,
-                    postponed_until_epoch_secs: s.postponed_until.map(|i| {
-                        let rem = i.saturating_duration_since(Instant::now()).as_secs();
-                        now_wall + rem
-                    }),
-                    agent_lease_until_epoch_secs: s.agent_lease_until.map(|i| {
-                        let rem = i.saturating_duration_since(Instant::now()).as_secs();
-                        now_wall + rem
-                    }),
-                    agent_lease_reason: s.agent_lease_reason.clone(),
-                    agent_lease_pid: s.agent_lease_pid,
-                    last_wall_clock_secs: s.last_wall_clock_secs,
-                    monitor_standby_start_epoch_secs: s.monitor_standby_start.map(|i| {
-                        let dur = i.elapsed().as_secs();
-                        now_wall.saturating_sub(dur)
-                    }),
-                };
-
-                let decision = evaluate(&s.config, &metrics, &mut eval_state);
-
-                s.countdown_secs = decision.countdown_secs;
-                s.countdown_max = decision.countdown_max;
-                s.all_conditions_pass = decision.all_conditions_pass;
-                s.blocker_banner_text = decision.blocker_banner_text;
-                s.pc_spike_sustained_counter = eval_state.pc_spike_sustained_counter;
-                s.grace_active = decision.trigger_grace_banner;
-                s.cond1_idle = decision.cond1_idle;
-                s.cond2_agent_cpu = decision.cond2_agent_cpu;
-                s.cond3_download = decision.cond3_download;
-                s.cond4_pc_cpu = decision.cond4_pc_cpu;
-                s.cond5_pc_disk = decision.cond5_pc_disk;
-                s.cond6_pc_net = decision.cond6_pc_net;
-                s.cond7_spike_filter = decision.cond7_spike_filter;
-                s.cond8_monitor_timeout = decision.cond8_monitor_timeout;
-                s.cond9_power_requests = decision.cond9_power_requests;
-                s.cond10_gpu = decision.cond10_gpu;
-                s.cond11_mic_cam = decision.cond11_mic_cam;
-                trigger_sleep = decision.trigger_sleep;
-
-                if let Some(dur) = decision.log_monitor_off_duration {
-                    s.log_energy_event("monitor_off", dur);
-                }
-
-                // Phase 2.1: Block History Tracking
-                if s.config.block_history_enabled {
-                    let new_primary = decision.blockers.first().cloned();
-                    if new_primary != s.current_primary_blocker {
-                        if let Some(start) = s.current_block_start_epoch_secs {
-                            let duration = now_wall.saturating_sub(start);
-                            if duration >= 2 {
-                                if let Some(prev) = s.current_primary_blocker.take() {
-                                    let all = s.current_all_blockers.clone();
-                                    s.record_block_event(start, now_wall, duration, prev, all);
-                                }
+            // Phase 2.1: Block History Tracking
+            if s.config.block_history_enabled {
+                let new_primary = decision.blockers.first().cloned();
+                if new_primary != s.current_primary_blocker {
+                    if let Some(start) = s.current_block_start_epoch_secs {
+                        let duration = now_wall.saturating_sub(start);
+                        if duration >= 2 {
+                            if let Some(prev) = s.current_primary_blocker.take() {
+                                let all = s.current_all_blockers.clone();
+                                s.record_block_event(start, now_wall, duration, prev, all);
                             }
                         }
-                        if let Some(b) = &new_primary {
-                            s.current_block_start_epoch_secs = Some(now_wall);
-                            s.current_primary_blocker = Some(b.clone());
-                            s.current_all_blockers = decision.blockers.clone();
-                        } else {
-                            s.current_block_start_epoch_secs = None;
-                            s.current_primary_blocker = None;
-                            s.current_all_blockers.clear();
-                        }
                     }
-
-                    if now_wall % 60 == 0 {
-                        check_and_rotate_block_history();
+                    if let Some(b) = &new_primary {
+                        s.current_block_start_epoch_secs = Some(now_wall);
+                        s.current_primary_blocker = Some(b.clone());
+                        s.current_all_blockers = decision.blockers.clone();
+                    } else {
+                        s.current_block_start_epoch_secs = None;
+                        s.current_primary_blocker = None;
+                        s.current_all_blockers.clear();
                     }
                 }
 
-                // Phase 2.2: Notifications
-                if decision.trigger_grace_banner && !s.last_grace_active {
-                    if s.config.notify_on_sleep_imminent
-                        && now_wall >= s.last_sleep_imminent_notif + 60
-                    {
-                        s.last_sleep_imminent_notif = now_wall;
+                if now_wall % 60 == 0 {
+                    check_and_rotate_block_history();
+                }
+            }
+
+            // Phase 2.2: Notifications
+            if decision.trigger_grace_banner && !s.last_grace_active {
+                if s.config.notify_on_sleep_imminent && now_wall >= s.last_sleep_imminent_notif + 60
+                {
+                    s.last_sleep_imminent_notif = now_wall;
+                    send_notification(
+                        &s.config,
+                        &NotificationEvent::SleepImminent {
+                            countdown_secs: decision.countdown_secs,
+                        },
+                    );
+                }
+            }
+            s.last_grace_active = decision.trigger_grace_banner;
+
+            if decision.woke_from_sleep_reset {
+                if s.config.notify_on_pc_woke && now_wall >= s.last_pc_woke_notif + 60 {
+                    s.last_pc_woke_notif = now_wall;
+                    send_notification(&s.config, &NotificationEvent::PcWoke);
+                }
+            }
+
+            if let Some(start) = s.current_block_start_epoch_secs {
+                let blocked_secs = now_wall.saturating_sub(start);
+                let threshold_secs = (s.config.notify_blocked_long_hours as u64) * 3600;
+                if blocked_secs >= threshold_secs && now_wall >= s.last_blocked_long_notif + 3600 {
+                    if s.config.notify_on_blocked_long {
+                        s.last_blocked_long_notif = now_wall;
+                        let blocker_name = s
+                            .current_primary_blocker
+                            .clone()
+                            .unwrap_or_else(|| "Unknown Blocker".to_string());
                         send_notification(
                             &s.config,
-                            &NotificationEvent::SleepImminent {
-                                countdown_secs: decision.countdown_secs,
+                            &NotificationEvent::BlockedLong {
+                                hours: s.config.notify_blocked_long_hours,
+                                blocker: blocker_name,
                             },
                         );
                     }
                 }
-                s.last_grace_active = decision.trigger_grace_banner;
-
-                if decision.woke_from_sleep_reset {
-                    if s.config.notify_on_pc_woke && now_wall >= s.last_pc_woke_notif + 60 {
-                        s.last_pc_woke_notif = now_wall;
-                        send_notification(&s.config, &NotificationEvent::PcWoke);
-                    }
-                }
-
-                if let Some(start) = s.current_block_start_epoch_secs {
-                    let blocked_secs = now_wall.saturating_sub(start);
-                    let threshold_secs = (s.config.notify_blocked_long_hours as u64) * 3600;
-                    if blocked_secs >= threshold_secs
-                        && now_wall >= s.last_blocked_long_notif + 3600
-                    {
-                        if s.config.notify_on_blocked_long {
-                            s.last_blocked_long_notif = now_wall;
-                            let blocker_name = s
-                                .current_primary_blocker
-                                .clone()
-                                .unwrap_or_else(|| "Unknown Blocker".to_string());
-                            send_notification(
-                                &s.config,
-                                &NotificationEvent::BlockedLong {
-                                    hours: s.config.notify_blocked_long_hours,
-                                    blocker: blocker_name,
-                                },
-                            );
-                        }
-                    }
-                }
-
-                if !s.config.guard_enabled {
-                    let paused_secs = now_wall.saturating_sub(s.guard_paused_since);
-                    let threshold_secs = (s.config.notify_guard_paused_hours as u64) * 3600;
-                    if paused_secs >= threshold_secs && now_wall >= s.last_guard_paused_notif + 3600
-                    {
-                        if s.config.notify_on_guard_paused_long {
-                            s.last_guard_paused_notif = now_wall;
-                            send_notification(
-                                &s.config,
-                                &NotificationEvent::GuardPausedLong {
-                                    hours: s.config.notify_guard_paused_hours,
-                                },
-                            );
-                        }
-                    }
-                } else {
-                    s.guard_paused_since = now_wall;
-                }
-
-                // Phase 2.3: Opt-in Update Check
-                if s.config.check_for_updates
-                    && now_wall >= s.config.last_update_check_epoch_secs + 86400
-                {
-                    s.config.last_update_check_epoch_secs = now_wall;
-                    s.config_dirty = true;
-                    trigger_update_check(state.clone());
-                }
-
-                // Auto-save configuration if dirty
-                if s.config_dirty {
-                    s.config_dirty = false;
-                    s.config.save();
-                }
-            } // unlock state
-
-            // Execute sleep outside of mutex lock
-            if trigger_sleep {
-                let ok = sleep_now();
-                let mut s = state.lock().unwrap();
-                if ok {
-                    let idle_dur = s.config.idle_threshold_secs as u64;
-                    s.log_energy_event("sleep", idle_dur);
-                } else {
-                    s.set_toast("Sleep trigger returned false (ensure Administrator elevation).");
-                }
             }
 
-            egui_ctx.request_repaint();
+            if !s.config.guard_enabled {
+                let paused_secs = now_wall.saturating_sub(s.guard_paused_since);
+                let threshold_secs = (s.config.notify_guard_paused_hours as u64) * 3600;
+                if paused_secs >= threshold_secs && now_wall >= s.last_guard_paused_notif + 3600 {
+                    if s.config.notify_on_guard_paused_long {
+                        s.last_guard_paused_notif = now_wall;
+                        send_notification(
+                            &s.config,
+                            &NotificationEvent::GuardPausedLong {
+                                hours: s.config.notify_guard_paused_hours,
+                            },
+                        );
+                    }
+                }
+            } else {
+                s.guard_paused_since = now_wall;
+            }
 
-            let elapsed = loop_start.elapsed();
-            if elapsed < Duration::from_secs(1) {
-                std::thread::sleep(Duration::from_secs(1) - elapsed);
+            // Phase 2.3: Opt-in Update Check
+            if s.config.check_for_updates
+                && now_wall >= s.config.last_update_check_epoch_secs + 86400
+            {
+                s.config.last_update_check_epoch_secs = now_wall;
+                s.config_dirty = true;
+                trigger_update_check(state.clone());
+            }
+
+            // Auto-save configuration if dirty
+            if s.config_dirty {
+                s.config_dirty = false;
+                s.config.save();
+            }
+        } // unlock state
+
+        // Execute sleep outside of mutex lock
+        if trigger_sleep {
+            let ok = sleep_now();
+            let mut s = state.lock().unwrap();
+            if ok {
+                let idle_dur = s.config.idle_threshold_secs as u64;
+                s.log_energy_event("sleep", idle_dur);
+            } else {
+                s.set_toast("Sleep trigger returned false (ensure Administrator elevation).");
             }
         }
-    });
+
+        if let Some(ctx) = &egui_ctx {
+            ctx.request_repaint();
+        }
+
+        let elapsed = loop_start.elapsed();
+        if elapsed < Duration::from_secs(1) {
+            std::thread::sleep(Duration::from_secs(1) - elapsed);
+        }
+    }
+}
+
+// ----------------------------------------------------------------------------
+// Phase 5.1 & 5.4: Background Daemon, Service Management & Wake Relay
+// ----------------------------------------------------------------------------
+
+pub fn run_headless_daemon() {
+    println!("==================================================");
+    println!("   AGENT POWER GUARD - BACKGROUND WATCHDOG DAEMON ");
+    println!("==================================================");
+    let config = AppConfig::load();
+    if config.run_at_startup {
+        set_startup_task(true);
+    }
+    let state = Arc::new(Mutex::new(SharedState::new(config)));
+    let rate_limiter = Arc::new(RateLimiter::new());
+
+    let port = 49281;
+    start_web_server(Arc::clone(&state), port, rate_limiter);
+    let token = get_or_create_api_token();
+    println!("Watchdog daemon active.");
+    println!("REST API listening on: http://0.0.0.0:{}", port);
+    println!("API Token: {}", token);
+    println!("Press Ctrl+C to terminate daemon.");
+    println!("==================================================");
+
+    run_watchdog_loop(state, None);
+}
+
+pub fn install_service() {
+    #[cfg(windows)]
+    {
+        if let Ok(exe_path) = std::env::current_exe() {
+            let exe_str = exe_path.to_string_lossy().to_string();
+            let status = Command::new("schtasks.exe")
+                .args([
+                    "/create",
+                    "/tn",
+                    "AgentPowerGuardService",
+                    "/tr",
+                    &format!("\"{}\" daemon", exe_str),
+                    "/sc",
+                    "onlogon",
+                    "/rl",
+                    "highest",
+                    "/f",
+                ])
+                .status();
+            match status {
+                Ok(s) if s.success() => {
+                    println!("Successfully installed Agent Power Guard background service task ('AgentPowerGuardService').");
+                    println!("The watchdog daemon will now start automatically at logon with zero elevation prompts.");
+                }
+                Ok(s) => eprintln!("schtasks exited with code: {:?}", s.code()),
+                Err(e) => eprintln!("Failed to invoke schtasks.exe: {}", e),
+            }
+        }
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+        let unit_dir = PathBuf::from(&home).join(".config/systemd/user");
+        let _ = std::fs::create_dir_all(&unit_dir);
+        let unit_file = unit_dir.join("agent-power-guard.service");
+        let exe = std::env::current_exe()
+            .unwrap_or_else(|_| PathBuf::from("/usr/local/bin/agent-power-guard"));
+        let unit_content = format!(
+            "[Unit]\nDescription=Agent Power Guard Watchdog Service\nAfter=network.target\n\n[Service]\nType=simple\nExecStart={} daemon\nRestart=on-failure\nRestartSec=5s\n\n[Install]\nWantedBy=default.target\n",
+            exe.to_string_lossy()
+        );
+        if std::fs::write(&unit_file, unit_content).is_ok() {
+            let _ = Command::new("systemctl")
+                .args(["--user", "daemon-reload"])
+                .status();
+            let _ = Command::new("systemctl")
+                .args(["--user", "enable", "--now", "agent-power-guard"])
+                .status();
+            println!(
+                "Successfully installed and enabled systemd user service: {}",
+                unit_file.display()
+            );
+        }
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+        let launch_dir = PathBuf::from(&home).join("Library/LaunchAgents");
+        let _ = std::fs::create_dir_all(&launch_dir);
+        let plist_file = launch_dir.join("com.agentpowerguard.watchdog.plist");
+        let exe = std::env::current_exe()
+            .unwrap_or_else(|_| PathBuf::from("/usr/local/bin/agent-power-guard"));
+        let plist_content = format!(
+            "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n<plist version=\"1.0\">\n<dict>\n    <key>Label</key>\n    <string>com.agentpowerguard.watchdog</string>\n    <key>ProgramArguments</key>\n    <array>\n        <string>{}</string>\n        <string>daemon</string>\n    </array>\n    <key>KeepAlive</key>\n    <true/>\n    <key>RunAtLoad</key>\n    <true/>\n</dict>\n</plist>\n",
+            exe.to_string_lossy()
+        );
+        if std::fs::write(&plist_file, plist_content).is_ok() {
+            let _ = Command::new("launchctl")
+                .args(["load", &plist_file.to_string_lossy()])
+                .status();
+            println!(
+                "Successfully installed and loaded launchd agent: {}",
+                plist_file.display()
+            );
+        }
+    }
+}
+
+pub fn uninstall_service() {
+    #[cfg(windows)]
+    {
+        let status = Command::new("schtasks.exe")
+            .args(["/delete", "/tn", "AgentPowerGuardService", "/f"])
+            .status();
+        match status {
+            Ok(s) if s.success() => {
+                println!("Successfully uninstalled Agent Power Guard background service task.");
+            }
+            Ok(s) => eprintln!("schtasks exited with code: {:?}", s.code()),
+            Err(e) => eprintln!("Failed to invoke schtasks.exe: {}", e),
+        }
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let _ = Command::new("systemctl")
+            .args(["--user", "disable", "--now", "agent-power-guard"])
+            .status();
+        let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+        let unit_file = PathBuf::from(&home).join(".config/systemd/user/agent-power-guard.service");
+        let _ = std::fs::remove_file(unit_file);
+        let _ = Command::new("systemctl")
+            .args(["--user", "daemon-reload"])
+            .status();
+        println!("Successfully uninstalled systemd user service.");
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+        let plist_file =
+            PathBuf::from(&home).join("Library/LaunchAgents/com.agentpowerguard.watchdog.plist");
+        let _ = Command::new("launchctl")
+            .args(["unload", &plist_file.to_string_lossy()])
+            .status();
+        let _ = std::fs::remove_file(plist_file);
+        println!("Successfully uninstalled launchd agent.");
+    }
+}
+
+pub fn service_status() {
+    match send_cli_request("/api/status") {
+        Ok(_) => {
+            println!("Agent Power Guard Background Watchdog: ACTIVE (Running on port 49281)");
+        }
+        Err(_) => {
+            println!("Agent Power Guard Background Watchdog: STOPPED / NOT RUNNING");
+        }
+    }
+}
+
+pub fn run_wake_relay(port: u16, custom_token: Option<String>) {
+    let auth_token = custom_token.unwrap_or_else(get_or_create_api_token);
+    let addr = format!("0.0.0.0:{}", port);
+    println!("==================================================");
+    println!("        AGENT POWER GUARD - WAKE RELAY            ");
+    println!("==================================================");
+    println!("Relay listening on : http://{}", addr);
+    println!("Auth Token         : {}", auth_token);
+    println!("Ready to forward Wake-on-LAN packets on LAN.");
+    println!("Endpoints:");
+    println!("  GET  /relay/status");
+    println!("  POST /relay/wake?mac=<mac>&bcast=<bcast_ip>");
+    println!("==================================================");
+
+    let listener = match TcpListener::bind(&addr) {
+        Ok(l) => l,
+        Err(e) => {
+            eprintln!("Failed to bind relay on {}: {}", addr, e);
+            return;
+        }
+    };
+
+    let start_time = Instant::now();
+    for stream in listener.incoming().flatten() {
+        let auth_token = auth_token.clone();
+        std::thread::spawn(move || {
+            handle_relay_client(stream, &auth_token, start_time);
+        });
+    }
+}
+
+fn handle_relay_client(mut stream: TcpStream, expected_token: &str, start_time: Instant) {
+    let mut buffer = [0u8; 4096];
+    let bytes_read = match stream.read(&mut buffer) {
+        Ok(n) if n > 0 => n,
+        _ => return,
+    };
+    let req_str = String::from_utf8_lossy(&buffer[..bytes_read]);
+    let first_line = req_str.lines().next().unwrap_or("");
+    let parts: Vec<&str> = first_line.split_whitespace().collect();
+    if parts.len() < 2 {
+        return;
+    }
+    let method = parts[0];
+    let path = parts[1];
+
+    if method == "OPTIONS" {
+        let resp = "HTTP/1.1 204 No Content\r\nAccess-Control-Allow-Origin: *\r\nAccess-Control-Allow-Methods: GET, POST, OPTIONS\r\nAccess-Control-Allow-Headers: Authorization, Content-Type\r\nConnection: close\r\n\r\n";
+        let _ = stream.write_all(resp.as_bytes());
+        return;
+    }
+
+    if path == "/relay/status" {
+        let body = serde_json::to_string(&serde_json::json!({
+            "status": "ok",
+            "role": "wake_relay",
+            "uptime_secs": start_time.elapsed().as_secs(),
+        }))
+        .unwrap_or_default();
+        let resp = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            body.len(),
+            body
+        );
+        let _ = stream.write_all(resp.as_bytes());
+        return;
+    }
+
+    if path.starts_with("/relay/wake") {
+        let auth_header = req_str
+            .lines()
+            .find(|line| line.to_lowercase().starts_with("authorization:"))
+            .and_then(|line| line.split(':').nth(1))
+            .map(|val| val.trim())
+            .unwrap_or("");
+        let query_token = parse_query_param(path, "token").unwrap_or_default();
+        let is_authed = if auth_header.starts_with("Bearer ") {
+            constant_time_eq(&auth_header[7..], expected_token)
+        } else if !query_token.is_empty() {
+            constant_time_eq(&query_token, expected_token)
+        } else {
+            false
+        };
+
+        if !is_authed {
+            let body = r#"{"error":"unauthorized"}"#;
+            let resp = format!(
+                "HTTP/1.1 401 Unauthorized\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            let _ = stream.write_all(resp.as_bytes());
+            return;
+        }
+
+        if let Some(mac) = parse_query_param(path, "mac") {
+            let bcast = parse_query_param(path, "bcast");
+            match send_wol_packet(&mac, bcast.as_deref()) {
+                Ok(()) => {
+                    let body = serde_json::to_string(&serde_json::json!({
+                        "status": "sent",
+                        "mac": mac,
+                        "broadcast": bcast.unwrap_or_else(|| "255.255.255.255".to_string()),
+                    }))
+                    .unwrap_or_default();
+                    let resp = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        body.len(),
+                        body
+                    );
+                    let _ = stream.write_all(resp.as_bytes());
+                    return;
+                }
+                Err(err) => {
+                    let body = serde_json::to_string(&serde_json::json!({
+                        "error": err,
+                    }))
+                    .unwrap_or_default();
+                    let resp = format!(
+                        "HTTP/1.1 400 Bad Request\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        body.len(),
+                        body
+                    );
+                    let _ = stream.write_all(resp.as_bytes());
+                    return;
+                }
+            }
+        }
+    }
+
+    let body = r#"{"error":"not_found"}"#;
+    let resp = format!("HTTP/1.1 404 Not Found\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", body.len(), body);
+    let _ = stream.write_all(resp.as_bytes());
 }
 
 // ----------------------------------------------------------------------------
@@ -4358,7 +4860,7 @@ impl AgentPowerGuardApp {
         start_web_server(Arc::clone(&state), 49281, rate_limiter);
 
         // Launch background watchdog thread
-        start_watchdog_thread(Arc::clone(&state), cc.egui_ctx.clone());
+        start_watchdog_thread(Arc::clone(&state), Some(cc.egui_ctx.clone()));
 
         Self {
             state,
@@ -6879,5 +7381,47 @@ mod tests {
         assert!(ignored_keywords.iter().any(|k| proc1.contains(k)));
         assert!(!ignored_keywords.iter().any(|k| proc2.contains(k)));
         assert!(ignored_keywords.iter().any(|k| proc3.contains(k)));
+    }
+
+    #[test]
+    fn test_peer_machine_serialization() {
+        let mut cfg = make_test_config();
+        assert!(cfg.peers.is_empty());
+        cfg.peers.push(PeerMachine {
+            id: "server-1".to_string(),
+            name: "Home Server".to_string(),
+            url: "http://192.168.1.100:49281".to_string(),
+            token: "0123456789abcdef".to_string(),
+            permission: "control".to_string(),
+            mac: Some("00:11:22:33:44:55".to_string()),
+        });
+
+        let json = serde_json::to_string(&cfg).expect("Config with peers should serialize");
+        let deserialized: AppConfig =
+            serde_json::from_str(&json).expect("Config should deserialize");
+        assert_eq!(deserialized.peers.len(), 1);
+        assert_eq!(deserialized.peers[0].name, "Home Server");
+        assert_eq!(deserialized.peers[0].permission, "control");
+        assert_eq!(
+            deserialized.peers[0].mac.as_deref(),
+            Some("00:11:22:33:44:55")
+        );
+    }
+
+    #[test]
+    fn test_wayland_dbus_idle_parsing() {
+        let sample_dbus_reply = "method return time=1700000000.123 sender=:1.45 -> destination=:1.99\n   uint32 185000\n";
+        let mut parsed_idle_secs = 0u32;
+        for line in sample_dbus_reply.lines() {
+            let trimmed = line.trim();
+            if trimmed.starts_with("uint32") {
+                if let Some(val_str) = trimmed.strip_prefix("uint32") {
+                    if let Ok(ms) = val_str.trim().parse::<u64>() {
+                        parsed_idle_secs = (ms / 1000) as u32;
+                    }
+                }
+            }
+        }
+        assert_eq!(parsed_idle_secs, 185);
     }
 }

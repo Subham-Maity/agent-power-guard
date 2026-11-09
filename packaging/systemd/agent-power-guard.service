@@ -1,0 +1,13 @@
+[Unit]
+Description=Agent Power Guard Watchdog Service
+Documentation=https://github.com/Subham-Maity/agent-power-guard
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/agent-power-guard daemon
+Restart=on-failure
+RestartSec=5s
+
+[Install]
+WantedBy=default.target

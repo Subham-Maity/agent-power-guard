@@ -78,7 +78,7 @@ jobs:
       - name: Build Release Binary
         run: cargo build --release --target x86_64-unknown-linux-gnu
 
-      - name: Package Linux Binary (.tar.gz)
+      - name: Package Linux Binary (.tar.gz and .deb)
         run: |
           mkdir -p dist/agent-power-guard
           cp target/x86_64-unknown-linux-gnu/release/agent-power-guard dist/agent-power-guard/
@@ -86,6 +86,8 @@ jobs:
           cd dist
           tar -czvf agent-power-guard-linux-x86_64.tar.gz agent-power-guard/
           rm -rf agent-power-guard
+          cd ..
+          bash packaging/build-deb.sh
 
       - name: Upload Linux Artifacts
         uses: actions/upload-artifact@v4
@@ -110,11 +112,12 @@ jobs:
       - name: Build Release (Intel x86_64)
         run: cargo build --release --target x86_64-apple-darwin
 
-      - name: Package macOS Binaries (.tar.gz)
+      - name: Package macOS Binaries (.tar.gz and universal .app)
         run: |
           mkdir -p dist
           tar -czvf dist/agent-power-guard-macos-aarch64.tar.gz -C target/aarch64-apple-darwin/release agent-power-guard
           tar -czvf dist/agent-power-guard-macos-x86_64.tar.gz -C target/x86_64-apple-darwin/release agent-power-guard
+          bash packaging/build-macos-app.sh
 
       - name: Upload macOS Artifacts
         uses: actions/upload-artifact@v4

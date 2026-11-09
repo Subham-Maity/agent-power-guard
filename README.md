@@ -220,6 +220,12 @@ agent-power-guard release                             # release immediately
 agent-power-guard status                              # current state as JSON
 agent-power-guard postpone 15                         # delay sleep by 15 minutes
 agent-power-guard sleep                               # suspend now
+agent-power-guard wol 00:11:22:33:44:55               # send Wake-on-LAN magic packet
+agent-power-guard daemon                              # run headless watchdog service (no GUI)
+agent-power-guard service install                     # register background autostart service/task
+agent-power-guard service uninstall                   # unregister background service
+agent-power-guard service status                      # inspect background service status
+agent-power-guard relay 49282                         # launch Wake-on-LAN micro-relay server
 ```
 
 ### 5. HTTP API & Security
@@ -250,6 +256,10 @@ The app serves a local API on port `49281`. By default, it binds exclusively to 
 | `/api/history/clear` | POST | | Clear block-reason history |
 | `/api/ignore/add` | POST | `process=<name>` | Add a process keyword to the ignore list |
 | `/api/ignore/remove` | POST | `process=<name>` | Remove a process keyword from the ignore list |
+| `/api/peers` | GET | | Retrieve configured multi-machine fleet peers |
+| `/api/peers/add` | POST | `name=&url=&token=&permission=&mac=` | Add or update a fleet peer machine |
+| `/api/peers/remove` | POST | `id=<peer_id>` | Remove a fleet peer machine |
+| `/api/wol` | POST | `mac=&bcast=` | Broadcast Wake-on-LAN magic packet |
 | `/api/notify/test` | POST | | Send a test notification across configured channels |
 | `/api/energy/clear` | POST | | Clear energy history |
 
@@ -321,13 +331,51 @@ The built-in web server exposes a responsive, mobile-first dashboard designed fo
 - Processes matching agent keywords are clearly badged.
 - Tap **+ Ignore** next to any false-positive process (e.g. system indexing, background backup tools) to immediately append it to the ignore list and unblock sleep with zero restarts needed.
 
-### 5. Remote Wake-on-LAN (WoL)
+### 5. Multi-Machine Fleet Dashboard
+Monitor and control multiple workstations, headless servers, and laptops simultaneously from a single browser page:
+- Switch to the **Multi-Machine Fleet** tab to view all configured peer nodes.
+- Peer nodes can be configured with **Control** permissions (triggering sleep, leases, postpone) or **View-Only** (observation).
+- Live cards update every 3 seconds with state badges (`ARMED`, `BLOCKED`, `PAUSED`, `OFFLINE`), countdown timers, agent blockers, and CPU/GPU metrics.
+- 1-click **Wake-on-LAN** button wakes sleeping peer nodes directly from the fleet interface.
+
+### 6. Remote Wake-on-LAN (WoL)
 A sleeping PC cannot serve web traffic. To wake your workstation remotely:
 - Send a magic packet from any client or another machine on the LAN using the built-in CLI:
   ```bash
   agent-power-guard wol 00:11:22:33:44:55 192.168.1.255
   ```
 - For waking your workstation from outside your home network (via Tailscale, VPN, or a Raspberry Pi subnet router), follow the comprehensive guide in [`docs/remote-wake.md`](docs/remote-wake.md).
+
+## Platform, Background Service & Native Packaging
+
+### 1. Headless Background Service & UI Split
+- Run the watchdog headlessly without elevation prompts or desktop UI windows:
+  ```bash
+  agent-power-guard daemon
+  ```
+- Install or remove the system background service cleanly:
+  ```bash
+  agent-power-guard service install     # Windows Scheduled Task / Linux systemd / macOS launchd
+  agent-power-guard service uninstall   # Cleanly unregisters service
+  agent-power-guard service status      # Check if watchdog daemon is active
+  ```
+- When running in service mode, closing the GUI does not stop the watchdog; power protection persists uninterrupted across logoff and window close.
+
+### 2. Native Linux & Wayland Support
+- **Wayland-friendly idle detection:** Automatically queries `org.freedesktop.ScreenSaver` via D-Bus and `systemd-logind` session hints under GNOME, KDE Plasma, and wlroots, falling back gracefully to `xprintidle` under X11.
+- **Systemd User Unit:** `packaging/systemd/agent-power-guard.service` for seamless user-session management (`systemctl --user enable --now agent-power-guard`).
+- **Debian/Ubuntu Packaging:** Native `.deb` builder script (`packaging/build-deb.sh`) containing binaries, XDG desktop entries, icons, and systemd units.
+
+### 3. Native macOS Packaging
+- **LaunchAgent:** `packaging/launchd/com.agentpowerguard.watchdog.plist` for launchd autostart.
+- **Application Bundle & Universal Binary:** `packaging/build-macos-app.sh` bundles an `Agent Power Guard.app` with universal binaries (`lipo` merging Apple Silicon `aarch64` and Intel `x86_64`).
+
+### 4. Dedicated Wake Relay Microserver
+- Turn a lightweight Raspberry Pi, NAS, or router into an authenticated Wake-on-LAN relay:
+  ```bash
+  agent-power-guard relay 49282
+  ```
+- Serves `GET /relay/status` and token-protected `POST /relay/wake?mac=XX:XX:XX:XX:XX:XX&bcast=...` to broadcast magic packets onto the home LAN from outside your network. Memory footprint is under 3 MB RAM.
 
 ## Energy tracking
 
