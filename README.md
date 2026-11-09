@@ -1,5 +1,7 @@
 # Agent Power Guard
 
+<img width="1069" height="1149" alt="image" src="https://github.com/user-attachments/assets/8d286957-530a-43a6-90ae-dbd3d4641a6c" />
+
 A small native utility that puts your PC to sleep only when **you and your background AI coding agents are both idle**.
 
 Written in Rust (`egui` + `glow`). Single executable, under 5 MB of RAM, no Electron, no WebView.
