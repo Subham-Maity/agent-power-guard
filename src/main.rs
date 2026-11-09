@@ -1177,6 +1177,10 @@ fn send_cli_request(path: &str) -> Result<String, String> {
 }
 
 fn handle_cli_command(args: &[String]) {
+    #[cfg(windows)]
+    unsafe {
+        windows_sys::Win32::System::Console::AttachConsole(0xFFFFFFFF);
+    }
     let cmd = args[1].to_lowercase();
     match cmd.as_str() {
         "lease" => {
