@@ -1,0 +1,37 @@
+[package]
+name = "agent-power-guard"
+version = "1.0.0"
+edition = "2021"
+rust-version = "1.95"
+description = "Native Windows watchdog that sleeps the PC only when you AND your coding agents are idle"
+
+[dependencies]
+# GUI: glow (OpenGL) backend only - no wgpu / DirectX 12 memory overhead
+eframe = { version = "0.37.0", default-features = false, features = ["glow", "default_fonts"] }
+egui_plot = "0.38.0"
+# System sampling: CPU, processes, per-volume disk I/O, network
+sysinfo = { version = "0.40.1", default-features = false, features = ["system", "disk", "network"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+windows-sys = { version = "0.61.2", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_System_Power",
+    "Win32_System_ProcessStatus",
+    "Win32_System_SystemInformation",
+    "Win32_System_Threading",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_WindowsAndMessaging",
+] }
+
+[build-dependencies]
+embed-manifest = "1.5.1"
+winres = "0.1"
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = true
+

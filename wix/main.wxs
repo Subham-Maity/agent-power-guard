@@ -1,0 +1,68 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
+    <Product Id="*"
+             Name="Agent Power Guard"
+             Language="1033"
+             Version="1.0.0.0"
+             Manufacturer="Agent Power Guard"
+             UpgradeCode="B5F375DF-8692-4217-A8C5-D206898F6E4D">
+        
+        <Package InstallerVersion="300"
+                 Compressed="yes"
+                 InstallScope="perMachine"
+                 Platform="x64"
+                 Description="Native Windows watchdog that sleeps the PC only when you AND your coding agents are idle." />
+
+        <MajorUpgrade DowngradeErrorMessage="A newer version of [ProductName] is already installed." />
+        <MediaTemplate EmbedCab="yes" />
+
+        <Icon Id="AppIcon.ico" SourceFile="assets\app.ico" />
+        <Property Id="ARPPRODUCTICON" Value="AppIcon.ico" />
+
+        <Directory Id="TARGETDIR" Name="SourceDir">
+            <Directory Id="ProgramFiles64Folder">
+                <Directory Id="INSTALLFOLDER" Name="AgentPowerGuard">
+                    <Component Id="MainExecutable" Guid="3E465D3C-4328-44A3-8833-255D508216A1" Win64="yes">
+                        <File Id="AgentPowerGuardExe"
+                              Source="$(var.SourceExe)"
+                              KeyPath="yes" />
+                    </Component>
+                </Directory>
+            </Directory>
+
+            <Directory Id="ProgramMenuFolder">
+                <Directory Id="ProgramMenuDir" Name="Agent Power Guard" />
+            </Directory>
+
+            <Directory Id="DesktopFolder" Name="Desktop" />
+        </Directory>
+
+        <DirectoryRef Id="TARGETDIR">
+            <Component Id="ApplicationShortcuts" Guid="A39E1129-87D2-4753-9BE5-475D27C31201">
+                <Shortcut Id="StartMenuShortcut"
+                          Directory="ProgramMenuDir"
+                          Name="Agent Power Guard"
+                          Target="[#AgentPowerGuardExe]"
+                          WorkingDirectory="INSTALLFOLDER"
+                          Icon="AppIcon.ico" />
+                <Shortcut Id="DesktopShortcut"
+                          Directory="DesktopFolder"
+                          Name="Agent Power Guard"
+                          Target="[#AgentPowerGuardExe]"
+                          WorkingDirectory="INSTALLFOLDER"
+                          Icon="AppIcon.ico" />
+                <RemoveFolder Id="CleanProgramMenuDir" Directory="ProgramMenuDir" On="uninstall" />
+                <RegistryValue Root="HKCU" Key="Software\AgentPowerGuard" Name="installed" Type="integer" Value="1" KeyPath="yes" />
+            </Component>
+        </DirectoryRef>
+
+        <Feature Id="MainApplication" Title="Agent Power Guard" Level="1">
+            <ComponentRef Id="MainExecutable" />
+            <ComponentRef Id="ApplicationShortcuts" />
+        </Feature>
+
+        <Property Id="WIXUI_INSTALLDIR" Value="INSTALLFOLDER" />
+        <UIRef Id="WixUI_InstallDir" />
+        <WixVariable Id="WixUILicenseRtf" Value="wix\license.rtf" />
+    </Product>
+</Wix>
