@@ -1119,9 +1119,27 @@ fn format_time_compact(secs: u32) -> String {
     }
 }
 
+fn load_tray_icon() -> tray_icon::Icon {
+    let ico_bytes = include_bytes!("../assets/app.ico");
+    if let Ok(img) = image::load_from_memory(ico_bytes) {
+        let rgba = img.into_rgba8();
+        let (w, h) = rgba.dimensions();
+        if let Ok(icon) = tray_icon::Icon::from_rgba(rgba.into_raw(), w, h) {
+            return icon;
+        }
+    }
+    let fallback = vec![16u8, 185u8, 129u8, 255u8].repeat(32 * 32);
+    tray_icon::Icon::from_rgba(fallback, 32, 32).unwrap()
+}
+
 pub struct AgentPowerGuardApp {
     state: Arc<Mutex<SharedState>>,
     was_minimized: bool,
+    tray_icon: Option<tray_icon::TrayIcon>,
+    tray_show_id: tray_icon::menu::MenuId,
+    tray_toggle_id: tray_icon::menu::MenuId,
+    tray_sleep_id: tray_icon::menu::MenuId,
+    tray_exit_id: tray_icon::menu::MenuId,
 }
 
 impl AgentPowerGuardApp {
@@ -1137,26 +1155,128 @@ impl AgentPowerGuardApp {
             egui::Visuals::light()
         });
 
+        // Initialize System Tray Icon
+        let (tray_icon, show_id, toggle_id, sleep_id, exit_id) = {
+            let icon = load_tray_icon();
+            let menu = tray_icon::menu::Menu::new();
+            let show_item = tray_icon::menu::MenuItem::new("Show Agent Power Guard", true, None);
+            let toggle_item = tray_icon::menu::MenuItem::new("Toggle Guard ON/OFF", true, None);
+            let sleep_item = tray_icon::menu::MenuItem::new("⚡ Test Sleep Now", true, None);
+            let exit_item = tray_icon::menu::MenuItem::new("Exit Agent Power Guard", true, None);
+
+            let _ = menu.append_items(&[
+                &show_item,
+                &toggle_item,
+                &sleep_item,
+                &exit_item,
+            ]);
+
+            let tray = tray_icon::TrayIconBuilder::new()
+                .with_menu(Box::new(menu))
+                .with_tooltip("Agent Power Guard")
+                .with_icon(icon)
+                .build();
+
+            (
+                tray.ok(),
+                show_item.id().clone(),
+                toggle_item.id().clone(),
+                sleep_item.id().clone(),
+                exit_item.id().clone(),
+            )
+        };
+
         // Launch background watchdog thread
         start_watchdog_thread(Arc::clone(&state), cc.egui_ctx.clone());
 
         Self {
             state,
             was_minimized: false,
+            tray_icon,
+            tray_show_id: show_id,
+            tray_toggle_id: toggle_id,
+            tray_sleep_id: sleep_id,
+            tray_exit_id: exit_id,
         }
     }
 }
 
 impl eframe::App for AgentPowerGuardApp {
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        // Architectural requirement 2: Working Set flush when minimized
+        // 1. Intercept Window Close [X]: Hide to System Tray instead of quitting!
+        if ctx.input(|i| i.viewport().close_requested()) {
+            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+            flush_working_set();
+            let mut s = self.state.lock().unwrap();
+            s.set_toast("Minimized to system tray. Watchdog still active in background.");
+        }
+
+        // 2. Handle Tray Icon Left-click or Double-click (Restore window)
+        while let Ok(event) = tray_icon::TrayIconEvent::receiver().try_recv() {
+            match event {
+                tray_icon::TrayIconEvent::Click {
+                    button: tray_icon::MouseButton::Left,
+                    button_state: tray_icon::MouseButtonState::Up,
+                    ..
+                }
+                | tray_icon::TrayIconEvent::DoubleClick {
+                    button: tray_icon::MouseButton::Left,
+                    ..
+                } => {
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+                }
+                _ => {}
+            }
+        }
+
+        // 3. Handle Tray Context Menu clicks
+        while let Ok(menu_event) = tray_icon::menu::MenuEvent::receiver().try_recv() {
+            if menu_event.id == self.tray_show_id {
+                ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+                ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+            } else if menu_event.id == self.tray_toggle_id {
+                let mut s = self.state.lock().unwrap();
+                s.config.guard_enabled = !s.config.guard_enabled;
+                s.config_dirty = true;
+                if s.config.guard_enabled {
+                    s.set_toast("Guard Enabled via Tray");
+                } else {
+                    s.set_toast("Guard Disabled via Tray");
+                }
+            } else if menu_event.id == self.tray_sleep_id {
+                sleep_now();
+            } else if menu_event.id == self.tray_exit_id {
+                std::process::exit(0);
+            }
+        }
+
+        // 4. Update Tray Tooltip dynamically
+        if let Some(tray) = &self.tray_icon {
+            let s = self.state.lock().unwrap();
+            let tooltip = if !s.config.guard_enabled {
+                "Agent Power Guard [PAUSED]".to_string()
+            } else if s.all_conditions_pass {
+                format!(
+                    "Agent Power Guard - Sleeping in {} / {}",
+                    format_time_compact(s.countdown_secs),
+                    format_time_compact(s.countdown_max)
+                )
+            } else {
+                format!("Agent Power Guard - {}", s.blocker_banner_text)
+            };
+            let _ = tray.set_tooltip(Some(&tooltip));
+        }
+
+        // 5. Memory trim when minimized or hidden
         let is_minimized = ctx.input(|i| i.viewport().minimized == Some(true));
         if is_minimized && !self.was_minimized {
             flush_working_set();
         }
         self.was_minimized = is_minimized;
 
-        // 1 Hz repaint cadence when idle
+        // 6. 1 Hz repaint cadence when idle
         ctx.request_repaint_after(Duration::from_millis(1000));
     }
 
@@ -1251,6 +1371,13 @@ impl eframe::App for AgentPowerGuardApp {
                 if ui.button("🧹 Clean v3").clicked() {
                     remove_old_v3_scheduled_task();
                     s.set_toast("Unregistered legacy AgentPowerGuard task and removed ProgramData.");
+                }
+
+                // Minimize to Tray Button
+                if ui.button("📥 Tray").clicked() {
+                    ui.ctx().send_viewport_cmd(egui::ViewportCommand::Visible(false));
+                    flush_working_set();
+                    s.set_toast("Minimized to system tray. Watchdog still active in background.");
                 }
 
                 // Theme Toggle
