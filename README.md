@@ -29,6 +29,9 @@ Agent Power Guard evaluates 11 independent conditions every second and only susp
 - **GPU awareness:** NVIDIA (NVML), Linux DRM and macOS IOAccelerator
 - **Meeting detection:** microphone and camera use by Zoom, Teams, Meet, Discord, Slack and OBS
 - **Pre-sleep grace period:** a 30-second warning with postpone and sleep-now actions
+- **Block-reason history:** "What kept my PC awake" timeline, overnight summary, top blockers ranking, and CSV/JSON export
+- **Alerts & webhooks:** ntfy, Telegram and custom webhook notifications on imminent sleep, stuck blockers, or completed leases
+- **Opt-in update check:** daily check for new GitHub releases with zero telemetry
 - **Remote dashboard:** control and monitor the machine from a phone or another computer on your network, with Wake-on-LAN details
 - **Energy tracking:** estimated kWh, cost and CO2 avoided, stored locally
 - **Live graphs:** agent CPU, whole-PC CPU, disk, network and GPU over a rolling 120-second window
@@ -239,6 +242,9 @@ The app serves a local API on port `49281`. By default, it binds exclusively to 
 | `/api/toggle_guard` | POST | | Turn the master guard on or off |
 | `/api/lease` | POST | `mins=30&reason=Build&pid=1234` | Grant a sleep lease (optionally PID-bound) |
 | `/api/release` | POST | | Clear all leases |
+| `/api/history` | GET | | Retrieve recent block-reason history records |
+| `/api/history/clear` | POST | | Clear block-reason history |
+| `/api/notify/test` | POST | | Send a test notification across configured channels |
 | `/api/energy/clear` | POST | | Clear energy history |
 
 Abridged `/api/status` response:
@@ -317,6 +323,46 @@ Estimates use configurable wattage and tariff values (defaults: 120 W active sys
 | macOS | `~/Library/Application Support/agent-power-guard/energy_history.json` |
 
 The file can be inspected, backed up or deleted without affecting the app. Nothing is sent anywhere.
+
+## Block-reason history ("What kept my PC awake")
+
+When your machine doesn't sleep as expected, the **Block History** tab provides an exact timeline of what prevented it:
+
+- **Top Blockers Leaderboard:** Ranks blocking processes and conditions by total cumulative hold duration (e.g. `Agent CPU: 2h 15m`, `Active Download: 45m`).
+- **"Last Night" Overnight Summary:** Focuses on the overnight 12-hour window, summarizing total blocked time, the dominant blocking process, and the exact timestamp sleep was reached.
+- **Event Timeline:** Inspect individual block events with start time, duration, primary condition, and other concurrent blockers.
+- **Data Export:** Export logs with one click to CSV or JSON, or clear history anytime.
+- **Bounded Storage & Rotation:** Stored locally in JSON Lines format (`block_history.jsonl`) with automatic size-based rotation (5 MB cap) and configurable retention days (default: 14 days).
+
+| OS | Location |
+|---|---|
+| Windows | `%APPDATA%\AgentPowerGuard\block_history.jsonl` |
+| Linux | `~/.config/agent-power-guard/block_history.jsonl` |
+| macOS | `~/Library/Application Support/agent-power-guard/block_history.jsonl` |
+
+## Alerts & notifications
+
+Stay informed about power events on your phone or desktop via the **Alerts & Updates** tab.
+
+### Supported Channels
+- **ntfy:** Real-time push notifications to [ntfy.sh](https://ntfy.sh) or self-hosted ntfy servers (optional authentication token supported).
+- **Telegram:** Push alerts to your private chat or team channel via Telegram Bot API (`bot_token` and `chat_id`).
+- **Generic Webhook:** HTTP POST JSON payload to Discord, Slack, Home Assistant, or custom automation servers.
+
+### Configurable Events
+- **Sleep Imminent:** 30-second pre-sleep warning when all conditions pass.
+- **Machine Blocked Long:** Alerts if a single condition or agent holds the PC awake for longer than $N$ hours (default: 2 hours).
+- **Lease Ended:** Notifies when an agent task or build lease concludes.
+- **PC Resumed:** Alerts when the system wakes up from sleep.
+- **Guard Paused Long:** Reminds you if master guard protection was left disabled for longer than $N$ hours.
+
+*Zero Telemetry Guarantee:* Off by default. Outbound requests are made only to the destinations you configure. Network calls run asynchronously in a dedicated worker thread, ensuring the 1 Hz watchdog loop is never delayed.
+
+## Opt-in software updates
+
+- **Private & Non-intrusive:** When enabled in **Alerts & Updates**, Agent Power Guard checks GitHub Releases once per 24 hours.
+- **No telemetry:** No machine identifiers, tracking cookies, or analytics are sent.
+- **Direct notifications:** If a newer release exists, a non-intrusive banner appears in the top navigation bar with a direct link to the release notes.
 
 ## Architecture
 

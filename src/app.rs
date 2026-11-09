@@ -98,6 +98,28 @@ pub struct AppConfig {
     pub web_server_port: u16,           // default 49281
     pub allow_lan_access: bool,         // default false (loopback only)
     pub ignored_processes: String,      // comma-separated ignore list
+
+    // Phase 2.1: Block History
+    pub block_history_enabled: bool,
+    pub block_history_retention_days: u32,
+
+    // Phase 2.2: Notifications
+    pub notify_ntfy_url: String,
+    pub notify_ntfy_token: String,
+    pub notify_telegram_token: String,
+    pub notify_telegram_chat_id: String,
+    pub notify_webhook_url: String,
+    pub notify_on_sleep_imminent: bool,
+    pub notify_on_blocked_long: bool,
+    pub notify_blocked_long_hours: u32,
+    pub notify_on_lease_ended: bool,
+    pub notify_on_pc_woke: bool,
+    pub notify_on_guard_paused_long: bool,
+    pub notify_guard_paused_hours: u32,
+
+    // Phase 2.3: Opt-in Update Check
+    pub check_for_updates: bool,
+    pub last_update_check_epoch_secs: u64,
 }
 
 impl Default for AppConfig {
@@ -140,6 +162,25 @@ impl Default for AppConfig {
             web_server_port: 49281,
             allow_lan_access: false,
             ignored_processes: "system, registry, smss, csrss, wininit, services, lsass, svchost, fontdrvhost, dwm".to_string(),
+
+            block_history_enabled: true,
+            block_history_retention_days: 14,
+
+            notify_ntfy_url: String::new(),
+            notify_ntfy_token: String::new(),
+            notify_telegram_token: String::new(),
+            notify_telegram_chat_id: String::new(),
+            notify_webhook_url: String::new(),
+            notify_on_sleep_imminent: true,
+            notify_on_blocked_long: true,
+            notify_blocked_long_hours: 2,
+            notify_on_lease_ended: true,
+            notify_on_pc_woke: false,
+            notify_on_guard_paused_long: false,
+            notify_guard_paused_hours: 2,
+
+            check_for_updates: false,
+            last_update_check_epoch_secs: 0,
         }
     }
 }
@@ -184,6 +225,10 @@ fn get_config_path() -> PathBuf {
 
 fn get_energy_history_path() -> PathBuf {
     get_config_path().parent().unwrap_or(&PathBuf::from(".")).join("energy_history.json")
+}
+
+fn get_block_history_path() -> PathBuf {
+    get_config_path().parent().unwrap_or(&PathBuf::from(".")).join("block_history.jsonl")
 }
 
 fn get_api_token_path() -> PathBuf {
@@ -369,8 +414,250 @@ impl AppConfig {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ActiveTab {
     Guard,
+    History,
     Energy,
+    Notifications,
     Remote,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BlockRecord {
+    pub start_epoch_secs: u64,
+    pub end_epoch_secs: u64,
+    pub duration_secs: u64,
+    pub primary_blocker: String,
+    pub all_blockers: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct TopBlockerStat {
+    pub name: String,
+    pub total_secs: u64,
+    pub count: usize,
+}
+
+pub fn calculate_top_blockers(history: &[BlockRecord]) -> Vec<TopBlockerStat> {
+    let mut map: std::collections::HashMap<String, (u64, usize)> = std::collections::HashMap::new();
+    for rec in history {
+        let entry = map.entry(rec.primary_blocker.clone()).or_insert((0, 0));
+        entry.0 += rec.duration_secs;
+        entry.1 += 1;
+    }
+    let mut list: Vec<TopBlockerStat> = map.into_iter().map(|(name, (total_secs, count))| {
+        TopBlockerStat { name, total_secs, count }
+    }).collect();
+    list.sort_by(|a, b| b.total_secs.cmp(&a.total_secs));
+    list
+}
+
+#[derive(Debug, Clone)]
+pub struct LastNightSummary {
+    pub total_blocked_secs: u64,
+    pub top_blocker: Option<String>,
+    pub event_count: usize,
+}
+
+pub fn calculate_last_night_summary(history: &[BlockRecord], now_epoch: u64) -> LastNightSummary {
+    let window_start = now_epoch.saturating_sub(12 * 3600);
+    let overnight_records: Vec<&BlockRecord> = history.iter()
+        .filter(|r| r.end_epoch_secs >= window_start)
+        .collect();
+
+    let total_secs: u64 = overnight_records.iter().map(|r| r.duration_secs).sum();
+    let mut map: std::collections::HashMap<String, u64> = std::collections::HashMap::new();
+    for r in &overnight_records {
+        *map.entry(r.primary_blocker.clone()).or_insert(0) += r.duration_secs;
+    }
+    let top_blocker = map.into_iter().max_by_key(|(_, secs)| *secs).map(|(name, _)| name);
+
+    LastNightSummary {
+        total_blocked_secs: total_secs,
+        top_blocker,
+        event_count: overnight_records.len(),
+    }
+}
+
+pub fn export_block_history_csv(history: &[BlockRecord]) -> String {
+    let mut csv = String::from("Start_Epoch,End_Epoch,Duration_Secs,Primary_Blocker,All_Blockers\n");
+    for r in history {
+        csv.push_str(&format!(
+            "{},{},{},\"{}\",\"{}\"\n",
+            r.start_epoch_secs,
+            r.end_epoch_secs,
+            r.duration_secs,
+            r.primary_blocker.replace('"', "\"\""),
+            r.all_blockers.join("; ").replace('"', "\"\""),
+        ));
+    }
+    csv
+}
+
+pub fn export_block_history_json(history: &[BlockRecord]) -> String {
+    serde_json::to_string_pretty(history).unwrap_or_else(|_| "[]".to_string())
+}
+
+pub fn format_human_duration(secs: u64) -> String {
+    if secs >= 3600 {
+        let h = secs / 3600;
+        let m = (secs % 3600) / 60;
+        format!("{}h {}m", h, m)
+    } else if secs >= 60 {
+        let m = secs / 60;
+        let s = secs % 60;
+        format!("{}m {}s", m, s)
+    } else {
+        format!("{}s", secs)
+    }
+}
+
+pub fn is_newer_version(remote: &str, current: &str) -> bool {
+    let parse_parts = |s: &str| -> Vec<u32> {
+        s.trim_start_matches('v')
+            .split('.')
+            .filter_map(|p| p.parse::<u32>().ok())
+            .collect()
+    };
+    let r = parse_parts(remote);
+    let c = parse_parts(current);
+    for i in 0..r.len().max(c.len()) {
+        let rv = r.get(i).copied().unwrap_or(0);
+        let cv = c.get(i).copied().unwrap_or(0);
+        if rv > cv {
+            return true;
+        } else if rv < cv {
+            return false;
+        }
+    }
+    false
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub enum NotificationEvent {
+    SleepImminent { countdown_secs: u32 },
+    BlockedLong { hours: u32, blocker: String },
+    LeaseEnded { reason: String },
+    PcWoke,
+    GuardPausedLong { hours: u32 },
+    TestMessage,
+}
+
+impl NotificationEvent {
+    pub fn title_and_message(&self) -> (String, String) {
+        match self {
+            NotificationEvent::SleepImminent { countdown_secs } => (
+                "Agent Power Guard: Sleep Imminent".to_string(),
+                format!("All conditions pass. PC will sleep in {} seconds.", countdown_secs),
+            ),
+            NotificationEvent::BlockedLong { hours, blocker } => (
+                "Agent Power Guard: Machine Blocked".to_string(),
+                format!("PC has been kept awake for > {} hours by: {}", hours, blocker),
+            ),
+            NotificationEvent::LeaseEnded { reason } => (
+                "Agent Power Guard: Lease Concluded".to_string(),
+                format!("Agent lease '{}' has concluded.", reason),
+            ),
+            NotificationEvent::PcWoke => (
+                "Agent Power Guard: System Resumed".to_string(),
+                "PC has resumed from sleep and monitoring is active.".to_string(),
+            ),
+            NotificationEvent::GuardPausedLong { hours } => (
+                "Agent Power Guard: Guard Paused".to_string(),
+                format!("Master guard toggle has been disabled for > {} hours.", hours),
+            ),
+            NotificationEvent::TestMessage => (
+                "Agent Power Guard: Test Alert".to_string(),
+                "This is a test notification from Agent Power Guard.".to_string(),
+            ),
+        }
+    }
+
+    pub fn event_name(&self) -> &'static str {
+        match self {
+            NotificationEvent::SleepImminent { .. } => "sleep_imminent",
+            NotificationEvent::BlockedLong { .. } => "blocked_long",
+            NotificationEvent::LeaseEnded { .. } => "lease_ended",
+            NotificationEvent::PcWoke => "pc_woke",
+            NotificationEvent::GuardPausedLong { .. } => "guard_paused_long",
+            NotificationEvent::TestMessage => "test",
+        }
+    }
+}
+
+pub fn send_notification(config: &AppConfig, event: &NotificationEvent) {
+    let ntfy_url = config.notify_ntfy_url.trim().to_string();
+    let ntfy_token = config.notify_ntfy_token.trim().to_string();
+    let tg_token = config.notify_telegram_token.trim().to_string();
+    let tg_chat = config.notify_telegram_chat_id.trim().to_string();
+    let webhook_url = config.notify_webhook_url.trim().to_string();
+
+    if ntfy_url.is_empty() && (tg_token.is_empty() || tg_chat.is_empty()) && webhook_url.is_empty() {
+        return;
+    }
+
+    let (title, message) = event.title_and_message();
+    let event_name = event.event_name().to_string();
+    let now_epoch = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
+
+    std::thread::spawn(move || {
+        // 1. ntfy
+        if !ntfy_url.is_empty() {
+            let mut cmd = Command::new("curl");
+            #[cfg(windows)]
+            cmd.creation_flags(CREATE_NO_WINDOW);
+            cmd.args(["-s", "--max-time", "10", "--connect-timeout", "5", "-X", "POST"]);
+            cmd.args(["-H", &format!("Title: {}", title)]);
+            if !ntfy_token.is_empty() {
+                cmd.args(["-H", &format!("Authorization: Bearer {}", ntfy_token)]);
+            }
+            cmd.args(["-d", &message, &ntfy_url]);
+            let _ = cmd.status();
+        }
+
+        // 2. Telegram
+        if !tg_token.is_empty() && !tg_chat.is_empty() {
+            let url = format!("https://api.telegram.org/bot{}/sendMessage", tg_token);
+            let mut cmd = Command::new("curl");
+            #[cfg(windows)]
+            cmd.creation_flags(CREATE_NO_WINDOW);
+            cmd.args(["-s", "--max-time", "10", "--connect-timeout", "5", "-X", "POST", &url]);
+            cmd.args(["-d", &format!("chat_id={}", tg_chat)]);
+            cmd.args(["--data-urlencode", &format!("text={}\n\n{}", title, message)]);
+            let _ = cmd.status();
+        }
+
+        // 3. Webhook
+        if !webhook_url.is_empty() {
+            let payload = serde_json::json!({
+                "event": event_name,
+                "title": title,
+                "message": message,
+                "timestamp": now_epoch,
+            });
+            let mut cmd = Command::new("curl");
+            #[cfg(windows)]
+            cmd.creation_flags(CREATE_NO_WINDOW);
+            cmd.args(["-s", "--max-time", "10", "--connect-timeout", "5", "-X", "POST", &webhook_url]);
+            cmd.args(["-H", "Content-Type: application/json"]);
+            cmd.args(["-d", &payload.to_string()]);
+            let _ = cmd.status();
+        }
+    });
+}
+
+pub fn check_and_rotate_block_history() {
+    let path = get_block_history_path();
+    if let Ok(metadata) = std::fs::metadata(&path) {
+        if metadata.len() > 5 * 1024 * 1024 {
+            if let Ok(content) = std::fs::read_to_string(&path) {
+                let lines: Vec<&str> = content.lines().collect();
+                if lines.len() > 1000 {
+                    let keep = &lines[lines.len() - 1000..];
+                    let new_content = keep.join("\n") + "\n";
+                    let _ = std::fs::write(&path, new_content);
+                }
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -939,6 +1226,26 @@ pub struct SharedState {
     pub active_tab: ActiveTab,
     pub monitor_standby_start: Option<Instant>,
 
+    // Phase 2.1: Block History
+    pub block_history: Vec<BlockRecord>,
+    pub current_block_start_epoch_secs: Option<u64>,
+    pub current_primary_blocker: Option<String>,
+    pub current_all_blockers: Vec<String>,
+
+    // Phase 2.2: Notifications State & Cooldowns
+    pub last_grace_active: bool,
+    pub last_sleep_imminent_notif: u64,
+    pub last_blocked_long_notif: u64,
+    pub last_lease_ended_notif: u64,
+    pub last_pc_woke_notif: u64,
+    pub last_guard_paused_notif: u64,
+    pub guard_paused_since: u64,
+
+    // Phase 2.3: Update Check
+    pub update_available: Option<String>,
+    pub update_check_in_progress: bool,
+    pub update_check_status_msg: Option<String>,
+
     // UI feedback toast/notification
     pub toast_message: Option<(String, Instant)>,
 }
@@ -1005,6 +1312,23 @@ impl SharedState {
             active_tab: ActiveTab::Guard,
             monitor_standby_start: None,
 
+            block_history: Vec::new(),
+            current_block_start_epoch_secs: None,
+            current_primary_blocker: None,
+            current_all_blockers: Vec::new(),
+
+            last_grace_active: false,
+            last_sleep_imminent_notif: 0,
+            last_blocked_long_notif: 0,
+            last_lease_ended_notif: 0,
+            last_pc_woke_notif: 0,
+            last_guard_paused_notif: 0,
+            guard_paused_since: SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs(),
+
+            update_available: None,
+            update_check_in_progress: false,
+            update_check_status_msg: None,
+
             toast_message: None,
         };
 
@@ -1017,6 +1341,7 @@ impl SharedState {
         }
 
         s.load_energy_history();
+        s.load_block_history();
         s
     }
 
@@ -1070,6 +1395,67 @@ impl SharedState {
 
         self.energy_history.push(record);
         self.save_energy_history();
+    }
+
+    pub fn load_block_history(&mut self) {
+        let path = get_block_history_path();
+        if let Ok(content) = std::fs::read_to_string(&path) {
+            let now_epoch = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
+            let retention_secs = (self.config.block_history_retention_days as u64) * 86400;
+            let mut list = Vec::new();
+            for line in content.lines() {
+                if let Ok(rec) = serde_json::from_str::<BlockRecord>(line) {
+                    if retention_secs == 0 || now_epoch.saturating_sub(rec.start_epoch_secs) <= retention_secs {
+                        list.push(rec);
+                    }
+                }
+            }
+            if list.len() > 2000 {
+                let excess = list.len() - 2000;
+                list.drain(0..excess);
+            }
+            self.block_history = list;
+        }
+    }
+
+    pub fn record_block_event(
+        &mut self,
+        start_epoch: u64,
+        end_epoch: u64,
+        duration_secs: u64,
+        primary_blocker: String,
+        all_blockers: Vec<String>,
+    ) {
+        if !self.config.block_history_enabled || duration_secs < 2 {
+            return;
+        }
+
+        let record = BlockRecord {
+            start_epoch_secs: start_epoch,
+            end_epoch_secs: end_epoch,
+            duration_secs,
+            primary_blocker,
+            all_blockers,
+        };
+
+        let path = get_block_history_path();
+        if let Ok(line) = serde_json::to_string(&record) {
+            use std::io::Write;
+            if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+                let _ = writeln!(f, "{}", line);
+            }
+        }
+
+        self.block_history.push(record);
+        if self.block_history.len() > 2000 {
+            self.block_history.remove(0);
+        }
+    }
+
+    pub fn clear_block_history(&mut self) {
+        self.block_history.clear();
+        let path = get_block_history_path();
+        let _ = std::fs::remove_file(path);
     }
 }
 
@@ -1843,6 +2229,36 @@ fn handle_http_client(mut stream: TcpStream, state: Arc<Mutex<SharedState>>, rat
         return;
     }
 
+    if path.starts_with("/api/history/clear") {
+        let mut s = state.lock().unwrap();
+        s.clear_block_history();
+        s.set_toast("Block reason history cleared via Remote/API.");
+        let body = r#"{"status":"ok","message":"Block reason history deleted"}"#;
+        let resp = format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", body.len(), body);
+        let _ = stream.write_all(resp.as_bytes());
+        return;
+    }
+
+    if path.starts_with("/api/history") {
+        let s = state.lock().unwrap();
+        let body = match serde_json::to_string(&s.block_history) {
+            Ok(json) => json,
+            Err(_) => "[]".to_string(),
+        };
+        let resp = format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", body.len(), body);
+        let _ = stream.write_all(resp.as_bytes());
+        return;
+    }
+
+    if path.starts_with("/api/notify/test") {
+        let s = state.lock().unwrap();
+        send_notification(&s.config, &NotificationEvent::TestMessage);
+        let body = r#"{"status":"ok","message":"Test notification dispatched"}"#;
+        let resp = format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", body.len(), body);
+        let _ = stream.write_all(resp.as_bytes());
+        return;
+    }
+
     let body = r#"{"error":"not_found"}"#;
     let resp = format!("HTTP/1.1 404 Not Found\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", body.len(), body);
     let _ = stream.write_all(resp.as_bytes());
@@ -2539,6 +2955,88 @@ pub fn start_watchdog_thread(state: Arc<Mutex<SharedState>>, egui_ctx: egui::Con
                     s.log_energy_event("monitor_off", dur);
                 }
 
+                // Phase 2.1: Block History Tracking
+                if s.config.block_history_enabled {
+                    let new_primary = decision.blockers.first().cloned();
+                    if new_primary != s.current_primary_blocker {
+                        if let Some(start) = s.current_block_start_epoch_secs {
+                            let duration = now_wall.saturating_sub(start);
+                            if duration >= 2 {
+                                if let Some(prev) = s.current_primary_blocker.take() {
+                                    let all = s.current_all_blockers.clone();
+                                    s.record_block_event(start, now_wall, duration, prev, all);
+                                }
+                            }
+                        }
+                        if let Some(b) = &new_primary {
+                            s.current_block_start_epoch_secs = Some(now_wall);
+                            s.current_primary_blocker = Some(b.clone());
+                            s.current_all_blockers = decision.blockers.clone();
+                        } else {
+                            s.current_block_start_epoch_secs = None;
+                            s.current_primary_blocker = None;
+                            s.current_all_blockers.clear();
+                        }
+                    }
+
+                    if now_wall % 60 == 0 {
+                        check_and_rotate_block_history();
+                    }
+                }
+
+                // Phase 2.2: Notifications
+                if decision.trigger_grace_banner && !s.last_grace_active {
+                    if s.config.notify_on_sleep_imminent && now_wall >= s.last_sleep_imminent_notif + 60 {
+                        s.last_sleep_imminent_notif = now_wall;
+                        send_notification(&s.config, &NotificationEvent::SleepImminent { countdown_secs: decision.countdown_secs });
+                    }
+                }
+                s.last_grace_active = decision.trigger_grace_banner;
+
+                if decision.woke_from_sleep_reset {
+                    if s.config.notify_on_pc_woke && now_wall >= s.last_pc_woke_notif + 60 {
+                        s.last_pc_woke_notif = now_wall;
+                        send_notification(&s.config, &NotificationEvent::PcWoke);
+                    }
+                }
+
+                if let Some(start) = s.current_block_start_epoch_secs {
+                    let blocked_secs = now_wall.saturating_sub(start);
+                    let threshold_secs = (s.config.notify_blocked_long_hours as u64) * 3600;
+                    if blocked_secs >= threshold_secs && now_wall >= s.last_blocked_long_notif + 3600 {
+                        if s.config.notify_on_blocked_long {
+                            s.last_blocked_long_notif = now_wall;
+                            let blocker_name = s.current_primary_blocker.clone().unwrap_or_else(|| "Unknown Blocker".to_string());
+                            send_notification(&s.config, &NotificationEvent::BlockedLong {
+                                hours: s.config.notify_blocked_long_hours,
+                                blocker: blocker_name,
+                            });
+                        }
+                    }
+                }
+
+                if !s.config.guard_enabled {
+                    let paused_secs = now_wall.saturating_sub(s.guard_paused_since);
+                    let threshold_secs = (s.config.notify_guard_paused_hours as u64) * 3600;
+                    if paused_secs >= threshold_secs && now_wall >= s.last_guard_paused_notif + 3600 {
+                        if s.config.notify_on_guard_paused_long {
+                            s.last_guard_paused_notif = now_wall;
+                            send_notification(&s.config, &NotificationEvent::GuardPausedLong {
+                                hours: s.config.notify_guard_paused_hours,
+                            });
+                        }
+                    }
+                } else {
+                    s.guard_paused_since = now_wall;
+                }
+
+                // Phase 2.3: Opt-in Update Check
+                if s.config.check_for_updates && now_wall >= s.config.last_update_check_epoch_secs + 86400 {
+                    s.config.last_update_check_epoch_secs = now_wall;
+                    s.config_dirty = true;
+                    trigger_update_check(state.clone());
+                }
+
                 // Auto-save configuration if dirty
                 if s.config_dirty {
                     s.config_dirty = false;
@@ -2571,6 +3069,69 @@ pub fn start_watchdog_thread(state: Arc<Mutex<SharedState>>, egui_ctx: egui::Con
 // ----------------------------------------------------------------------------
 // GUI Application Implementation
 // ----------------------------------------------------------------------------
+
+pub fn open_url(url: &str) {
+    #[cfg(windows)]
+    let _ = Command::new("cmd").args(["/c", "start", url]).creation_flags(CREATE_NO_WINDOW).status();
+    #[cfg(target_os = "linux")]
+    let _ = Command::new("xdg-open").arg(url).status();
+    #[cfg(target_os = "macos")]
+    let _ = Command::new("open").arg(url).status();
+}
+
+pub fn trigger_update_check(state: Arc<Mutex<SharedState>>) {
+    {
+        let mut s = state.lock().unwrap();
+        if s.update_check_in_progress {
+            return;
+        }
+        s.update_check_in_progress = true;
+        s.update_check_status_msg = Some("Checking GitHub Releases...".to_string());
+    }
+
+    std::thread::spawn(move || {
+        let mut cmd = Command::new("curl");
+        #[cfg(windows)]
+        cmd.creation_flags(CREATE_NO_WINDOW);
+        cmd.args([
+            "-s", "--max-time", "10", "--connect-timeout", "5",
+            "-H", &format!("User-Agent: AgentPowerGuard/{}", env!("CARGO_PKG_VERSION")),
+            "https://api.github.com/repos/Subham-Maity/agent-power-guard/releases/latest"
+        ]);
+
+        let res = cmd.output();
+        let mut s = state.lock().unwrap();
+        s.update_check_in_progress = false;
+
+        match res {
+            Ok(output) if output.status.success() => {
+                if let Ok(val) = serde_json::from_slice::<serde_json::Value>(&output.stdout) {
+                    if let Some(tag) = val["tag_name"].as_str() {
+                        let clean = tag.trim_start_matches('v');
+                        let current = env!("CARGO_PKG_VERSION");
+                        if is_newer_version(clean, current) {
+                            s.update_available = Some(tag.to_string());
+                            s.update_check_status_msg = Some(format!("New release available: {}", tag));
+                        } else {
+                            s.update_available = None;
+                            s.update_check_status_msg = Some(format!("Up to date (v{})", current));
+                        }
+                    } else {
+                        s.update_check_status_msg = Some("No release tag found.".to_string());
+                    }
+                } else {
+                    s.update_check_status_msg = Some("Failed to parse release response.".to_string());
+                }
+            }
+            Ok(_) => {
+                s.update_check_status_msg = Some("Update check received non-200 response.".to_string());
+            }
+            Err(e) => {
+                s.update_check_status_msg = Some(format!("Update check failed: {}", e));
+            }
+        }
+    });
+}
 
 fn format_time_compact(secs: u32) -> String {
     let m = secs / 60;
@@ -2871,11 +3432,30 @@ impl eframe::App for AgentPowerGuardApp {
 
             ui.add_space(4.0);
 
+            // Phase 2.3: Update Available Banner
+            if let Some(new_ver) = &s.update_available {
+                egui::Frame::new()
+                    .fill(egui::Color32::from_rgb(30, 58, 138))
+                    .corner_radius(6.0)
+                    .inner_margin(egui::Margin::symmetric(12, 6))
+                    .show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            ui.label(egui::RichText::new(format!("🚀 New release available: {} (Current: v{})", new_ver, env!("CARGO_PKG_VERSION"))).strong().color(egui::Color32::from_rgb(147, 197, 253)));
+                            if ui.button("View on GitHub").clicked() {
+                                open_url("https://github.com/Subham-Maity/agent-power-guard/releases");
+                            }
+                        });
+                    });
+                ui.add_space(4.0);
+            }
+
             // Tab Navigation Bar
             ui.horizontal(|ui| {
                 ui.selectable_value(&mut s.active_tab, ActiveTab::Guard, egui::RichText::new("🛡️ Watchdog & Presets").strong());
-                ui.selectable_value(&mut s.active_tab, ActiveTab::Energy, egui::RichText::new("💰 Energy & Cost Savings").strong());
-                ui.selectable_value(&mut s.active_tab, ActiveTab::Remote, egui::RichText::new("🌐 Web & Mobile Remote").strong());
+                ui.selectable_value(&mut s.active_tab, ActiveTab::History, egui::RichText::new("📜 Block History").strong());
+                ui.selectable_value(&mut s.active_tab, ActiveTab::Energy, egui::RichText::new("💰 Energy Savings").strong());
+                ui.selectable_value(&mut s.active_tab, ActiveTab::Notifications, egui::RichText::new("🔔 Alerts & Updates").strong());
+                ui.selectable_value(&mut s.active_tab, ActiveTab::Remote, egui::RichText::new("🌐 Remote").strong());
             });
 
             // Feature 4: Grace Period Imminent Sleep Alert Banner
@@ -3333,7 +3913,143 @@ impl eframe::App for AgentPowerGuardApp {
         }
 
         // ====================================================================
-        // TAB 2: ENERGY & COST SAVINGS DASHBOARD VIEW
+        // TAB 2: BLOCK HISTORY ("WHAT KEPT MY PC AWAKE") VIEW
+        // ====================================================================
+        else if s.active_tab == ActiveTab::History {
+            egui::CentralPanel::default_margins().show(ui, |ui| {
+                ui.add_space(4.0);
+                ui.horizontal(|ui| {
+                    ui.heading("📜 What Kept My PC Awake (Block History)");
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui.button("🗑️ Clear History").clicked() {
+                            s.clear_block_history();
+                            s.set_toast("Block reason history cleared.");
+                        }
+                        if ui.button("📋 Copy CSV").clicked() {
+                            let csv = export_block_history_csv(&s.block_history);
+                            ui.ctx().copy_text(csv);
+                            s.set_toast("History CSV copied to clipboard.");
+                        }
+                        if ui.button("📋 Copy JSON").clicked() {
+                            let json = export_block_history_json(&s.block_history);
+                            ui.ctx().copy_text(json);
+                            s.set_toast("History JSON copied to clipboard.");
+                        }
+                    });
+                });
+
+                ui.add_space(6.0);
+                let now_epoch = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
+
+                // 1. Metric Summary Cards
+                let top_blockers = calculate_top_blockers(&s.block_history);
+                let total_blocked_secs: u64 = s.block_history.iter().map(|r| r.duration_secs).sum();
+                let last_night = calculate_last_night_summary(&s.block_history, now_epoch);
+
+                ui.horizontal(|ui| {
+                    // Card 1: Total Blocked Time
+                    egui::Frame::new().fill(egui::Color32::from_rgb(22, 29, 39)).corner_radius(8.0).inner_margin(egui::Margin::symmetric(14, 10)).show(ui, |ui| {
+                        ui.label(egui::RichText::new("⏱️ Total Blocked Time").weak().size(12.0));
+                        ui.label(egui::RichText::new(format_human_duration(total_blocked_secs)).strong().size(18.0).color(egui::Color32::from_rgb(245, 158, 11)));
+                    });
+
+                    // Card 2: Top Blocker Overall
+                    egui::Frame::new().fill(egui::Color32::from_rgb(22, 29, 39)).corner_radius(8.0).inner_margin(egui::Margin::symmetric(14, 10)).show(ui, |ui| {
+                        ui.label(egui::RichText::new("🛑 Top Blocker").weak().size(12.0));
+                        let top_name = top_blockers.first().map(|t| t.name.as_str()).unwrap_or("None");
+                        let top_time = top_blockers.first().map(|t| format_human_duration(t.total_secs)).unwrap_or_default();
+                        ui.label(egui::RichText::new(format!("{} ({})", top_name, top_time)).strong().size(14.0).color(egui::Color32::from_rgb(239, 68, 68)));
+                    });
+
+                    // Card 3: Last Night Summary
+                    egui::Frame::new().fill(egui::Color32::from_rgb(22, 29, 39)).corner_radius(8.0).inner_margin(egui::Margin::symmetric(14, 10)).show(ui, |ui| {
+                        ui.label(egui::RichText::new("🌙 Last Night (Past 12h)").weak().size(12.0));
+                        let top = last_night.top_blocker.unwrap_or_else(|| "All Quiet".to_string());
+                        ui.label(egui::RichText::new(format!("Blocked: {} | Top: {}", format_human_duration(last_night.total_blocked_secs), top)).strong().size(13.0).color(egui::Color32::from_rgb(147, 197, 253)));
+                    });
+                });
+
+                ui.add_space(8.0);
+
+                // Config Controls Row
+                ui.horizontal(|ui| {
+                    if ui.checkbox(&mut s.config.block_history_enabled, egui::RichText::new("Record Block History").strong()).changed() {
+                        s.config_dirty = true;
+                    }
+                    ui.separator();
+                    ui.label("Retention (Days):");
+                    if ui.add(egui::DragValue::new(&mut s.config.block_history_retention_days).range(1..=90)).changed() {
+                        s.config_dirty = true;
+                    }
+                    let storage_path = get_block_history_path();
+                    ui.separator();
+                    ui.label(egui::RichText::new(format!("File: {}", storage_path.display())).weak().size(11.0));
+                });
+
+                ui.add_space(8.0);
+
+                // Top Blockers Table
+                if !top_blockers.is_empty() {
+                    ui.label(egui::RichText::new("Top Blockers by Cumulative Hold Time:").strong());
+                    egui::Grid::new("top_blockers_grid").striped(true).min_col_width(120.0).show(ui, |ui| {
+                        ui.label(egui::RichText::new("Block Reason").strong());
+                        ui.label(egui::RichText::new("Cumulative Duration").strong());
+                        ui.label(egui::RichText::new("Occurrences").strong());
+                        ui.label(egui::RichText::new("% of Total").strong());
+                        ui.end_row();
+
+                        for b in top_blockers.iter().take(5) {
+                            ui.label(&b.name);
+                            ui.label(format_human_duration(b.total_secs));
+                            ui.label(b.count.to_string());
+                            let pct = if total_blocked_secs > 0 {
+                                (b.total_secs as f64 / total_blocked_secs as f64) * 100.0
+                            } else {
+                                0.0
+                            };
+                            ui.label(format!("{:.1}%", pct));
+                            ui.end_row();
+                        }
+                    });
+                    ui.add_space(10.0);
+                }
+
+                // Timeline Log
+                ui.label(egui::RichText::new("Event Timeline (Recent Block Intervals):").strong());
+                egui::ScrollArea::vertical().show(ui, |ui| {
+                    if s.block_history.is_empty() {
+                        ui.add_space(20.0);
+                        ui.vertical_centered(|ui| {
+                            ui.label(egui::RichText::new("No block events recorded yet. When a process, download, or sensor blocks automatic sleep, it will appear here.").weak());
+                        });
+                    } else {
+                        egui::Grid::new("block_history_timeline_grid").striped(true).min_col_width(100.0).show(ui, |ui| {
+                            ui.label(egui::RichText::new("Time").strong());
+                            ui.label(egui::RichText::new("Duration").strong());
+                            ui.label(egui::RichText::new("Primary Blocker").strong());
+                            ui.label(egui::RichText::new("Other Blockers").strong());
+                            ui.end_row();
+
+                            for r in s.block_history.iter().rev() {
+                                ui.label(format_epoch_local(r.start_epoch_secs));
+                                ui.label(format_human_duration(r.duration_secs));
+                                ui.label(egui::RichText::new(&r.primary_blocker).color(egui::Color32::from_rgb(245, 158, 11)));
+                                let others = if r.all_blockers.len() > 1 {
+                                    r.all_blockers[1..].join(", ")
+                                } else {
+                                    "-".to_string()
+                                };
+                                ui.label(others);
+                                ui.end_row();
+                            }
+                        });
+                    }
+                });
+            });
+        }
+
+        // ====================================================================
+        // TAB 3: ENERGY & COST SAVINGS DASHBOARD VIEW
         // ====================================================================
         else if s.active_tab == ActiveTab::Energy {
             egui::CentralPanel::default_margins().show(ui, |ui| {
@@ -3503,7 +4219,144 @@ impl eframe::App for AgentPowerGuardApp {
         }
 
         // ====================================================================
-        // TAB 3: WEB & MOBILE REMOTE VIEW
+        // TAB 4: ALERTS, NOTIFICATIONS & OPT-IN UPDATES VIEW
+        // ====================================================================
+        else if s.active_tab == ActiveTab::Notifications {
+            egui::CentralPanel::default_margins().show(ui, |ui| {
+                ui.add_space(4.0);
+                ui.horizontal(|ui| {
+                    ui.heading("🔔 Alerts, Webhooks & Opt-in Updates");
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui.button("🔔 Send Test Notification").clicked() {
+                            send_notification(&s.config, &NotificationEvent::TestMessage);
+                            s.set_toast("Test notification dispatched across configured channels.");
+                        }
+                    });
+                });
+
+                ui.add_space(6.0);
+                egui::Frame::new().fill(egui::Color32::from_rgb(22, 29, 39)).corner_radius(8.0).inner_margin(egui::Margin::symmetric(14, 10)).show(ui, |ui| {
+                    ui.label(egui::RichText::new("🔒 Privacy Guarantee: Outbound notifications and update checks are completely opt-in and off by default. Secrets and tokens are stored locally on your machine and never logged or sent to any telemetry service.").weak().size(12.0));
+                });
+
+                ui.add_space(10.0);
+
+                // Section 1: Notification Channels
+                egui::Frame::new().fill(egui::Color32::from_rgb(22, 29, 39)).corner_radius(8.0).inner_margin(egui::Margin::symmetric(14, 10)).show(ui, |ui| {
+                    ui.label(egui::RichText::new("📡 Outbound Channels").strong().size(14.0));
+                    ui.add_space(6.0);
+
+                    // 1. ntfy
+                    ui.horizontal(|ui| {
+                        ui.label(egui::RichText::new("ntfy URL:").strong().size(12.0));
+                        if ui.add(egui::TextEdit::singleline(&mut s.config.notify_ntfy_url).hint_text("https://ntfy.sh/your_private_topic")).changed() {
+                            s.config_dirty = true;
+                        }
+                    });
+                    ui.horizontal(|ui| {
+                        ui.label(egui::RichText::new("ntfy Token (optional):").size(12.0));
+                        if ui.add(egui::TextEdit::singleline(&mut s.config.notify_ntfy_token).password(true).hint_text("Bearer token if topic is protected")).changed() {
+                            s.config_dirty = true;
+                        }
+                    });
+
+                    ui.separator();
+
+                    // 2. Telegram
+                    ui.horizontal(|ui| {
+                        ui.label(egui::RichText::new("Telegram Bot Token:").strong().size(12.0));
+                        if ui.add(egui::TextEdit::singleline(&mut s.config.notify_telegram_token).password(true).hint_text("123456789:ABCdefGhIJKlmNoPQRsTUVwxyZ")).changed() {
+                            s.config_dirty = true;
+                        }
+                    });
+                    ui.horizontal(|ui| {
+                        ui.label(egui::RichText::new("Telegram Chat ID:").strong().size(12.0));
+                        if ui.add(egui::TextEdit::singleline(&mut s.config.notify_telegram_chat_id).hint_text("-100123456789 or user id")).changed() {
+                            s.config_dirty = true;
+                        }
+                    });
+
+                    ui.separator();
+
+                    // 3. Generic Webhook
+                    ui.horizontal(|ui| {
+                        ui.label(egui::RichText::new("Webhook URL (POST):").strong().size(12.0));
+                        if ui.add(egui::TextEdit::singleline(&mut s.config.notify_webhook_url).hint_text("https://discord.com/api/webhooks/... or custom server")).changed() {
+                            s.config_dirty = true;
+                        }
+                    });
+                });
+
+                ui.add_space(10.0);
+
+                // Section 2: Event Subscriptions
+                egui::Frame::new().fill(egui::Color32::from_rgb(22, 29, 39)).corner_radius(8.0).inner_margin(egui::Margin::symmetric(14, 10)).show(ui, |ui| {
+                    ui.label(egui::RichText::new("⚡ Trigger Events").strong().size(14.0));
+                    ui.add_space(6.0);
+
+                    if ui.checkbox(&mut s.config.notify_on_sleep_imminent, "Sleep Imminent (Grace period countdown reaches 30 seconds)").changed() {
+                        s.config_dirty = true;
+                    }
+
+                    ui.horizontal(|ui| {
+                        if ui.checkbox(&mut s.config.notify_on_blocked_long, "Machine Blocked for longer than:").changed() {
+                            s.config_dirty = true;
+                        }
+                        if ui.add(egui::DragValue::new(&mut s.config.notify_blocked_long_hours).range(1..=12)).changed() {
+                            s.config_dirty = true;
+                        }
+                        ui.label("hours");
+                    });
+
+                    if ui.checkbox(&mut s.config.notify_on_lease_ended, "Agent Lease Concluded / Expired").changed() {
+                        s.config_dirty = true;
+                    }
+
+                    if ui.checkbox(&mut s.config.notify_on_pc_woke, "System Resumed from Sleep").changed() {
+                        s.config_dirty = true;
+                    }
+
+                    ui.horizontal(|ui| {
+                        if ui.checkbox(&mut s.config.notify_on_guard_paused_long, "Master Guard Disabled for longer than:").changed() {
+                            s.config_dirty = true;
+                        }
+                        if ui.add(egui::DragValue::new(&mut s.config.notify_guard_paused_hours).range(1..=24)).changed() {
+                            s.config_dirty = true;
+                        }
+                        ui.label("hours");
+                    });
+                });
+
+                ui.add_space(10.0);
+
+                // Section 3: Opt-in Update Check
+                egui::Frame::new().fill(egui::Color32::from_rgb(22, 29, 39)).corner_radius(8.0).inner_margin(egui::Margin::symmetric(14, 10)).show(ui, |ui| {
+                    ui.label(egui::RichText::new("🚀 Software Updates").strong().size(14.0));
+                    ui.add_space(6.0);
+
+                    ui.horizontal(|ui| {
+                        if ui.checkbox(&mut s.config.check_for_updates, "Check for updates automatically (daily check via GitHub Releases API)").changed() {
+                            s.config_dirty = true;
+                        }
+
+                        if ui.button("🔍 Check Now").clicked() {
+                            let state_clone = self.state.clone();
+                            trigger_update_check(state_clone);
+                        }
+                    });
+
+                    ui.add_space(4.0);
+                    if let Some(msg) = &s.update_check_status_msg {
+                        ui.label(egui::RichText::new(format!("Update Status: {}", msg)).color(egui::Color32::from_rgb(147, 197, 253)));
+                    } else {
+                        ui.label(egui::RichText::new(format!("Current Version: v{}", env!("CARGO_PKG_VERSION"))).weak());
+                    }
+                });
+            });
+        }
+
+        // ====================================================================
+        // TAB 5: WEB & MOBILE REMOTE VIEW
         // ====================================================================
         else if s.active_tab == ActiveTab::Remote {
             egui::CentralPanel::default_margins().show(ui, |ui| {
@@ -4068,5 +4921,92 @@ mod tests {
 
         limiter.record_success(ip);
         assert!(limiter.check_allowed(ip));
+    }
+
+    #[test]
+    fn test_is_newer_version() {
+        assert!(is_newer_version("1.2.0", "1.1.0"));
+        assert!(is_newer_version("v1.1.1", "1.1.0"));
+        assert!(is_newer_version("2.0.0", "1.9.9"));
+        assert!(!is_newer_version("1.1.0", "1.1.0"));
+        assert!(!is_newer_version("v1.1.0", "1.1.0"));
+        assert!(!is_newer_version("1.0.9", "1.1.0"));
+        assert!(!is_newer_version("0.9.0", "1.0.0"));
+    }
+
+    #[test]
+    fn test_top_blockers_and_last_night_summary() {
+        let history = vec![
+            BlockRecord {
+                start_epoch_secs: 1000,
+                end_epoch_secs: 1300,
+                duration_secs: 300,
+                primary_blocker: "Agent CPU (node 4.5%)".to_string(),
+                all_blockers: vec!["Agent CPU (node 4.5%)".to_string()],
+            },
+            BlockRecord {
+                start_epoch_secs: 1400,
+                end_epoch_secs: 1500,
+                duration_secs: 100,
+                primary_blocker: "Active Download (idman)".to_string(),
+                all_blockers: vec!["Active Download (idman)".to_string()],
+            },
+            BlockRecord {
+                start_epoch_secs: 1600,
+                end_epoch_secs: 1800,
+                duration_secs: 200,
+                primary_blocker: "Agent CPU (node 4.5%)".to_string(),
+                all_blockers: vec!["Agent CPU (node 4.5%)".to_string()],
+            },
+        ];
+
+        let top = calculate_top_blockers(&history);
+        assert_eq!(top.len(), 2);
+        assert_eq!(top[0].name, "Agent CPU (node 4.5%)");
+        assert_eq!(top[0].total_secs, 500);
+        assert_eq!(top[0].count, 2);
+
+        assert_eq!(top[1].name, "Active Download (idman)");
+        assert_eq!(top[1].total_secs, 100);
+        assert_eq!(top[1].count, 1);
+
+        let summary = calculate_last_night_summary(&history, 2000);
+        assert_eq!(summary.total_blocked_secs, 600);
+        assert_eq!(summary.top_blocker.as_deref(), Some("Agent CPU (node 4.5%)"));
+        assert_eq!(summary.event_count, 3);
+    }
+
+    #[test]
+    fn test_block_history_csv_export() {
+        let history = vec![
+            BlockRecord {
+                start_epoch_secs: 1000,
+                end_epoch_secs: 1060,
+                duration_secs: 60,
+                primary_blocker: "Whole-PC CPU (45%)".to_string(),
+                all_blockers: vec!["Whole-PC CPU (45%)".to_string(), "Network".to_string()],
+            },
+        ];
+        let csv = export_block_history_csv(&history);
+        assert!(csv.contains("Start_Epoch,End_Epoch"));
+        assert!(csv.contains("Whole-PC CPU (45%)"));
+    }
+
+    #[test]
+    fn test_notification_event_formatting() {
+        let e1 = NotificationEvent::SleepImminent { countdown_secs: 30 };
+        assert_eq!(e1.event_name(), "sleep_imminent");
+        let (title1, msg1) = e1.title_and_message();
+        assert!(title1.contains("Sleep Imminent"));
+        assert!(msg1.contains("30 seconds"));
+
+        let e2 = NotificationEvent::BlockedLong { hours: 2, blocker: "Agent CPU".to_string() };
+        assert_eq!(e2.event_name(), "blocked_long");
+        let (title2, msg2) = e2.title_and_message();
+        assert!(title2.contains("Machine Blocked"));
+        assert!(msg2.contains("Agent CPU"));
+
+        let e3 = NotificationEvent::TestMessage;
+        assert_eq!(e3.event_name(), "test");
     }
 }

@@ -195,3 +195,4 @@ To prevent lightweight background helper processes from falsely blocking sleep, 
 - Language server daemon spikes
 - Git background indexers
 - Telemetry agents
+
