@@ -248,6 +248,8 @@ The app serves a local API on port `49281`. By default, it binds exclusively to 
 | `/api/wake_timer/delete` | POST | `id=<timer_id>` | Delete a scheduled wake timer |
 | `/api/history` | GET | | Retrieve recent block-reason history records |
 | `/api/history/clear` | POST | | Clear block-reason history |
+| `/api/ignore/add` | POST | `process=<name>` | Add a process keyword to the ignore list |
+| `/api/ignore/remove` | POST | `process=<name>` | Remove a process keyword from the ignore list |
 | `/api/notify/test` | POST | | Send a test notification across configured channels |
 | `/api/energy/clear` | POST | | Clear energy history |
 
@@ -297,22 +299,35 @@ urllib.request.urlopen(req)
 
 ## Remote dashboard
 
-The same port serves a responsive dashboard that works in any browser, with nothing to install on the phone or tablet.
+The built-in web server exposes a responsive, mobile-first dashboard designed for phones, tablets, and remote browsers on your local network.
 
-1. Open the **Web & Mobile Remote** tab and note the local URL, for example `http://192.168.1.15:49281`.
-2. Open it from a device on the same network.
-3. From there you can watch the live countdown and blocking conditions, sleep or postpone, toggle the guard, and grant or release leases.
+### 1. Instant QR Code Pairing
+- Open the **Web & Mobile Remote** tab in the desktop app.
+- A high-resolution QR code is rendered natively using a zero-dependency QR generator.
+- Point your phone's camera at the screen to immediately open the dashboard with your secure authentication token pre-loaded in the URL fragment (`#t=<token>`). No manual token typing required.
+- *Security Note:* The pairing URL grants full remote control over sleep, leases, and power modes; do not share or publish screenshots of the QR code.
 
-The dashboard is served over plain HTTP and is intended for trusted local networks. Do not expose port `49281` to the internet.
+### 2. Installable Mobile Dashboard (PWA)
+- Equipped with a web app manifest (`/manifest.json`), high-resolution icons (`/icon.png`, `/apple-touch-icon.png`), and mobile viewport tags.
+- Tap **Add to Home Screen** on Safari (iOS) or Chrome (Android) to launch Agent Power Guard as a standalone, distraction-free app without browser address bars.
+- *Network Limitation:* Service workers require a secure context (HTTPS or `localhost`). Over local LAN (`http://192.168.x.x`), the dashboard functions as an installable standalone web app. For remote HTTPS outside your LAN, pair with Tailscale Serve (`tailscale serve https / http://127.0.0.1:49281`).
 
-### Wake-on-LAN
+### 3. Live Sparklines
+- 120-second rolling activity trends for **Agent CPU**, **GPU compute**, **Whole-PC CPU**, **Disk I/O**, and **Network throughput**.
+- Rendered using lightweight, inline SVG `<polyline>` graphics with zero external charting libraries or third-party CDNs to ensure zero memory overhead and instant rendering on low-power devices.
 
-A sleeping PC can't serve a web page, so waking it uses a Wake-on-LAN magic packet. The remote tab shows the primary interface name and MAC address.
+### 4. Active Processes & 1-Tap Ignore
+- Inspect the top 8 running processes ranked by CPU load directly in the dashboard and desktop GUI.
+- Processes matching agent keywords are clearly badged.
+- Tap **+ Ignore** next to any false-positive process (e.g. system indexing, background backup tools) to immediately append it to the ignore list and unblock sleep with zero restarts needed.
 
-1. Enable Wake-on-LAN (magic packet) in the BIOS/UEFI and in the network adapter's properties.
-2. Send a magic packet from any WoL app, using the MAC address and your subnet broadcast address.
-
-The sending device can be on Wi-Fi, but the PC itself should be on wired Ethernet. Wake-on-LAN over Wi-Fi is unreliable on most hardware.
+### 5. Remote Wake-on-LAN (WoL)
+A sleeping PC cannot serve web traffic. To wake your workstation remotely:
+- Send a magic packet from any client or another machine on the LAN using the built-in CLI:
+  ```bash
+  agent-power-guard wol 00:11:22:33:44:55 192.168.1.255
+  ```
+- For waking your workstation from outside your home network (via Tailscale, VPN, or a Raspberry Pi subnet router), follow the comprehensive guide in [`docs/remote-wake.md`](docs/remote-wake.md).
 
 ## Energy tracking
 

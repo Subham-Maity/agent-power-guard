@@ -2,7 +2,14 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+  <meta name="theme-color" content="#0f141c">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="PowerGuard">
+  <link rel="manifest" href="/manifest.json">
+  <link rel="icon" type="image/png" href="/icon.png">
+  <link rel="apple-touch-icon" href="/icon.png">
   <title>Agent Power Guard — Web & Mobile Dashboard</title>
   <style>
     :root {
@@ -68,6 +75,31 @@
     
     .toast { position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%); background: #1e293b; color: #fff; padding: 10px 18px; border-radius: 999px; box-shadow: 0 4px 20px rgba(0,0,0,0.5); font-size: 0.9rem; font-weight: 600; border: 1px solid var(--card-border); pointer-events: none; opacity: 0; transition: opacity 0.2s; z-index: 1000; }
     .toast.show { opacity: 1; }
+    .sparkline-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 10px; margin-top: 6px; }
+    @media (max-width: 440px) { .sparkline-grid { grid-template-columns: 1fr; } }
+    .sparkline-item { background: rgba(0,0,0,0.25); border: 1px solid var(--card-border); border-radius: 8px; padding: 10px; }
+    .sparkline-meta { display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px; font-size: 0.8rem; }
+    .sparkline-label { color: var(--text-muted); font-weight: 500; }
+    .sparkline-val { font-weight: 700; color: #fff; font-variant-numeric: tabular-nums; }
+    .sparkline-svg { width: 100%; height: 32px; display: block; overflow: visible; }
+
+    .proc-row { display: flex; justify-content: space-between; align-items: center; padding: 7px 0; border-bottom: 1px solid rgba(255,255,255,0.06); font-size: 0.85rem; }
+    .proc-row:last-child { border-bottom: none; }
+    .proc-info { display: flex; align-items: center; gap: 8px; font-family: monospace; font-size: 0.85rem; color: #cbd5e1; min-width: 0; }
+    .proc-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 140px; }
+    .badge-agent { background: rgba(59, 130, 246, 0.2); color: #60a5fa; border: 1px solid #3b82f6; border-radius: 4px; padding: 1px 5px; font-size: 0.7rem; font-family: sans-serif; font-weight: 600; }
+    .badge-ignored { background: rgba(148, 163, 184, 0.2); color: #94a3b8; border: 1px solid #64748b; border-radius: 4px; padding: 1px 5px; font-size: 0.7rem; font-family: sans-serif; }
+    .btn-sm { background: var(--card-border); color: #e2e8f0; border: 1px solid #334155; padding: 3px 8px; border-radius: 6px; font-size: 0.75rem; cursor: pointer; font-weight: 500; transition: all 0.15s; white-space: nowrap; }
+    .btn-sm:hover { background: #334155; color: #fff; }
+    .btn-sm:active { transform: scale(0.96); }
+
+    @media (max-width: 380px) {
+      body { padding: 8px; }
+      .card { padding: 12px; }
+      .countdown-ring { font-size: 2.2rem; }
+      .btn { padding: 10px 10px; font-size: 0.85rem; }
+      .proc-name { max-width: 100px; }
+    }
   </style>
 </head>
 <body>
@@ -182,6 +214,54 @@
             <span class="metric-val" id="cond-power-req">None</span>
           </div>
         </div>
+      </div>
+    </div>
+
+    <!-- Live Rolling Sparklines (Phase 4.3) -->
+    <div class="card">
+      <div class="section-title">
+        <span>📈 Live System Trends (120s Rolling)</span>
+      </div>
+      <div class="sparkline-grid">
+        <div class="sparkline-item">
+          <div class="sparkline-meta">
+            <span class="sparkline-label">Agent CPU</span>
+            <span class="sparkline-val" id="spark-val-agent">0.0%</span>
+          </div>
+          <svg id="spark-agent" class="sparkline-svg" viewBox="0 0 120 32" preserveAspectRatio="none"></svg>
+        </div>
+        <div class="sparkline-item">
+          <div class="sparkline-meta">
+            <span class="sparkline-label">GPU Utilization</span>
+            <span class="sparkline-val" id="spark-val-gpu">0.0%</span>
+          </div>
+          <svg id="spark-gpu" class="sparkline-svg" viewBox="0 0 120 32" preserveAspectRatio="none"></svg>
+        </div>
+        <div class="sparkline-item">
+          <div class="sparkline-meta">
+            <span class="sparkline-label">Whole-PC CPU</span>
+            <span class="sparkline-val" id="spark-val-cpu">0.0%</span>
+          </div>
+          <svg id="spark-cpu" class="sparkline-svg" viewBox="0 0 120 32" preserveAspectRatio="none"></svg>
+        </div>
+        <div class="sparkline-item">
+          <div class="sparkline-meta">
+            <span class="sparkline-label">Total Network</span>
+            <span class="sparkline-val" id="spark-val-net">0 KB/s</span>
+          </div>
+          <svg id="spark-net" class="sparkline-svg" viewBox="0 0 120 32" preserveAspectRatio="none"></svg>
+        </div>
+      </div>
+    </div>
+
+    <!-- Active & Top Processes with 1-Tap Ignore (Phase 4.4) -->
+    <div class="card">
+      <div class="section-title">
+        <span>⚡ Active Processes</span>
+        <span style="font-size: 0.8rem; font-weight: normal; color: var(--text-muted);">1-Tap to Ignore False Blocks</span>
+      </div>
+      <div id="top-processes-list">
+        <div style="color: var(--text-muted); font-size: 0.85rem; text-align: center; padding: 10px;">Sampling running processes...</div>
       </div>
     </div>
 
@@ -322,6 +402,27 @@
       }
     }
 
+    function renderSparkline(svgId, points, color, minMax) {
+      const svg = document.getElementById(svgId);
+      if (!svg || !points || points.length < 2) return;
+      const w = 120;
+      const h = 32;
+      const max = Math.max(...points, minMax || 1.0);
+      const step = w / (points.length - 1);
+      const coords = points.map((p, i) => {
+        const x = i * step;
+        const y = h - (Math.min(Math.max(p, 0), max) / max) * (h - 6) - 3;
+        return `${x.toFixed(1)},${y.toFixed(1)}`;
+      });
+      svg.innerHTML = `<polyline fill="none" stroke="${color}" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" points="${coords.join(' ')}" />`;
+    }
+
+    async function ignoreProcess(procName) {
+      if (confirm(`Add '${procName}' to ignore list so it will never prevent sleep?`)) {
+        await apiAction('/api/ignore/add?process=' + encodeURIComponent(procName));
+      }
+    }
+
     async function fetchStatus() {
       try {
         const res = await fetch('/api/status', {
@@ -411,6 +512,43 @@
 
         document.getElementById('cond-spike').innerText = `${s.spike_counter}s / ${s.spike_limit}s`;
         document.getElementById('cond-power-req').innerText = s.power_request_active ? 'Active (Display/Audio)' : 'None';
+
+        // Live Sparklines (Phase 4.3)
+        if (s.history) {
+          renderSparkline('spark-agent', s.history.agent_cpu || [], '#38bdf8', 10.0);
+          renderSparkline('spark-gpu', s.history.gpu || [], '#34d399', 20.0);
+          renderSparkline('spark-cpu', s.history.pc_cpu || [], '#a78bfa', 50.0);
+          renderSparkline('spark-net', s.history.pc_net || [], '#fbbf24', 500.0);
+          document.getElementById('spark-val-agent').innerText = `${s.live_agent_cpu.toFixed(1)}%`;
+          document.getElementById('spark-val-gpu').innerText = `${s.live_gpu.toFixed(1)}%`;
+          document.getElementById('spark-val-cpu').innerText = `${s.live_pc_cpu.toFixed(1)}%`;
+          document.getElementById('spark-val-net').innerText = `${s.live_pc_net.toFixed(0)} KB/s`;
+        }
+
+        // Active & Top Processes (Phase 4.4)
+        const procContainer = document.getElementById('top-processes-list');
+        if (s.top_processes && s.top_processes.length > 0) {
+          let html = '';
+          for (const p of s.top_processes) {
+            const badge = p.is_agent ? '<span class="badge-agent">AGENT</span>' : (p.is_ignored ? '<span class="badge-ignored">IGNORED</span>' : '');
+            const actionBtn = p.is_ignored ? '<span style="color:var(--text-muted);font-size:0.75rem;">Ignored</span>' : `<button class="btn-sm" onclick="ignoreProcess('${p.name}')">+ Ignore</button>`;
+            html += `
+              <div class="proc-row">
+                <div class="proc-info">
+                  <span class="proc-name" title="${p.name}">${p.name}</span>
+                  ${badge}
+                </div>
+                <div style="display:flex; align-items:center; gap:10px;">
+                  <span style="font-weight:700; font-size:0.85rem; font-variant-numeric:tabular-nums;">${p.cpu_pct.toFixed(1)}%</span>
+                  ${actionBtn}
+                </div>
+              </div>
+            `;
+          }
+          procContainer.innerHTML = html;
+        } else {
+          procContainer.innerHTML = '<div style="color: var(--text-muted); font-size: 0.85rem; text-align: center; padding: 10px;">No high-CPU processes active.</div>';
+        }
 
         // Energy Stats
         if (s.energy) {

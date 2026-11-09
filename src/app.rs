@@ -3,6 +3,8 @@
 
 // Agent Power Guard - Native Entry Point
 
+pub mod qr;
+
 use std::collections::VecDeque;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream, UdpSocket};
@@ -1705,6 +1707,14 @@ pub fn evaluate(config: &AppConfig, metrics: &Metrics, state: &mut EvaluationSta
     }
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ProcessCpuInfo {
+    pub name: String,
+    pub cpu_pct: f32,
+    pub is_agent: bool,
+    pub is_ignored: bool,
+}
+
 pub struct SharedState {
     pub config: AppConfig,
     pub config_dirty: bool,
@@ -1799,6 +1809,9 @@ pub struct SharedState {
     // Phase 3: Battery & Power Status
     pub live_battery_status: BatteryStatus,
 
+    // Phase 4: Active & Top Processes
+    pub top_processes: Vec<ProcessCpuInfo>,
+
     // UI feedback toast/notification
     pub toast_message: Option<(String, Instant)>,
 }
@@ -1886,6 +1899,7 @@ impl SharedState {
             update_check_status_msg: None,
 
             live_battery_status: get_battery_status(),
+            top_processes: Vec::new(),
 
             toast_message: None,
         };
@@ -2732,6 +2746,50 @@ fn handle_http_client(
         return;
     }
 
+    if path == "/manifest.json" {
+        let manifest = r##"{
+  "name": "Agent Power Guard",
+  "short_name": "PowerGuard",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#0f141c",
+  "theme_color": "#0f141c",
+  "icons": [
+    {
+      "src": "/icon.png",
+      "sizes": "192x192",
+      "type": "image/png"
+    },
+    {
+      "src": "/icon.png",
+      "sizes": "512x512",
+      "type": "image/png"
+    }
+  ]
+}"##;
+        let resp = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/manifest+json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            manifest.len(),
+            manifest
+        );
+        let _ = stream.write_all(resp.as_bytes());
+        return;
+    }
+
+    if path == "/icon.png"
+        || path == "/apple-touch-icon.png"
+        || path == "/apple-touch-icon-precomposed.png"
+    {
+        let icon_bytes = include_bytes!("../assets/icon_32.png");
+        let resp_headers = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: image/png\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            icon_bytes.len()
+        );
+        let _ = stream.write_all(resp_headers.as_bytes());
+        let _ = stream.write_all(icon_bytes);
+        return;
+    }
+
     // Auth verification for all /api/* endpoints
     if path.starts_with("/api/") {
         if !rate_limiter.check_allowed(peer_ip) {
@@ -2827,6 +2885,14 @@ fn handle_http_client(
                     "is_charging": s.live_battery_status.is_charging,
                 },
                 "stay_awake_until": s.config.stay_awake_until_epoch_secs,
+                "top_processes": s.top_processes,
+                "history": {
+                    "agent_cpu": s.history_agent_cpu.iter().cloned().collect::<Vec<f32>>(),
+                    "gpu": s.history_gpu.iter().cloned().collect::<Vec<f32>>(),
+                    "pc_cpu": s.history_pc_cpu.iter().cloned().collect::<Vec<f32>>(),
+                    "pc_disk": s.history_pc_disk.iter().cloned().collect::<Vec<f32>>(),
+                    "pc_net": s.history_pc_net.iter().cloned().collect::<Vec<f32>>(),
+                },
                 "energy": {
                     "kwh_saved": total_kwh,
                     "cost_saved": total_cost,
@@ -3044,6 +3110,65 @@ fn handle_http_client(
             s.set_toast("Wake timer removed.");
             let body = r#"{"status":"ok","message":"Wake timer deleted"}"#;
             let resp = format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", body.len(), body);
+            let _ = stream.write_all(resp.as_bytes());
+            return;
+        }
+    }
+
+    if path.starts_with("/api/ignore/add") {
+        if let Some(proc) = parse_query_param(path, "process") {
+            let mut s = state.lock().unwrap();
+            let trimmed = proc.trim().to_lowercase();
+            if !trimmed.is_empty() {
+                let mut list: Vec<String> = s
+                    .config
+                    .ignored_processes
+                    .split(',')
+                    .map(|p| p.trim().to_string())
+                    .filter(|p| !p.is_empty() && p.to_lowercase() != trimmed)
+                    .collect();
+                list.push(trimmed.clone());
+                s.config.ignored_processes = list.join(", ");
+                s.config_dirty = true;
+                s.set_toast(&format!("Added '{}' to process ignore list.", trimmed));
+                let body = format!(
+                    r#"{{"status":"ok","ignored_processes":"{}"}}"#,
+                    s.config.ignored_processes
+                );
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = stream.write_all(resp.as_bytes());
+                return;
+            }
+        }
+    }
+
+    if path.starts_with("/api/ignore/remove") {
+        if let Some(proc) = parse_query_param(path, "process") {
+            let mut s = state.lock().unwrap();
+            let trimmed = proc.trim().to_lowercase();
+            let list: Vec<String> = s
+                .config
+                .ignored_processes
+                .split(',')
+                .map(|p| p.trim().to_string())
+                .filter(|p| !p.is_empty() && p.to_lowercase() != trimmed)
+                .collect();
+            s.config.ignored_processes = list.join(", ");
+            s.config_dirty = true;
+            s.set_toast(&format!("Removed '{}' from process ignore list.", trimmed));
+            let body = format!(
+                r#"{{"status":"ok","ignored_processes":"{}"}}"#,
+                s.config.ignored_processes
+            );
+            let resp = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
             let _ = stream.write_all(resp.as_bytes());
             return;
         }
@@ -3412,6 +3537,34 @@ pub fn get_built_in_profiles() -> Vec<AgentProfile> {
     ]
 }
 
+pub fn send_wol_packet(mac_str: &str, broadcast_ip: Option<&str>) -> Result<(), String> {
+    let mac_clean = mac_str.replace([':', '-', '.'], "");
+    if mac_clean.len() != 12 {
+        return Err("Invalid MAC address length (expected 12 hex characters)".to_string());
+    }
+    let mut mac_bytes = [0u8; 6];
+    for i in 0..6 {
+        mac_bytes[i] = u8::from_str_radix(&mac_clean[i * 2..i * 2 + 2], 16)
+            .map_err(|e| format!("Invalid hex digit in MAC address: {}", e))?;
+    }
+    let mut packet = [0u8; 102];
+    packet[0..6].fill(0xFF);
+    for i in 0..16 {
+        let start = 6 + i * 6;
+        packet[start..start + 6].copy_from_slice(&mac_bytes);
+    }
+    let dest = format!("{}:9", broadcast_ip.unwrap_or("255.255.255.255"));
+    let socket =
+        UdpSocket::bind("0.0.0.0:0").map_err(|e| format!("Failed to bind UDP socket: {}", e))?;
+    socket
+        .set_broadcast(true)
+        .map_err(|e| format!("Failed to set broadcast on UDP socket: {}", e))?;
+    socket
+        .send_to(&packet, &dest)
+        .map_err(|e| format!("Failed to send magic packet: {}", e))?;
+    Ok(())
+}
+
 fn handle_cli_command(args: &[String]) {
     #[cfg(windows)]
     unsafe {
@@ -3506,6 +3659,22 @@ fn handle_cli_command(args: &[String]) {
                 Err(err) => eprintln!("Error: {}", err),
             }
         }
+        "wol" => {
+            let mac = args.get(2).map(|s| s.as_str()).unwrap_or("");
+            let bcast = args.get(3).map(|s| s.as_str());
+            if mac.is_empty() {
+                eprintln!("Usage: agent-power-guard wol <mac_address> [broadcast_ip]");
+            } else {
+                match send_wol_packet(mac, bcast) {
+                    Ok(()) => println!(
+                        "Magic packet successfully sent to {} (target broadcast: {})",
+                        mac,
+                        bcast.unwrap_or("255.255.255.255:9")
+                    ),
+                    Err(err) => eprintln!("Error sending WoL packet: {}", err),
+                }
+            }
+        }
         "help" | "--help" | "-h" => {
             println!("Agent Power Guard CLI");
             println!();
@@ -3517,6 +3686,7 @@ fn handle_cli_command(args: &[String]) {
             println!("  agent-power-guard status                                           - Query watchdog status");
             println!("  agent-power-guard postpone [mins]                                  - Postpone sleep by N minutes");
             println!("  agent-power-guard sleep                                            - Trigger immediate system sleep");
+            println!("  agent-power-guard wol <mac> [broadcast]                            - Send Wake-on-LAN magic packet to wake remote PC");
             println!("  agent-power-guard help                                             - Show this help message");
         }
         _ => {
@@ -3660,38 +3830,54 @@ pub fn start_watchdog_thread(state: Arc<Mutex<SharedState>>, egui_ctx: egui::Con
                 let mut max_agent_proc = "None".to_string();
                 let mut max_dl_kbps = 0.0f32;
                 let mut max_dl_proc = "None".to_string();
+                let mut proc_list = Vec::new();
 
                 for (_pid, proc) in sys.processes() {
-                    let proc_name = proc.name().to_string_lossy().to_lowercase();
+                    let raw_name = proc.name().to_string_lossy().to_string();
+                    let lower_name = raw_name.to_lowercase();
+                    let cpu = proc.cpu_usage();
+                    let is_agent = agent_keywords.iter().any(|k| lower_name.contains(k));
+                    let is_ignored = ignored_keywords.iter().any(|k| lower_name.contains(k));
+
+                    if cpu > 0.1 || is_agent {
+                        proc_list.push(ProcessCpuInfo {
+                            name: raw_name.clone(),
+                            cpu_pct: cpu,
+                            is_agent,
+                            is_ignored,
+                        });
+                    }
 
                     // Phase 1.3: Ignore list
-                    if ignored_keywords.iter().any(|k| proc_name.contains(k)) {
+                    if is_ignored {
                         continue;
                     }
 
-                    for kw in &agent_keywords {
-                        if proc_name.contains(kw) {
-                            let cpu = proc.cpu_usage();
-                            if cpu > max_agent_cpu {
-                                max_agent_cpu = cpu;
-                                max_agent_proc = proc.name().to_string_lossy().to_string();
-                            }
-                            break;
-                        }
+                    if is_agent && cpu > max_agent_cpu {
+                        max_agent_cpu = cpu;
+                        max_agent_proc = raw_name.clone();
                     }
 
                     for kw in &download_keywords {
-                        if proc_name.contains(kw) {
+                        if lower_name.contains(kw) {
                             let du = proc.disk_usage();
                             let dl_kbps = (du.read_bytes + du.written_bytes) as f32 / 1024.0;
                             if dl_kbps > max_dl_kbps {
                                 max_dl_kbps = dl_kbps;
-                                max_dl_proc = proc.name().to_string_lossy().to_string();
+                                max_dl_proc = raw_name.clone();
                             }
                             break;
                         }
                     }
                 }
+
+                proc_list.sort_by(|a, b| {
+                    b.cpu_pct
+                        .partial_cmp(&a.cpu_pct)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                });
+                proc_list.truncate(8);
+                s.top_processes = proc_list;
 
                 // Update live metrics
                 s.live_idle_secs = idle_secs;
@@ -5838,6 +6024,38 @@ impl eframe::App for AgentPowerGuardApp {
 
                     ui.add_space(8.0);
                     ui.label(egui::RichText::new("Open this URL on your phone while connected to the same Wi-Fi. The token fragment auto-authenticates your phone so you can view live condition graphs, monitor countdown, put the PC to sleep immediately, postpone sleep, or grant/release agent leases!").weak());
+
+                    // Phase 4.2: QR Code for Pairing
+                    if let Ok(qr) = crate::qr::QrCode::encode_text(&local_url, crate::qr::QrEcLevel::L) {
+                        ui.add_space(10.0);
+                        ui.separator();
+                        ui.add_space(8.0);
+                        ui.horizontal(|ui| {
+                            let qr_pixels = 160.0;
+                            let (rect, _response) = ui.allocate_exact_size(egui::Vec2::splat(qr_pixels), egui::Sense::hover());
+                            let painter = ui.painter_at(rect);
+                            painter.rect_filled(rect, 4.0, egui::Color32::WHITE);
+                            let cell = qr_pixels / qr.size as f32;
+                            for y in 0..qr.size {
+                                for x in 0..qr.size {
+                                    if qr.get_module(x, y) {
+                                        let min = rect.min + egui::vec2(x as f32 * cell, y as f32 * cell);
+                                        let cell_rect = egui::Rect::from_min_size(min, egui::Vec2::splat(cell));
+                                        painter.rect_filled(cell_rect, 0.0, egui::Color32::BLACK);
+                                    }
+                                }
+                            }
+
+                            ui.vertical(|ui| {
+                                ui.add_space(4.0);
+                                ui.label(egui::RichText::new("📷 Scan with Phone to Pair").strong().size(15.0));
+                                ui.label(egui::RichText::new("Scan this QR code with your camera app to immediately open the remote dashboard with your authentication token pre-configured.").weak().size(12.0));
+                                ui.add_space(8.0);
+                                ui.label(egui::RichText::new("⚠️ Security Warning:").strong().color(egui::Color32::from_rgb(245, 158, 11)));
+                                ui.label(egui::RichText::new("This QR code grants full control over your PC's power management and embeds your secret API token. Do not share, publish, or take public screenshots of this code.").weak().size(11.0));
+                            });
+                        });
+                    }
                 });
 
                 ui.add_space(10.0);
@@ -6629,5 +6847,37 @@ mod tests {
         // With sleep_after_lease = true, expiration sets countdown to 0 and triggers sleep immediately!
         assert!(d.trigger_sleep);
         assert_eq!(state.countdown_secs, cfg.idle_threshold_secs);
+    }
+
+    #[test]
+    fn test_wol_mac_validation() {
+        // Valid MAC formats
+        assert!(send_wol_packet("00:11:22:33:44:55", Some("127.0.0.1")).is_ok());
+        assert!(send_wol_packet("aa-bb-cc-dd-ee-ff", Some("127.0.0.1")).is_ok());
+        assert!(send_wol_packet("001122334455", Some("127.0.0.1")).is_ok());
+
+        // Invalid MAC formats
+        assert!(send_wol_packet("00:11:22:33:44", Some("127.0.0.1")).is_err());
+        assert!(send_wol_packet("00:11:22:33:44:55:66", Some("127.0.0.1")).is_err());
+        assert!(send_wol_packet("00:11:22:33:44:GG", Some("127.0.0.1")).is_err());
+        assert!(send_wol_packet("not-a-mac-addr", Some("127.0.0.1")).is_err());
+    }
+
+    #[test]
+    fn test_ignore_list_filtering() {
+        let ignored_str = "system, registry, smss, myagent";
+        let ignored_keywords: Vec<String> = ignored_str
+            .split(',')
+            .map(|s| s.trim().to_lowercase())
+            .filter(|s| !s.is_empty())
+            .collect();
+
+        let proc1 = "myagent.exe".to_lowercase();
+        let proc2 = "cargo.exe".to_lowercase();
+        let proc3 = "system".to_lowercase();
+
+        assert!(ignored_keywords.iter().any(|k| proc1.contains(k)));
+        assert!(!ignored_keywords.iter().any(|k| proc2.contains(k)));
+        assert!(ignored_keywords.iter().any(|k| proc3.contains(k)));
     }
 }
