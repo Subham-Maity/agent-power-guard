@@ -1,11 +1,13 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use std::collections::VecDeque;
-use std::os::windows::process::CommandExt;
 use std::path::PathBuf;
 use std::process::Command;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
 
 use eframe::egui;
 use egui_plot::{HLine, Line, LineStyle, Plot, PlotPoints};
@@ -13,17 +15,26 @@ use serde::{Deserialize, Serialize};
 use sysinfo::{
     DiskRefreshKind, Disks, Networks, ProcessRefreshKind, ProcessesToUpdate, System,
 };
+
+#[cfg(windows)]
 use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, LUID};
+#[cfg(windows)]
 use windows_sys::Win32::Security::{
     AdjustTokenPrivileges, LookupPrivilegeValueW, LUID_AND_ATTRIBUTES,
     SE_PRIVILEGE_ENABLED, TOKEN_ADJUST_PRIVILEGES, TOKEN_PRIVILEGES, TOKEN_QUERY,
 };
+#[cfg(windows)]
 use windows_sys::Win32::System::Power::SetSuspendState;
+#[cfg(windows)]
 use windows_sys::Win32::System::ProcessStatus::K32EmptyWorkingSet;
+#[cfg(windows)]
 use windows_sys::Win32::System::SystemInformation::GetTickCount;
+#[cfg(windows)]
 use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+#[cfg(windows)]
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{GetLastInputInfo, LASTINPUTINFO};
 
+#[cfg(windows)]
 const CREATE_NO_WINDOW: u32 = 0x08000000;
 const HISTORY_LEN: usize = 120;
 
@@ -94,13 +105,41 @@ impl Default for AppConfig {
 }
 
 fn get_config_path() -> PathBuf {
-    if let Ok(appdata) = std::env::var("APPDATA") {
-        let dir = PathBuf::from(appdata).join("AgentPowerGuard");
-        let _ = std::fs::create_dir_all(&dir);
-        dir.join("config.json")
-    } else {
-        PathBuf::from("config.json")
+    #[cfg(windows)]
+    {
+        if let Ok(appdata) = std::env::var("APPDATA") {
+            let dir = PathBuf::from(appdata).join("AgentPowerGuard");
+            let _ = std::fs::create_dir_all(&dir);
+            return dir.join("config.json");
+        }
     }
+
+    #[cfg(target_os = "macos")]
+    {
+        if let Ok(home) = std::env::var("HOME") {
+            let dir = PathBuf::from(home)
+                .join("Library")
+                .join("Application Support")
+                .join("AgentPowerGuard");
+            let _ = std::fs::create_dir_all(&dir);
+            return dir.join("config.json");
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        if let Ok(xdg) = std::env::var("XDG_CONFIG_HOME") {
+            let dir = PathBuf::from(xdg).join("agent-power-guard");
+            let _ = std::fs::create_dir_all(&dir);
+            return dir.join("config.json");
+        } else if let Ok(home) = std::env::var("HOME") {
+            let dir = PathBuf::from(home).join(".config").join("agent-power-guard");
+            let _ = std::fs::create_dir_all(&dir);
+            return dir.join("config.json");
+        }
+    }
+
+    PathBuf::from("config.json")
 }
 
 impl AppConfig {
@@ -244,178 +283,413 @@ impl SharedState {
 }
 
 // ----------------------------------------------------------------------------
-// Win32 Platform APIs
+// Platform Implementation: Sleep
+// ----------------------------------------------------------------------------
+
+pub fn sleep_now() -> bool {
+    #[cfg(windows)]
+    {
+        unsafe {
+            let mut token: HANDLE = std::ptr::null_mut();
+            if OpenProcessToken(
+                GetCurrentProcess(),
+                TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY,
+                &mut token,
+            ) == 0
+            {
+                return false;
+            }
+
+            let mut luid = LUID { LowPart: 0, HighPart: 0 };
+            let priv_name: Vec<u16> = "SeShutdownPrivilege\0".encode_utf16().collect();
+            if LookupPrivilegeValueW(std::ptr::null(), priv_name.as_ptr(), &mut luid) == 0 {
+                CloseHandle(token);
+                return false;
+            }
+
+            let tp = TOKEN_PRIVILEGES {
+                PrivilegeCount: 1,
+                Privileges: [LUID_AND_ATTRIBUTES {
+                    Luid: luid,
+                    Attributes: SE_PRIVILEGE_ENABLED,
+                }],
+            };
+            AdjustTokenPrivileges(
+                token,
+                0,
+                &tp,
+                0,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            );
+            CloseHandle(token);
+
+            SetSuspendState(false, false, false)
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        if Command::new("systemctl").arg("suspend").status().map(|s| s.success()).unwrap_or(false) {
+            return true;
+        }
+        if Command::new("loginctl").arg("suspend").status().map(|s| s.success()).unwrap_or(false) {
+            return true;
+        }
+        Command::new("dbus-send")
+            .args(["--system", "--print-reply", "--dest=org.freedesktop.login1", "/org/freedesktop/login1", "org.freedesktop.login1.Manager.Suspend", "boolean:true"])
+            .status().map(|s| s.success()).unwrap_or(false)
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        Command::new("pmset")
+            .arg("sleepnow")
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
+    }
+
+    #[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
+    {
+        false
+    }
+}
+
+// ----------------------------------------------------------------------------
+// Platform Implementation: Idle Input Seconds
 // ----------------------------------------------------------------------------
 
 pub fn get_idle_seconds() -> u32 {
-    unsafe {
-        let mut lii = LASTINPUTINFO {
-            cbSize: std::mem::size_of::<LASTINPUTINFO>() as u32,
-            dwTime: 0,
-        };
-        if GetLastInputInfo(&mut lii) != 0 {
-            let ticks = GetTickCount();
-            let idle_ms = ticks.wrapping_sub(lii.dwTime);
-            idle_ms / 1000
-        } else {
-            0
+    #[cfg(windows)]
+    {
+        unsafe {
+            let mut lii = LASTINPUTINFO {
+                cbSize: std::mem::size_of::<LASTINPUTINFO>() as u32,
+                dwTime: 0,
+            };
+            if GetLastInputInfo(&mut lii) != 0 {
+                let ticks = GetTickCount();
+                let idle_ms = ticks.wrapping_sub(lii.dwTime);
+                idle_ms / 1000
+            } else {
+                0
+            }
         }
     }
-}
 
-pub fn sleep_now() -> bool {
-    unsafe {
-        let mut token: HANDLE = std::ptr::null_mut();
-        if OpenProcessToken(
-            GetCurrentProcess(),
-            TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY,
-            &mut token,
-        ) == 0
-        {
-            return false;
+    #[cfg(target_os = "macos")]
+    {
+        if let Ok(output) = Command::new("ioreg").args(["-c", "IOHIDSystem"]).output() {
+            let text = String::from_utf8_lossy(&output.stdout);
+            for line in text.lines() {
+                if line.contains("\"HIDIdleTime\"") {
+                    if let Some(val_str) = line.split('=').nth(1) {
+                        if let Ok(nanos) = val_str.trim().parse::<u64>() {
+                            return (nanos / 1_000_000_000) as u32;
+                        }
+                    }
+                }
+            }
         }
-
-        let mut luid = LUID { LowPart: 0, HighPart: 0 };
-        let priv_name: Vec<u16> = "SeShutdownPrivilege\0".encode_utf16().collect();
-        if LookupPrivilegeValueW(std::ptr::null(), priv_name.as_ptr(), &mut luid) == 0 {
-            CloseHandle(token);
-            return false;
-        }
-
-        let tp = TOKEN_PRIVILEGES {
-            PrivilegeCount: 1,
-            Privileges: [LUID_AND_ATTRIBUTES {
-                Luid: luid,
-                Attributes: SE_PRIVILEGE_ENABLED,
-            }],
-        };
-        AdjustTokenPrivileges(
-            token,
-            0,
-            &tp,
-            0,
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-        );
-        CloseHandle(token);
-
-        SetSuspendState(false, false, false)
+        0
     }
-}
 
-pub fn flush_working_set() {
-    unsafe {
-        let proc = GetCurrentProcess();
-        K32EmptyWorkingSet(proc);
+    #[cfg(target_os = "linux")]
+    {
+        if let Ok(output) = Command::new("xprintidle").output() {
+            let text = String::from_utf8_lossy(&output.stdout);
+            if let Ok(ms) = text.trim().parse::<u32>() {
+                return ms / 1000;
+            }
+        }
+        0
+    }
+
+    #[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
+    {
+        0
     }
 }
 
 // ----------------------------------------------------------------------------
-// System Commands & Task Integration
+// Platform Implementation: Memory Flush
+// ----------------------------------------------------------------------------
+
+pub fn flush_working_set() {
+    #[cfg(windows)]
+    {
+        unsafe {
+            let proc = GetCurrentProcess();
+            K32EmptyWorkingSet(proc);
+        }
+    }
+
+    #[cfg(not(windows))]
+    {
+        // Linux and macOS manage inactive app memory pages natively
+    }
+}
+
+// ----------------------------------------------------------------------------
+// Platform Implementation: Power Plan
 // ----------------------------------------------------------------------------
 
 pub fn apply_optimal_power_plan(monitor_timeout_mins: u32) {
-    let mon_arg = monitor_timeout_mins.to_string();
-    let commands = [
-        vec!["/change", "monitor-timeout-ac", &mon_arg],
-        vec!["/setacvalueindex", "SCHEME_CURRENT", "54533251-82be-4824-96c1-47b60b740d00", "893dee8e-2bef-41e0-89c6-b55d0929964c", "5"],
-        vec!["/setacvalueindex", "SCHEME_CURRENT", "54533251-82be-4824-96c1-47b60b740d00", "bc5038f7-23e0-4960-96da-33abaf5935ec", "100"],
-        vec!["/setacvalueindex", "SCHEME_CURRENT", "501a4d13-42af-4429-9e86-e28c4331ba0f", "ee130207-d030-4e61-ab30-e30f57ed0c4e", "1"],
-        vec!["/setacvalueindex", "SCHEME_CURRENT", "238c9fa8-0aad-41ed-b199-9e4920d77830", "bd3b718a-0680-4d9d-8ab2-e1d2b4f0800d", "0"],
-        vec!["/change", "standby-timeout-ac", "0"],
-        vec!["/setactive", "SCHEME_CURRENT"],
-    ];
+    #[cfg(windows)]
+    {
+        let mon_arg = monitor_timeout_mins.to_string();
+        let commands = [
+            vec!["/change", "monitor-timeout-ac", &mon_arg],
+            vec!["/setacvalueindex", "SCHEME_CURRENT", "54533251-82be-4824-96c1-47b60b740d00", "893dee8e-2bef-41e0-89c6-b55d0929964c", "5"],
+            vec!["/setacvalueindex", "SCHEME_CURRENT", "54533251-82be-4824-96c1-47b60b740d00", "bc5038f7-23e0-4960-96da-33abaf5935ec", "100"],
+            vec!["/setacvalueindex", "SCHEME_CURRENT", "501a4d13-42af-4429-9e86-e28c4331ba0f", "ee130207-d030-4e61-ab30-e30f57ed0c4e", "1"],
+            vec!["/setacvalueindex", "SCHEME_CURRENT", "238c9fa8-0aad-41ed-b199-9e4920d77830", "bd3b718a-0680-4d9d-8ab2-e1d2b4f0800d", "0"],
+            vec!["/change", "standby-timeout-ac", "0"],
+            vec!["/setactive", "SCHEME_CURRENT"],
+        ];
 
-    for args in &commands {
-        let _ = Command::new("powercfg")
-            .args(args)
-            .creation_flags(CREATE_NO_WINDOW)
-            .spawn();
+        for args in &commands {
+            let mut cmd = Command::new("powercfg");
+            cmd.args(args);
+            cmd.creation_flags(CREATE_NO_WINDOW);
+            let _ = cmd.spawn();
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        let _ = monitor_timeout_mins;
+        let _ = Command::new("powerprofilesctl").args(["set", "balanced"]).spawn();
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        let s = monitor_timeout_mins.to_string();
+        let _ = Command::new("pmset").args(["-a", "displaysleep", &s]).spawn();
     }
 }
+
+// ----------------------------------------------------------------------------
+// Platform Implementation: Monitor Timeout
+// ----------------------------------------------------------------------------
 
 pub fn apply_monitor_timeout(mins: u32) {
-    let s = mins.to_string();
-    let _ = Command::new("powercfg")
-        .args(["/change", "monitor-timeout-ac", &s])
-        .creation_flags(CREATE_NO_WINDOW)
-        .spawn();
+    #[cfg(windows)]
+    {
+        let s = mins.to_string();
+        let mut cmd = Command::new("powercfg");
+        cmd.args(["/change", "monitor-timeout-ac", &s]);
+        cmd.creation_flags(CREATE_NO_WINDOW);
+        let _ = cmd.spawn();
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        let secs = (mins * 60).to_string();
+        let _ = Command::new("xset").args(["dpms", &secs, &secs, &secs]).spawn();
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        let s = mins.to_string();
+        let _ = Command::new("pmset").args(["-a", "displaysleep", &s]).spawn();
+    }
 }
+
+// ----------------------------------------------------------------------------
+// Platform Implementation: Driver Audio Overrides
+// ----------------------------------------------------------------------------
 
 pub fn override_noisy_audio_drivers() {
-    let overrides = [
-        ("DRIVER", "VB-Audio Virtual Cable"),
-        ("DRIVER", "FxSound Audio Enhancer"),
-        ("DRIVER", "USB Audio"),
-        ("DRIVER", "Legacy Kernel Caller"),
-        ("PROCESS", "msedge.exe"),
-        ("PROCESS", "IDMan.exe"),
-    ];
+    #[cfg(windows)]
+    {
+        let overrides = [
+            ("DRIVER", "VB-Audio Virtual Cable"),
+            ("DRIVER", "FxSound Audio Enhancer"),
+            ("DRIVER", "USB Audio"),
+            ("DRIVER", "Legacy Kernel Caller"),
+            ("PROCESS", "msedge.exe"),
+            ("PROCESS", "IDMan.exe"),
+        ];
 
-    for (cat, name) in &overrides {
-        let _ = Command::new("powercfg")
-            .args(["/requestsoverride", cat, name, "DISPLAY", "SYSTEM", "AWAYMODE"])
-            .creation_flags(CREATE_NO_WINDOW)
-            .spawn();
+        for (cat, name) in &overrides {
+            let mut cmd = Command::new("powercfg");
+            cmd.args(["/requestsoverride", cat, name, "DISPLAY", "SYSTEM", "AWAYMODE"]);
+            cmd.creation_flags(CREATE_NO_WINDOW);
+            let _ = cmd.spawn();
+        }
+    }
+
+    #[cfg(not(windows))]
+    {
+        // Linux / macOS audio subsystems do not hold indefinite powercfg sleep locks
     }
 }
+
+// ----------------------------------------------------------------------------
+// Platform Implementation: Legacy Cleanup
+// ----------------------------------------------------------------------------
 
 pub fn remove_old_v3_scheduled_task() {
-    let cmd = r#"Unregister-ScheduledTask -TaskName "AgentPowerGuard" -Confirm:$false 2>$null; Remove-Item -Recurse -Force "C:\ProgramData\AgentPowerGuard" 2>$null"#;
-    let _ = Command::new("powershell")
-        .args(["-NoProfile", "-WindowStyle", "Hidden", "-Command", cmd])
-        .creation_flags(CREATE_NO_WINDOW)
-        .spawn();
-}
+    #[cfg(windows)]
+    {
+        let cmd = r#"Unregister-ScheduledTask -TaskName "AgentPowerGuard" -Confirm:$false 2>$null; Remove-Item -Recurse -Force "C:\ProgramData\AgentPowerGuard" 2>$null"#;
+        let mut c = Command::new("powershell");
+        c.args(["-NoProfile", "-WindowStyle", "Hidden", "-Command", cmd]);
+        c.creation_flags(CREATE_NO_WINDOW);
+        let _ = c.spawn();
+    }
 
-pub fn set_startup_task(enable: bool) {
-    if enable {
-        if let Ok(exe) = std::env::current_exe() {
-            let path = exe.to_string_lossy().to_string();
-            let cmd = format!(
-                r#"Register-ScheduledTask -Force -TaskName "AgentPowerGuard" -Action (New-ScheduledTaskAction -Execute "{path}") -Trigger (New-ScheduledTaskTrigger -AtLogOn) -RunLevel Highest -Settings (New-ScheduledTaskSettingsSet -ExecutionTimeLimit 0 -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries)"#
-            );
-            let _ = Command::new("powershell")
-                .args(["-NoProfile", "-WindowStyle", "Hidden", "-Command", &cmd])
-                .creation_flags(CREATE_NO_WINDOW)
-                .spawn();
-        }
-    } else {
-        let cmd = r#"Unregister-ScheduledTask -TaskName "AgentPowerGuard" -Confirm:$false 2>$null"#;
-        let _ = Command::new("powershell")
-            .args(["-NoProfile", "-WindowStyle", "Hidden", "-Command", cmd])
-            .creation_flags(CREATE_NO_WINDOW)
-            .spawn();
+    #[cfg(not(windows))]
+    {
+        // No legacy Windows scheduled task on Unix systems
     }
 }
 
-pub fn check_power_requests_display() -> bool {
-    let output = Command::new("powercfg")
-        .arg("/requests")
-        .creation_flags(CREATE_NO_WINDOW)
-        .output();
+// ----------------------------------------------------------------------------
+// Platform Implementation: Autostart
+// ----------------------------------------------------------------------------
 
-    if let Ok(out) = output {
-        let text = String::from_utf8_lossy(&out.stdout);
-        let mut in_display = false;
-        for line in text.lines() {
-            let trimmed = line.trim();
-            if trimmed.eq_ignore_ascii_case("DISPLAY:") {
-                in_display = true;
-                continue;
+pub fn set_startup_task(enable: bool) {
+    #[cfg(windows)]
+    {
+        if enable {
+            if let Ok(exe) = std::env::current_exe() {
+                let path = exe.to_string_lossy().to_string();
+                let cmd = format!(
+                    r#"Register-ScheduledTask -Force -TaskName "AgentPowerGuard" -Action (New-ScheduledTaskAction -Execute "{path}") -Trigger (New-ScheduledTaskTrigger -AtLogOn) -RunLevel Highest -Settings (New-ScheduledTaskSettingsSet -ExecutionTimeLimit 0 -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries)"#
+                );
+                let mut c = Command::new("powershell");
+                c.args(["-NoProfile", "-WindowStyle", "Hidden", "-Command", &cmd]);
+                c.creation_flags(CREATE_NO_WINDOW);
+                let _ = c.spawn();
             }
-            if in_display {
-                if trimmed.ends_with(':') {
-                    // Reached next section
-                    break;
+        } else {
+            let cmd = r#"Unregister-ScheduledTask -TaskName "AgentPowerGuard" -Confirm:$false 2>$null"#;
+            let mut c = Command::new("powershell");
+            c.args(["-NoProfile", "-WindowStyle", "Hidden", "-Command", cmd]);
+            c.creation_flags(CREATE_NO_WINDOW);
+            let _ = c.spawn();
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        if let Ok(home) = std::env::var("HOME") {
+            let autostart_dir = PathBuf::from(home).join(".config").join("autostart");
+            let desktop_file = autostart_dir.join("agent-power-guard.desktop");
+            if enable {
+                let _ = std::fs::create_dir_all(&autostart_dir);
+                if let Ok(exe) = std::env::current_exe() {
+                    let content = format!(
+                        "[Desktop Entry]\nType=Application\nName=Agent Power Guard\nExec={}\nHidden=false\nNoDisplay=false\nX-GNOME-Autostart-enabled=true\n",
+                        exe.display()
+                    );
+                    let _ = std::fs::write(desktop_file, content);
                 }
-                if !trimmed.is_empty() && !trimmed.eq_ignore_ascii_case("None.") {
+            } else {
+                let _ = std::fs::remove_file(desktop_file);
+            }
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        if let Ok(home) = std::env::var("HOME") {
+            let launch_agents = PathBuf::from(home).join("Library").join("LaunchAgents");
+            let plist_path = launch_agents.join("com.agentpowerguard.app.plist");
+            if enable {
+                let _ = std::fs::create_dir_all(&launch_agents);
+                if let Ok(exe) = std::env::current_exe() {
+                    let content = format!(
+                        r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.agentpowerguard.app</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>{}</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+</dict>
+</plist>"#,
+                        exe.display()
+                    );
+                    let _ = std::fs::write(plist_path, content);
+                }
+            } else {
+                let _ = std::fs::remove_file(plist_path);
+            }
+        }
+    }
+}
+
+// ----------------------------------------------------------------------------
+// Platform Implementation: Display Power Requests
+// ----------------------------------------------------------------------------
+
+pub fn check_power_requests_display() -> bool {
+    #[cfg(windows)]
+    {
+        let mut cmd = Command::new("powercfg");
+        cmd.arg("/requests");
+        cmd.creation_flags(CREATE_NO_WINDOW);
+        if let Ok(out) = cmd.output() {
+            let text = String::from_utf8_lossy(&out.stdout);
+            let mut in_display = false;
+            for line in text.lines() {
+                let trimmed = line.trim();
+                if trimmed.eq_ignore_ascii_case("DISPLAY:") {
+                    in_display = true;
+                    continue;
+                }
+                if in_display {
+                    if trimmed.ends_with(':') {
+                        break;
+                    }
+                    if !trimmed.is_empty() && !trimmed.eq_ignore_ascii_case("None.") {
+                        return true;
+                    }
+                }
+            }
+        }
+        false
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        if let Ok(out) = Command::new("pmset").args(["-g", "assertions"]).output() {
+            let text = String::from_utf8_lossy(&out.stdout);
+            for line in text.lines() {
+                if line.contains("PreventUserIdleDisplaySleep") && line.contains("1") {
                     return true;
                 }
             }
         }
+        false
     }
-    false
+
+    #[cfg(target_os = "linux")]
+    {
+        if let Ok(out) = Command::new("systemd-inhibit").args(["--list", "--mode=block"]).output() {
+            let text = String::from_utf8_lossy(&out.stdout);
+            for line in text.lines() {
+                if line.contains("idle") || line.contains("sleep") {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    #[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
+    {
+        false
+    }
 }
 
 // ----------------------------------------------------------------------------

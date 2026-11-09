@@ -146,11 +146,72 @@ Every condition has an **`[x] Enable`** checkbox. If a condition is blocking sle
 
 ---
 
-## 📦 Installation & Shortcuts
+## 📦 Multi-Platform Support & Downloads
 
-- **Search Bar Name:** Type `Agent Power Guard` in the Windows Search Bar or Start Menu.
-- **MSI Installer:** [`target\installer\AgentPowerGuard-1.0.0-x64.msi`](file:///C:/Github/agent-power-guard/target/installer/AgentPowerGuard-1.0.0-x64.msi)
-- **Standalone Binary:** [`target\x86_64-pc-windows-msvc\release\agent-power-guard.exe`](file:///C:/Github/agent-power-guard/target/x86_64-pc-windows-msvc/release/agent-power-guard.exe)
+Agent Power Guard runs natively across **Windows**, **Linux**, and **macOS**:
+
+### Which File Should I Download? (Extension Guide)
+
+| Operating System | Recommended Download | Extension | Target Architecture | Description |
+|---|---|---|---|---|
+| **Windows 10 / 11** | `AgentPowerGuard-windows-x64.msi` | `.msi` | x86_64 (64-bit) | **Recommended for Windows.** Installs into Program Files with Start Menu, Desktop shortcuts, and Add/Remove Programs support. |
+| **Windows (Portable)** | `agent-power-guard-windows-x64.exe` | `.exe` | x86_64 (64-bit) | Portable standalone binary. Runs directly without installation. |
+| **Linux (Ubuntu / Debian / Fedora / Arch)** | `agent-power-guard-linux-x86_64.tar.gz` | `.tar.gz` | x86_64 (64-bit) | Standalone Linux executable using X11 / Wayland and systemd suspend. |
+| **macOS (Apple Silicon)** | `agent-power-guard-macos-aarch64.tar.gz` | `.tar.gz` | ARM64 (M1 / M2 / M3 / M4) | Native Apple Silicon binary. Uses `pmset` and `ioreg` for sleep and display control. |
+| **macOS (Intel)** | `agent-power-guard-macos-x86_64.tar.gz` | `.tar.gz` | x86_64 (Intel) | Native Intel Mac binary. |
+
+---
+
+## 🐧 Linux Setup & Prerequisites
+
+On Linux, Agent Power Guard uses:
+- **Sleep Trigger:** `systemctl suspend` (or `loginctl suspend` / DBus)
+- **Human Inactivity Idle:** `xprintidle` (for X11 desktop sessions)
+- **Display Off:** `xset dpms` (X11) or DBus power manager
+- **Autostart:** `~/.config/autostart/agent-power-guard.desktop`
+
+### Prerequisites (Ubuntu / Debian / Mint):
+```bash
+sudo apt update
+sudo apt install -y libgl1-mesa-dev libx11-dev libxext-dev libxcursor-dev libxinerama-dev libxi-dev xprintidle
+```
+
+### Running on Linux:
+```bash
+tar -xzvf agent-power-guard-linux-x86_64.tar.gz
+cd agent-power-guard
+./agent-power-guard
+```
+
+---
+
+## 🍎 macOS Setup & Notes
+
+On macOS, Agent Power Guard uses:
+- **Sleep Trigger:** `pmset sleepnow`
+- **Human Inactivity Idle:** `ioreg -c IOHIDSystem` (reads `HIDIdleTime` in nanoseconds)
+- **Display Off:** `pmset -a displaysleep <minutes>`
+- **Autostart:** `~/Library/LaunchAgents/com.agentpowerguard.app.plist`
+
+### Running on macOS:
+```bash
+tar -xzvf agent-power-guard-macos-aarch64.tar.gz
+./agent-power-guard
+```
+*(If prompted by macOS Gatekeeper on first run, go to System Settings -> Privacy & Security -> click "Open Anyway".)*
+
+---
+
+## 🤖 Automated GitHub Actions CI/CD Bot
+
+This repository includes fully automated GitHub Actions workflows:
+- **`.github/workflows/ci.yml`:** Automatically tests and compiles every pull request and push across Windows, Linux (`ubuntu-latest`), and macOS (`macos-latest`).
+- **`.github/workflows/release.yml`:** When a tag like `v1.0.0` is pushed, GitHub Actions compiles:
+  1. Windows `.exe` and `.msi` (with WiX toolset)
+  2. Linux `.tar.gz`
+  3. macOS Apple Silicon & Intel `.tar.gz`
+  4. Computes `SHA256SUMS.txt` checksums
+  5. Publishes a complete GitHub Release page with release notes and the download extension guide!
 
 ---
 

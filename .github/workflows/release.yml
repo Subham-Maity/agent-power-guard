@@ -1,0 +1,202 @@
+name: Release Build & Publish
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag_name:
+        description: 'Release Tag (e.g. v1.0.0)'
+        required: true
+        default: 'v1.0.0'
+
+permissions:
+  contents: write
+
+jobs:
+  build-windows:
+    name: Build Windows (MSI & EXE)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: Build Release Binary
+        run: cargo build --release --target x86_64-pc-windows-msvc
+
+      - name: Generate MSI Package
+        shell: powershell
+        run: |
+          powershell -ExecutionPolicy Bypass -File .\build-msi.ps1
+
+      - name: Prepare Artifacts
+        shell: powershell
+        run: |
+          New-Item -ItemType Directory -Path dist -Force | Out-Null
+          Copy-Item target\x86_64-pc-windows-msvc\release\agent-power-guard.exe dist\agent-power-guard-windows-x64.exe
+          Copy-Item target\installer\AgentPowerGuard-1.0.0-x64.msi dist\AgentPowerGuard-windows-x64.msi
+
+      - name: Upload Windows Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-assets
+          path: dist/*
+
+  build-linux:
+    name: Build Linux (x86_64)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-gnu
+
+      - name: Install Linux GUI build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libx11-dev libxext-dev libxrandr-dev libxinerama-dev libxcursor-dev libxi-dev libgl1-mesa-dev libglu1-mesa-dev libxss-dev libxkbcommon-dev libwayland-dev xprintidle
+
+      - name: Build Release Binary
+        run: cargo build --release --target x86_64-unknown-linux-gnu
+
+      - name: Package Linux Binary (.tar.gz)
+        run: |
+          mkdir -p dist/agent-power-guard
+          cp target/x86_64-unknown-linux-gnu/release/agent-power-guard dist/agent-power-guard/
+          cp README.md LICENSE dist/agent-power-guard/
+          cd dist
+          tar -czvf agent-power-guard-linux-x86_64.tar.gz agent-power-guard/
+          rm -rf agent-power-guard
+
+      - name: Upload Linux Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-assets
+          path: dist/*
+
+  build-macos:
+    name: Build macOS (Apple Silicon & Intel)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+
+      - name: Build Release (Apple Silicon aarch64)
+        run: cargo build --release --target aarch64-apple-darwin
+
+      - name: Build Release (Intel x86_64)
+        run: cargo build --release --target x86_64-apple-darwin
+
+      - name: Package macOS Binaries (.tar.gz)
+        run: |
+          mkdir -p dist
+          tar -czvf dist/agent-power-guard-macos-aarch64.tar.gz -C target/aarch64-apple-darwin/release agent-power-guard
+          tar -czvf dist/agent-power-guard-macos-x86_64.tar.gz -C target/x86_64-apple-darwin/release agent-power-guard
+
+      - name: Upload macOS Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-assets
+          path: dist/*
+
+  publish-release:
+    name: Publish GitHub Release
+    needs: [build-windows, build-linux, build-macos]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all built artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+          merge-multiple: true
+
+      - name: Generate SHA-256 Checksums
+        run: |
+          cd release-assets
+          sha256sum * > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+
+      - name: Determine Tag Name
+        id: get_tag
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "tag=${{ github.event.inputs.tag_name }}" >> $GITHUB_OUTPUT
+          else
+            echo "tag=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.get_tag.outputs.tag }}
+          name: "Agent Power Guard ${{ steps.get_tag.outputs.tag }}"
+          files: release-assets/*
+          draft: false
+          prerelease: false
+          body: |
+            ## 🛡️⚡ Agent Power Guard ${{ steps.get_tag.outputs.tag }} Release
+
+            A lightweight, 100% native desktop utility written in Rust (`egui` + `glow`) that puts your workstation to sleep **only when you AND your AI coding agents are truly idle**.
+
+            ---
+
+            ### 📦 Download & Extension Guide (Which file should I download?)
+
+            | Platform / Architecture | Recommended Download | Format / Extension | Description & Setup |
+            |---|---|---|---|
+            | **Windows 10 / 11 (64-bit)** | [`AgentPowerGuard-windows-x64.msi`](#) | `.msi` (Installer) | **Recommended for Windows.** Standard installer with Start Menu, Desktop shortcuts, and full Add/Remove Programs support. |
+            | **Windows 10 / 11 (Portable)** | [`agent-power-guard-windows-x64.exe`](#) | `.exe` (Standalone) | Portable single-file binary. No installation required; run directly as Administrator. |
+            | **Linux (Ubuntu, Debian, Fedora, Arch)** | [`agent-power-guard-linux-x86_64.tar.gz`](#) | `.tar.gz` (Archive) | Standalone Linux x86_64 binary. Extracts into a portable executable. |
+            | **macOS (M1 / M2 / M3 / M4 Apple Silicon)** | [`agent-power-guard-macos-aarch64.tar.gz`](#) | `.tar.gz` (Archive) | Native ARM64 binary for modern Apple Silicon Macs. |
+            | **macOS (Intel Core x86_64)** | [`agent-power-guard-macos-x86_64.tar.gz`](#) | `.tar.gz` (Archive) | Native x86_64 binary for Intel-based Macs. |
+
+            ---
+
+            ### 🚀 Quick Start & Installation
+
+            #### Windows
+            - **Installer:** Double-click `AgentPowerGuard-windows-x64.msi` to install, or run silently with:
+              ```powershell
+              msiexec /i AgentPowerGuard-windows-x64.msi /qn
+              ```
+            - **Portable:** Download `agent-power-guard-windows-x64.exe` and double-click to launch.
+
+            #### Linux
+            ```bash
+            tar -xzvf agent-power-guard-linux-x86_64.tar.gz
+            cd agent-power-guard
+            ./agent-power-guard
+            ```
+            *(Requires X11 / Wayland and OpenGL libraries: `sudo apt install libgl1-mesa-dev libx11-dev xprintidle`)*
+
+            #### macOS
+            ```bash
+            tar -xzvf agent-power-guard-macos-aarch64.tar.gz
+            ./agent-power-guard
+            ```
+
+            ---
+
+            ### 💡 Staged Power-Saving Strategy
+            1. **Stage 1 (Monitor Off):** Turns off your display first (saves 50–100W immediately and protects screen/OLED) while leaving CPU/GPU active so background agents (Cursor, Claude, Antigravity) continue working.
+            2. **Stage 2 (Sleep Mode):** Once the monitor is off and all agents finish (CPU, disk, and net fall below thresholds), the entire workstation enters deep sleep.
+
+            ### ⏱️ Quick Presets Included
+            - `15s Test`: Instant hands-off countdown test.
+            - `3m ★`: Default balanced setting (Display off at 2m -> Sleep at 3m).
+            - `5m`, `10m`, `15m`, `30m`, `45m`, `1h`, `2h`, `3h` preset buttons.
+            - Custom sliders adjustable from 10s up to 3 hours.
+
