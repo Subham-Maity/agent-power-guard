@@ -1,5 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+// Agent Power Guard - Native Entry Point
+
 use std::collections::VecDeque;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream, UdpSocket};
@@ -94,6 +96,8 @@ pub struct AppConfig {
     pub sleep_watts: f32,               // default 3.0
     pub electricity_rate_kwh: f32,      // default 0.15
     pub web_server_port: u16,           // default 49281
+    pub allow_lan_access: bool,         // default false (loopback only)
+    pub ignored_processes: String,      // comma-separated ignore list
 }
 
 impl Default for AppConfig {
@@ -134,6 +138,8 @@ impl Default for AppConfig {
             sleep_watts: 3.0,
             electricity_rate_kwh: 0.15,
             web_server_port: 49281,
+            allow_lan_access: false,
+            ignored_processes: "system, registry, smss, csrss, wininit, services, lsass, svchost, fontdrvhost, dwm".to_string(),
         }
     }
 }
@@ -178,6 +184,160 @@ fn get_config_path() -> PathBuf {
 
 fn get_energy_history_path() -> PathBuf {
     get_config_path().parent().unwrap_or(&PathBuf::from(".")).join("energy_history.json")
+}
+
+fn get_api_token_path() -> PathBuf {
+    get_config_path().parent().unwrap_or(&PathBuf::from(".")).join("api_token.txt")
+}
+
+#[cfg(unix)]
+fn set_user_only_permissions(path: &std::path::Path) {
+    use std::os::unix::fs::PermissionsExt;
+    let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
+}
+
+#[cfg(not(unix))]
+fn set_user_only_permissions(_path: &std::path::Path) {}
+
+fn fallback_random_token() -> String {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    let mut s = String::new();
+    for i in 0..4 {
+        let mut hasher = DefaultHasher::new();
+        SystemTime::now().hash(&mut hasher);
+        std::process::id().hash(&mut hasher);
+        i.hash(&mut hasher);
+        (&s as *const _ as usize).hash(&mut hasher);
+        use std::fmt::Write;
+        let _ = write!(s, "{:016x}", hasher.finish());
+    }
+    s.truncate(64);
+    s
+}
+
+pub fn generate_crypto_token() -> String {
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::Security::Cryptography::{BCryptGenRandom, BCRYPT_USE_SYSTEM_PREFERRED_RNG};
+        let mut buf = [0u8; 32];
+        let status = unsafe {
+            BCryptGenRandom(
+                std::ptr::null_mut(),
+                buf.as_mut_ptr(),
+                buf.len() as u32,
+                BCRYPT_USE_SYSTEM_PREFERRED_RNG,
+            )
+        };
+        if status == 0 {
+            let mut s = String::with_capacity(64);
+            for byte in buf {
+                use std::fmt::Write;
+                let _ = write!(s, "{:02x}", byte);
+            }
+            return s;
+        }
+    }
+
+    #[cfg(not(windows))]
+    {
+        if let Ok(mut f) = std::fs::File::open("/dev/urandom") {
+            let mut buf = [0u8; 32];
+            if f.read_exact(&mut buf).is_ok() {
+                let mut s = String::with_capacity(64);
+                for byte in buf {
+                    use std::fmt::Write;
+                    let _ = write!(s, "{:02x}", byte);
+                }
+                return s;
+            }
+        }
+    }
+
+    fallback_random_token()
+}
+
+pub fn get_or_create_api_token() -> String {
+    let path = get_api_token_path();
+    if let Ok(content) = std::fs::read_to_string(&path) {
+        let trimmed = content.trim();
+        if trimmed.len() == 64 && trimmed.chars().all(|c| c.is_ascii_hexdigit()) {
+            return trimmed.to_string();
+        }
+    }
+
+    let token = generate_crypto_token();
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    if std::fs::write(&path, &token).is_ok() {
+        set_user_only_permissions(&path);
+    }
+    token
+}
+
+pub fn regenerate_api_token() -> String {
+    let path = get_api_token_path();
+    let token = generate_crypto_token();
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    if std::fs::write(&path, &token).is_ok() {
+        set_user_only_permissions(&path);
+    }
+    token
+}
+
+pub fn constant_time_eq(a: &str, b: &str) -> bool {
+    let a_bytes = a.as_bytes();
+    let b_bytes = b.as_bytes();
+    if a_bytes.len() != b_bytes.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for (&x, &y) in a_bytes.iter().zip(b_bytes.iter()) {
+        diff |= x ^ y;
+    }
+    diff == 0
+}
+
+use std::collections::HashMap;
+use std::net::IpAddr;
+
+pub struct RateLimiter {
+    failures: Mutex<HashMap<IpAddr, Vec<Instant>>>,
+}
+
+impl RateLimiter {
+    pub fn new() -> Self {
+        Self {
+            failures: Mutex::new(HashMap::new()),
+        }
+    }
+
+    pub fn check_allowed(&self, ip: IpAddr) -> bool {
+        let mut map = self.failures.lock().unwrap();
+        let now = Instant::now();
+        if let Some(timestamps) = map.get_mut(&ip) {
+            timestamps.retain(|t| now.duration_since(*t) < Duration::from_secs(60));
+            timestamps.len() < 10
+        } else {
+            true
+        }
+    }
+
+    pub fn record_failure(&self, ip: IpAddr) {
+        let mut map = self.failures.lock().unwrap();
+        let now = Instant::now();
+        let timestamps = map.entry(ip).or_default();
+        timestamps.retain(|t| now.duration_since(*t) < Duration::from_secs(60));
+        timestamps.push(now);
+    }
+
+    pub fn record_success(&self, ip: IpAddr) {
+        let mut map = self.failures.lock().unwrap();
+        map.remove(&ip);
+    }
 }
 
 impl AppConfig {
@@ -274,13 +434,438 @@ fn format_epoch_local(epoch: u64) -> String {
 // Shared State & Condition Evaluation
 // ----------------------------------------------------------------------------
 
-#[derive(Clone, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct ConditionStatus {
     pub enabled: bool,
     pub is_passing: bool,
     pub value_text: String,
     pub threshold_text: String,
     pub blocker_detail: Option<String>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct Metrics {
+    pub idle_secs: u32,
+    pub max_agent_cpu: f32,
+    pub max_agent_proc: String,
+    pub max_dl_kbps: f32,
+    pub max_dl_proc: String,
+    pub whole_pc_cpu: f32,
+    pub whole_pc_disk_kbps: f32,
+    pub whole_pc_net_kbps: f32,
+    pub gpu_util: f32,
+    pub mic_active: bool,
+    pub cam_active: bool,
+    pub mic_cam_app: String,
+    pub display_request_active: bool,
+    pub sensor_error: bool,
+    pub now_epoch_secs: u64,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct EvaluationState {
+    pub countdown_secs: u32,
+    pub pc_spike_sustained_counter: u32,
+    pub postponed_until_epoch_secs: Option<u64>,
+    pub agent_lease_until_epoch_secs: Option<u64>,
+    pub agent_lease_reason: String,
+    pub agent_lease_pid: Option<u32>,
+    pub last_wall_clock_secs: u64,
+    pub monitor_standby_start_epoch_secs: Option<u64>,
+}
+
+#[derive(Debug, Clone)]
+pub struct Decision {
+    pub all_conditions_pass: bool,
+    pub blockers: Vec<String>,
+    pub blocker_banner_text: String,
+    pub countdown_secs: u32,
+    pub countdown_max: u32,
+    pub trigger_sleep: bool,
+    pub trigger_grace_banner: bool,
+    pub log_monitor_off_duration: Option<u64>,
+    pub woke_from_sleep_reset: bool,
+
+    pub cond1_idle: ConditionStatus,
+    pub cond2_agent_cpu: ConditionStatus,
+    pub cond3_download: ConditionStatus,
+    pub cond4_pc_cpu: ConditionStatus,
+    pub cond5_pc_disk: ConditionStatus,
+    pub cond6_pc_net: ConditionStatus,
+    pub cond7_spike_filter: ConditionStatus,
+    pub cond8_monitor_timeout: ConditionStatus,
+    pub cond9_power_requests: ConditionStatus,
+    pub cond10_gpu: ConditionStatus,
+    pub cond11_mic_cam: ConditionStatus,
+}
+
+pub fn evaluate(config: &AppConfig, metrics: &Metrics, state: &mut EvaluationState) -> Decision {
+    let mut woke_from_sleep_reset = false;
+    let mut log_monitor_off_duration = None;
+
+    // 1. Check Wall-Clock Wakeup
+    if state.last_wall_clock_secs > 0 && metrics.now_epoch_secs > state.last_wall_clock_secs + 10 {
+        state.countdown_secs = config.idle_threshold_secs;
+        state.pc_spike_sustained_counter = 0;
+        woke_from_sleep_reset = true;
+    }
+    state.last_wall_clock_secs = metrics.now_epoch_secs;
+
+    let mut blockers = Vec::new();
+
+    // Safety First: Global Rule 7 - sensor failure counts as blocking
+    if metrics.sensor_error {
+        blockers.push("Sensor Failure (Safety hold active)".to_string());
+    }
+
+    // Condition 1: Human Input Idle
+    let cond1_pass = metrics.idle_secs >= config.idle_threshold_secs;
+    let cond1_idle = ConditionStatus {
+        enabled: config.cond1_idle_enabled,
+        is_passing: cond1_pass,
+        value_text: format!("{}s", metrics.idle_secs),
+        threshold_text: format!(">= {}s", config.idle_threshold_secs),
+        blocker_detail: if !cond1_pass && config.cond1_idle_enabled {
+            Some(format!(
+                "Human Activity (User active, idle only {}s < {}s)",
+                metrics.idle_secs, config.idle_threshold_secs
+            ))
+        } else {
+            None
+        },
+    };
+    if config.cond1_idle_enabled && !cond1_pass {
+        blockers.push(format!(
+            "Human Idle ({}s < {}s)",
+            metrics.idle_secs, config.idle_threshold_secs
+        ));
+    }
+
+    // Condition 2: Watched Agent CPU %
+    let cond2_pass = metrics.max_agent_cpu < config.agent_cpu_threshold;
+    let cond2_agent_cpu = ConditionStatus {
+        enabled: config.cond2_agent_cpu_enabled,
+        is_passing: cond2_pass,
+        value_text: format!("{:.1}% ({})", metrics.max_agent_cpu, metrics.max_agent_proc),
+        threshold_text: format!("< {:.1}%", config.agent_cpu_threshold),
+        blocker_detail: if !cond2_pass && config.cond2_agent_cpu_enabled {
+            Some(format!(
+                "Agent CPU ({} at {:.1}% >= {:.1}%)",
+                metrics.max_agent_proc, metrics.max_agent_cpu, config.agent_cpu_threshold
+            ))
+        } else {
+            None
+        },
+    };
+    if config.cond2_agent_cpu_enabled && !cond2_pass {
+        blockers.push(format!(
+            "Agent CPU ({} at {:.1}% >= {:.1}%)",
+            metrics.max_agent_proc, metrics.max_agent_cpu, config.agent_cpu_threshold
+        ));
+    }
+
+    // Condition 3: Active Download / IDM
+    let cond3_pass = metrics.max_dl_kbps < config.download_threshold_kbps;
+    let cond3_download = ConditionStatus {
+        enabled: config.cond3_download_enabled,
+        is_passing: cond3_pass,
+        value_text: format!("{:.0} KB/s ({})", metrics.max_dl_kbps, metrics.max_dl_proc),
+        threshold_text: format!("< {:.0} KB/s", config.download_threshold_kbps),
+        blocker_detail: if !cond3_pass && config.cond3_download_enabled {
+            Some(format!(
+                "Active Download ({} at {:.0} KB/s >= {:.0} KB/s)",
+                metrics.max_dl_proc, metrics.max_dl_kbps, config.download_threshold_kbps
+            ))
+        } else {
+            None
+        },
+    };
+    if config.cond3_download_enabled && !cond3_pass {
+        blockers.push(format!(
+            "Active Download ({} at {:.0} KB/s)",
+            metrics.max_dl_proc, metrics.max_dl_kbps
+        ));
+    }
+
+    // Condition 4, 5, 6: Whole-PC Metrics
+    let cond4_pass = metrics.whole_pc_cpu < config.pc_cpu_threshold;
+    let cond5_pass = metrics.whole_pc_disk_kbps < config.pc_disk_threshold_kbps;
+    let cond6_pass = metrics.whole_pc_net_kbps < config.pc_net_threshold_kbps;
+
+    let cond4_pc_cpu = ConditionStatus {
+        enabled: config.cond4_pc_cpu_enabled,
+        is_passing: cond4_pass,
+        value_text: format!("{:.1}%", metrics.whole_pc_cpu),
+        threshold_text: format!("< {:.1}%", config.pc_cpu_threshold),
+        blocker_detail: if !cond4_pass && config.cond4_pc_cpu_enabled {
+            Some(format!(
+                "Whole-PC CPU ({:.1}% >= {:.1}%)",
+                metrics.whole_pc_cpu, config.pc_cpu_threshold
+            ))
+        } else {
+            None
+        },
+    };
+
+    let cond5_pc_disk = ConditionStatus {
+        enabled: config.cond5_pc_disk_enabled,
+        is_passing: cond5_pass,
+        value_text: format!("{:.0} KB/s", metrics.whole_pc_disk_kbps),
+        threshold_text: format!("< {:.0} KB/s", config.pc_disk_threshold_kbps),
+        blocker_detail: if !cond5_pass && config.cond5_pc_disk_enabled {
+            Some(format!(
+                "Whole-PC Disk I/O ({:.0} KB/s >= {:.0} KB/s)",
+                metrics.whole_pc_disk_kbps, config.pc_disk_threshold_kbps
+            ))
+        } else {
+            None
+        },
+    };
+
+    let cond6_pc_net = ConditionStatus {
+        enabled: config.cond6_pc_net_enabled,
+        is_passing: cond6_pass,
+        value_text: format!("{:.0} KB/s", metrics.whole_pc_net_kbps),
+        threshold_text: format!("< {:.0} KB/s", config.pc_net_threshold_kbps),
+        blocker_detail: if !cond6_pass && config.cond6_pc_net_enabled {
+            Some(format!(
+                "Whole-PC Network ({:.0} KB/s >= {:.0} KB/s)",
+                metrics.whole_pc_net_kbps, config.pc_net_threshold_kbps
+            ))
+        } else {
+            None
+        },
+    };
+
+    // Condition 7: Sustained Spike Filter
+    let any_pc_metric_tripped = (config.cond4_pc_cpu_enabled && !cond4_pass)
+        || (config.cond5_pc_disk_enabled && !cond5_pass)
+        || (config.cond6_pc_net_enabled && !cond6_pass);
+
+    if any_pc_metric_tripped {
+        state.pc_spike_sustained_counter = state.pc_spike_sustained_counter.saturating_add(1);
+    } else {
+        state.pc_spike_sustained_counter = 0;
+    }
+
+    let spike_sustained = state.pc_spike_sustained_counter >= config.spike_filter_secs;
+    let cond7_spike_filter = ConditionStatus {
+        enabled: config.cond7_spike_filter_enabled,
+        is_passing: !any_pc_metric_tripped || !spike_sustained,
+        value_text: format!("{}s / {}s", state.pc_spike_sustained_counter, config.spike_filter_secs),
+        threshold_text: format!("Debounce {}s", config.spike_filter_secs),
+        blocker_detail: if any_pc_metric_tripped && spike_sustained && config.cond7_spike_filter_enabled {
+            Some(format!(
+                "Sustained PC Spike (Activity exceeded {}s debounce filter)",
+                config.spike_filter_secs
+            ))
+        } else {
+            None
+        },
+    };
+
+    if config.cond7_spike_filter_enabled {
+        if any_pc_metric_tripped && spike_sustained {
+            if config.cond4_pc_cpu_enabled && !cond4_pass {
+                blockers.push(format!("Whole-PC CPU ({:.1}%)", metrics.whole_pc_cpu));
+            }
+            if config.cond5_pc_disk_enabled && !cond5_pass {
+                blockers.push(format!("Whole-PC Disk ({:.0} KB/s)", metrics.whole_pc_disk_kbps));
+            }
+            if config.cond6_pc_net_enabled && !cond6_pass {
+                blockers.push(format!("Whole-PC Network ({:.0} KB/s)", metrics.whole_pc_net_kbps));
+            }
+        }
+    } else if any_pc_metric_tripped {
+        if config.cond4_pc_cpu_enabled && !cond4_pass {
+            blockers.push(format!("Whole-PC CPU ({:.1}%)", metrics.whole_pc_cpu));
+        }
+        if config.cond5_pc_disk_enabled && !cond5_pass {
+            blockers.push(format!("Whole-PC Disk ({:.0} KB/s)", metrics.whole_pc_disk_kbps));
+        }
+        if config.cond6_pc_net_enabled && !cond6_pass {
+            blockers.push(format!("Whole-PC Network ({:.0} KB/s)", metrics.whole_pc_net_kbps));
+        }
+    }
+
+    // Condition 8: Monitor Timeout Tracking
+    let cond8_monitor_timeout = ConditionStatus {
+        enabled: config.cond8_monitor_timeout_enabled,
+        is_passing: true,
+        value_text: format!("{}m", config.monitor_timeout_mins),
+        threshold_text: "Standby sync".to_string(),
+        blocker_detail: None,
+    };
+
+    let monitor_timeout_secs = (config.monitor_timeout_mins as u64) * 60;
+    if (metrics.idle_secs as u64) >= monitor_timeout_secs {
+        if state.monitor_standby_start_epoch_secs.is_none() {
+            state.monitor_standby_start_epoch_secs = Some(metrics.now_epoch_secs);
+        }
+    } else if let Some(start) = state.monitor_standby_start_epoch_secs.take() {
+        let dur = metrics.now_epoch_secs.saturating_sub(start);
+        if dur > 10 {
+            log_monitor_off_duration = Some(dur);
+        }
+    }
+
+    // Condition 9: Windows Power Requests (DISPLAY lock)
+    let cond9_pass = !metrics.display_request_active;
+    let cond9_power_requests = ConditionStatus {
+        enabled: config.cond9_power_requests_enabled && config.respect_display_requests,
+        is_passing: cond9_pass,
+        value_text: if metrics.display_request_active {
+            "Active (Video)".to_string()
+        } else {
+            "None".to_string()
+        },
+        threshold_text: "Respect DISPLAY".to_string(),
+        blocker_detail: if !cond9_pass && config.cond9_power_requests_enabled && config.respect_display_requests {
+            Some("Windows DISPLAY Request (Active video playback or media lock)".to_string())
+        } else {
+            None
+        },
+    };
+    if config.cond9_power_requests_enabled && config.respect_display_requests && metrics.display_request_active {
+        blockers.push("DISPLAY Request (Video playback active)".to_string());
+    }
+
+    // Condition 10: Watched GPU % (AI Models & Compute)
+    let cond10_pass = !config.cond10_gpu_enabled || metrics.gpu_util < config.gpu_threshold_pct;
+    let cond10_gpu = ConditionStatus {
+        enabled: config.cond10_gpu_enabled,
+        is_passing: cond10_pass,
+        value_text: format!("{:.1}%", metrics.gpu_util),
+        threshold_text: format!("< {:.1}%", config.gpu_threshold_pct),
+        blocker_detail: if !cond10_pass && config.cond10_gpu_enabled {
+            Some(format!("Watched GPU ({:.1}%)", metrics.gpu_util))
+        } else {
+            None
+        },
+    };
+    if config.cond10_gpu_enabled && !cond10_pass {
+        blockers.push(format!("Watched GPU ({:.1}%)", metrics.gpu_util));
+    }
+
+    // Condition 11: Microphone & Camera Active (Meetings & Calls)
+    let cond11_pass = !config.cond11_mic_cam_enabled || (!metrics.mic_active && !metrics.cam_active);
+    let cond11_mic_cam = ConditionStatus {
+        enabled: config.cond11_mic_cam_enabled,
+        is_passing: cond11_pass,
+        value_text: if metrics.mic_active || metrics.cam_active {
+            format!("In Use ({})", if metrics.mic_cam_app.is_empty() { "Call/Meeting" } else { &metrics.mic_cam_app })
+        } else {
+            "Quiet".to_string()
+        },
+        threshold_text: "Require Idle".to_string(),
+        blocker_detail: if !cond11_pass && config.cond11_mic_cam_enabled {
+            Some(format!("Microphone/Camera in use ({})", metrics.mic_cam_app))
+        } else {
+            None
+        },
+    };
+    if config.cond11_mic_cam_enabled && !cond11_pass {
+        blockers.push(format!(
+            "Mic/Cam In Use ({})",
+            if metrics.mic_cam_app.is_empty() { "Meeting" } else { &metrics.mic_cam_app }
+        ));
+    }
+
+    // Check Agent Lease
+    if let Some(until) = state.agent_lease_until_epoch_secs {
+        if metrics.now_epoch_secs < until {
+            let rem = until - metrics.now_epoch_secs;
+            let reason = if state.agent_lease_reason.is_empty() {
+                "Agent Task".to_string()
+            } else {
+                state.agent_lease_reason.clone()
+            };
+            let pid_info = if let Some(pid) = state.agent_lease_pid {
+                format!(" [PID {}]", pid)
+            } else {
+                String::new()
+            };
+            blockers.push(format!("Agent Lease: \"{}\"{} ({}s remaining)", reason, pid_info, rem));
+        } else {
+            state.agent_lease_until_epoch_secs = None;
+            state.agent_lease_reason.clear();
+            state.agent_lease_pid = None;
+        }
+    }
+
+    // Check Postpone
+    if let Some(until) = state.postponed_until_epoch_secs {
+        if metrics.now_epoch_secs < until {
+            let rem = until - metrics.now_epoch_secs;
+            blockers.push(format!("Postponed ({}s remaining)", rem));
+        } else {
+            state.postponed_until_epoch_secs = None;
+        }
+    }
+
+    // Overall Decision & Countdown
+    let mut trigger_sleep = false;
+    let all_conditions_pass;
+    let blocker_banner_text;
+
+    let countdown_max = config.idle_threshold_secs;
+
+    if !config.guard_enabled {
+        all_conditions_pass = false;
+        state.countdown_secs = config.idle_threshold_secs;
+        blocker_banner_text = "PAUSED: Master Guard toggle is OFF. Automatic sleep disabled.".to_string();
+    } else if blockers.is_empty() {
+        all_conditions_pass = true;
+        if state.countdown_secs > 0 {
+            state.countdown_secs -= 1;
+        }
+        blocker_banner_text = format!(
+            "ALL CONDITIONS PASS -> PC Sleeping in {}s / {}s",
+            state.countdown_secs, countdown_max
+        );
+
+        if state.countdown_secs == 0 {
+            trigger_sleep = true;
+            state.countdown_secs = countdown_max;
+        }
+    } else {
+        all_conditions_pass = false;
+        state.countdown_secs = config.idle_threshold_secs;
+        let first = &blockers[0];
+        let extra = if blockers.len() > 1 {
+            format!(" (+{} other conditions)", blockers.len() - 1)
+        } else {
+            String::new()
+        };
+        blocker_banner_text = format!("BLOCKED BY: {}{}", first, extra);
+    }
+
+    let trigger_grace_banner = all_conditions_pass
+        && state.countdown_secs <= config.grace_period_secs
+        && state.countdown_secs > 0;
+
+    Decision {
+        all_conditions_pass,
+        blockers,
+        blocker_banner_text,
+        countdown_secs: state.countdown_secs,
+        countdown_max,
+        trigger_sleep,
+        trigger_grace_banner,
+        log_monitor_off_duration,
+        woke_from_sleep_reset,
+        cond1_idle,
+        cond2_agent_cpu,
+        cond3_download,
+        cond4_pc_cpu,
+        cond5_pc_disk,
+        cond6_pc_net,
+        cond7_spike_filter,
+        cond8_monitor_timeout,
+        cond9_power_requests,
+        cond10_gpu,
+        cond11_mic_cam,
+    }
 }
 
 pub struct SharedState {
@@ -339,6 +924,10 @@ pub struct SharedState {
     // Agent Lease
     pub agent_lease_until: Option<Instant>,
     pub agent_lease_reason: String,
+    pub agent_lease_pid: Option<u32>,
+
+    // Security & Auth
+    pub api_token: String,
 
     // Network / WoL
     pub local_ip: String,
@@ -405,6 +994,8 @@ impl SharedState {
 
             agent_lease_until: None,
             agent_lease_reason: String::new(),
+            agent_lease_pid: None,
+            api_token: get_or_create_api_token(),
 
             local_ip: get_local_ip(),
             mac_address: "00:00:00:00:00:00".to_string(),
@@ -1000,7 +1591,20 @@ fn parse_query_param(url: &str, key: &str) -> Option<String> {
     None
 }
 
-fn handle_http_client(mut stream: TcpStream, state: Arc<Mutex<SharedState>>) {
+fn handle_http_client(mut stream: TcpStream, state: Arc<Mutex<SharedState>>, rate_limiter: Arc<RateLimiter>) {
+    let peer_ip = stream.peer_addr().map(|a| a.ip()).unwrap_or(IpAddr::V4(std::net::Ipv4Addr::LOCALHOST));
+    let (allow_lan, local_ip, configured_token) = {
+        let s = state.lock().unwrap();
+        (s.config.allow_lan_access, s.local_ip.clone(), s.api_token.clone())
+    };
+
+    if !peer_ip.is_loopback() && !allow_lan {
+        let body = r#"{"error":"forbidden","message":"LAN access is disabled by configuration"}"#;
+        let resp = format!("HTTP/1.1 403 Forbidden\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", body.len(), body);
+        let _ = stream.write_all(resp.as_bytes());
+        return;
+    }
+
     let mut buf = [0u8; 4096];
     let n = match stream.read(&mut buf) {
         Ok(n) if n > 0 => n,
@@ -1014,6 +1618,55 @@ fn handle_http_client(mut stream: TcpStream, state: Arc<Mutex<SharedState>>) {
     }
     let path = parts[1];
 
+    let mut host_header = "";
+    let mut origin_header = "";
+    let mut auth_header = "";
+    let mut x_token_header = "";
+
+    for line in req_str.lines().skip(1) {
+        let lower = line.to_lowercase();
+        if lower.starts_with("host:") {
+            host_header = line[5..].trim();
+        } else if lower.starts_with("origin:") {
+            origin_header = line[7..].trim();
+        } else if lower.starts_with("authorization:") {
+            auth_header = line[14..].trim();
+        } else if lower.starts_with("x-apg-token:") {
+            x_token_header = line[12..].trim();
+        }
+    }
+
+    // Host validation (DNS rebinding protection)
+    if !host_header.is_empty() {
+        let host_name = host_header.split(':').next().unwrap_or("").trim().to_lowercase();
+        let is_valid_host = host_name == "localhost"
+            || host_name == "127.0.0.1"
+            || host_name == "[::1]"
+            || host_name == "::1"
+            || (!local_ip.is_empty() && host_name == local_ip.to_lowercase());
+        if !is_valid_host {
+            let body = r#"{"error":"forbidden_host","message":"Host header rejected for DNS rebinding protection"}"#;
+            let resp = format!("HTTP/1.1 403 Forbidden\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", body.len(), body);
+            let _ = stream.write_all(resp.as_bytes());
+            return;
+        }
+    }
+
+    // Origin validation (Reject cross-origin browser requests)
+    if !origin_header.is_empty() {
+        let stripped_origin = origin_header
+            .trim_start_matches("http://")
+            .trim_start_matches("https://");
+        let origin_host = stripped_origin.split(':').next().unwrap_or("").trim().to_lowercase();
+        let host_name = host_header.split(':').next().unwrap_or("").trim().to_lowercase();
+        if !origin_host.is_empty() && origin_host != host_name {
+            let body = r#"{"error":"cross_origin_forbidden","message":"Cross-origin requests are rejected"}"#;
+            let resp = format!("HTTP/1.1 403 Forbidden\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", body.len(), body);
+            let _ = stream.write_all(resp.as_bytes());
+            return;
+        }
+    }
+
     if path == "/" || path == "/index.html" {
         let resp = format!(
             "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
@@ -1022,6 +1675,40 @@ fn handle_http_client(mut stream: TcpStream, state: Arc<Mutex<SharedState>>) {
         );
         let _ = stream.write_all(resp.as_bytes());
         return;
+    }
+
+    // Auth verification for all /api/* endpoints
+    if path.starts_with("/api/") {
+        if !rate_limiter.check_allowed(peer_ip) {
+            let body = r#"{"error":"too_many_requests","message":"Rate limit exceeded (max 10 failed auths/min)"}"#;
+            let resp = format!("HTTP/1.1 429 Too Many Requests\r\nContent-Type: application/json\r\nRetry-After: 60\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", body.len(), body);
+            let _ = stream.write_all(resp.as_bytes());
+            return;
+        }
+
+        let mut supplied_token = None;
+        if auth_header.to_lowercase().starts_with("bearer ") {
+            supplied_token = Some(auth_header[7..].trim().to_string());
+        } else if !x_token_header.is_empty() {
+            supplied_token = Some(x_token_header.to_string());
+        } else if let Some(t) = parse_query_param(path, "token") {
+            supplied_token = Some(t.trim().to_string());
+        }
+
+        let token_valid = match supplied_token {
+            Some(ref t) => constant_time_eq(t, &configured_token),
+            None => false,
+        };
+
+        if !token_valid {
+            rate_limiter.record_failure(peer_ip);
+            let body = r#"{"error":"unauthorized","message":"Missing or invalid API token"}"#;
+            let resp = format!("HTTP/1.1 401 Unauthorized\r\nContent-Type: application/json\r\nWWW-Authenticate: Bearer\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", body.len(), body);
+            let _ = stream.write_all(resp.as_bytes());
+            return;
+        }
+
+        rate_limiter.record_success(peer_ip);
     }
 
     if path == "/api/status" {
@@ -1067,6 +1754,7 @@ fn handle_http_client(mut stream: TcpStream, state: Arc<Mutex<SharedState>>) {
                 "agent_lease_active": lease_active,
                 "agent_lease_reason": s.agent_lease_reason,
                 "agent_lease_remaining_secs": lease_remaining,
+                "agent_lease_pid": s.agent_lease_pid,
                 "local_ip": s.local_ip,
                 "mac_address": s.mac_address,
                 "energy": {
@@ -1077,7 +1765,7 @@ fn handle_http_client(mut stream: TcpStream, state: Arc<Mutex<SharedState>>) {
             }).to_string()
         };
         let resp = format!(
-            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
             json.len(),
             json
         );
@@ -1090,7 +1778,7 @@ fn handle_http_client(mut stream: TcpStream, state: Arc<Mutex<SharedState>>) {
         s.set_toast("Remote command: Sleep Now executed.");
         let _ = sleep_now();
         let body = r#"{"status":"ok","message":"System sleep command issued"}"#;
-        let resp = format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", body.len(), body);
+        let resp = format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", body.len(), body);
         let _ = stream.write_all(resp.as_bytes());
         return;
     }
@@ -1101,7 +1789,7 @@ fn handle_http_client(mut stream: TcpStream, state: Arc<Mutex<SharedState>>) {
         s.postponed_until = Some(Instant::now() + Duration::from_secs(mins * 60));
         s.set_toast(&format!("Sleep postponed by {} minutes via Remote/API.", mins));
         let body = format!(r#"{{"status":"ok","message":"Postponed for {} minutes","mins":{}}}"#, mins, mins);
-        let resp = format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", body.len(), body);
+        let resp = format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", body.len(), body);
         let _ = stream.write_all(resp.as_bytes());
         return;
     }
@@ -1111,7 +1799,7 @@ fn handle_http_client(mut stream: TcpStream, state: Arc<Mutex<SharedState>>) {
         s.config.guard_enabled = !s.config.guard_enabled;
         s.config_dirty = true;
         let body = format!(r#"{{"status":"ok","guard_enabled":{}}}"#, s.config.guard_enabled);
-        let resp = format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", body.len(), body);
+        let resp = format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", body.len(), body);
         let _ = stream.write_all(resp.as_bytes());
         return;
     }
@@ -1119,12 +1807,15 @@ fn handle_http_client(mut stream: TcpStream, state: Arc<Mutex<SharedState>>) {
     if path.starts_with("/api/lease") {
         let mins = parse_query_param(path, "mins").and_then(|m| m.parse::<u64>().ok()).unwrap_or(30);
         let reason = parse_query_param(path, "reason").unwrap_or_else(|| "Remote Lease".to_string());
+        let pid = parse_query_param(path, "pid").and_then(|p| p.parse::<u32>().ok());
         let mut s = state.lock().unwrap();
         s.agent_lease_until = Some(Instant::now() + Duration::from_secs(mins * 60));
         s.agent_lease_reason = reason.clone();
-        s.set_toast(&format!("Agent Lease granted for {}m: {}", mins, reason));
-        let body = format!(r#"{{"status":"ok","lease_mins":{},"reason":"{}"}}"#, mins, reason);
-        let resp = format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", body.len(), body);
+        s.agent_lease_pid = pid;
+        let pid_msg = pid.map(|p| format!(" (PID {})", p)).unwrap_or_default();
+        s.set_toast(&format!("Agent Lease granted for {}m: {}{}", mins, reason, pid_msg));
+        let body = format!(r#"{{"status":"ok","lease_mins":{},"reason":"{}","pid":{:?}}}"#, mins, reason, pid);
+        let resp = format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", body.len(), body);
         let _ = stream.write_all(resp.as_bytes());
         return;
     }
@@ -1133,9 +1824,10 @@ fn handle_http_client(mut stream: TcpStream, state: Arc<Mutex<SharedState>>) {
         let mut s = state.lock().unwrap();
         s.agent_lease_until = None;
         s.agent_lease_reason.clear();
+        s.agent_lease_pid = None;
         s.set_toast("Agent Lease released via Remote/API.");
         let body = r#"{"status":"ok","message":"Agent lease cleared"}"#;
-        let resp = format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", body.len(), body);
+        let resp = format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", body.len(), body);
         let _ = stream.write_all(resp.as_bytes());
         return;
     }
@@ -1146,7 +1838,7 @@ fn handle_http_client(mut stream: TcpStream, state: Arc<Mutex<SharedState>>) {
         s.save_energy_history();
         s.set_toast("Energy history cleared via Remote/API.");
         let body = r#"{"status":"ok","message":"Energy records deleted"}"#;
-        let resp = format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", body.len(), body);
+        let resp = format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", body.len(), body);
         let _ = stream.write_all(resp.as_bytes());
         return;
     }
@@ -1156,7 +1848,7 @@ fn handle_http_client(mut stream: TcpStream, state: Arc<Mutex<SharedState>>) {
     let _ = stream.write_all(resp.as_bytes());
 }
 
-fn start_web_server(state: Arc<Mutex<SharedState>>, port: u16) {
+fn start_web_server(state: Arc<Mutex<SharedState>>, port: u16, rate_limiter: Arc<RateLimiter>) {
     std::thread::spawn(move || {
         let addr = format!("0.0.0.0:{}", port);
         let listener = match TcpListener::bind(&addr) {
@@ -1166,17 +1858,19 @@ fn start_web_server(state: Arc<Mutex<SharedState>>, port: u16) {
 
         for stream in listener.incoming().flatten() {
             let state_clone = Arc::clone(&state);
+            let limiter_clone = Arc::clone(&rate_limiter);
             std::thread::spawn(move || {
-                handle_http_client(stream, state_clone);
+                handle_http_client(stream, state_clone, limiter_clone);
             });
         }
     });
 }
 
 fn send_cli_request(path: &str) -> Result<String, String> {
+    let token = get_or_create_api_token();
     let mut stream = TcpStream::connect("127.0.0.1:49281")
         .map_err(|e| format!("Could not connect to running Agent Power Guard instance on 127.0.0.1:49281 (Is the app running?): {}", e))?;
-    let req = format!("GET {} HTTP/1.1\r\nHost: 127.0.0.1:49281\r\nConnection: close\r\n\r\n", path);
+    let req = format!("GET {} HTTP/1.1\r\nHost: 127.0.0.1:49281\r\nAuthorization: Bearer {}\r\nConnection: close\r\n\r\n", path, token);
     stream.write_all(req.as_bytes()).map_err(|e| e.to_string())?;
     let mut resp = String::new();
     stream.read_to_string(&mut resp).map_err(|e| e.to_string())?;
@@ -1187,6 +1881,292 @@ fn send_cli_request(path: &str) -> Result<String, String> {
     }
 }
 
+// Phase 1.1: Process-bound Run Wrapper
+fn run_cli_wrapper(args: &[String]) {
+    #[cfg(windows)]
+    unsafe {
+        windows_sys::Win32::System::Console::AttachConsole(0xFFFFFFFF);
+    }
+
+    let mut max_mins: u64 = 60;
+    let mut reason: Option<String> = None;
+    let mut cmd_parts = Vec::new();
+
+    let mut i = 0;
+    while i < args.len() {
+        if args[i] == "--" {
+            cmd_parts.extend_from_slice(&args[i + 1..]);
+            break;
+        } else if args[i] == "--max-mins" && i + 1 < args.len() {
+            max_mins = args[i + 1].parse::<u64>().unwrap_or(60);
+            i += 2;
+        } else if args[i] == "--reason" && i + 1 < args.len() {
+            reason = Some(args[i + 1].clone());
+            i += 2;
+        } else {
+            cmd_parts.extend_from_slice(&args[i..]);
+            break;
+        }
+    }
+
+    if cmd_parts.is_empty() {
+        eprintln!("Usage: agent-power-guard run [--max-mins N] [--reason \"text\"] -- <command...>");
+        std::process::exit(1);
+    }
+
+    let program = &cmd_parts[0];
+    let prog_args = &cmd_parts[1..];
+    let lease_reason = reason.unwrap_or_else(|| cmd_parts.join(" "));
+
+    println!("⚡ [Agent Power Guard] Spawning child: {} {:?}", program, prog_args);
+    let mut child = match Command::new(program).args(prog_args).spawn() {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("Failed to spawn child command '{}': {}", program, e);
+            std::process::exit(1);
+        }
+    };
+
+    let pid = child.id();
+    let encoded_reason = lease_reason.replace(' ', "%20");
+    let path = format!("/api/lease?mins={}&reason={}&pid={}", max_mins, encoded_reason, pid);
+    if let Err(e) = send_cli_request(&path) {
+        eprintln!("Warning: Failed to acquire PID lease from Agent Power Guard watchdog: {}", e);
+    } else {
+        println!("🔒 [Agent Power Guard] Acquired PID-bound lease (PID {}, {}m cap): {}", pid, max_mins, lease_reason);
+    }
+
+    let status = child.wait();
+    let _ = send_cli_request("/api/release");
+    println!("🔓 [Agent Power Guard] Child process exited. Lease released.");
+
+    match status {
+        Ok(st) => {
+            std::process::exit(st.code().unwrap_or(0));
+        }
+        Err(_) => {
+            std::process::exit(1);
+        }
+    }
+}
+
+// Phase 1.2: MCP Stdio Server
+fn run_mcp_server() {
+    use std::io::{BufRead, BufReader};
+    let stdin = std::io::stdin();
+    let mut reader = BufReader::new(stdin);
+
+    let tools_list = serde_json::json!({
+        "tools": [
+            {
+                "name": "keep_awake",
+                "description": "Acquire an agent lease to keep the workstation awake while running builds, tests, or AI workflows",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "minutes": { "type": "number", "description": "Number of minutes to keep machine awake (e.g. 15, 30, 60)" },
+                        "reason": { "type": "string", "description": "Task description or agent step name" }
+                    },
+                    "required": ["minutes"]
+                }
+            },
+            {
+                "name": "release",
+                "description": "Release the active agent lease and allow workstation to sleep normally",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {}
+                }
+            },
+            {
+                "name": "status",
+                "description": "Get current watchdog status, countdown, idle metrics, and blockers",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {}
+                }
+            },
+            {
+                "name": "postpone",
+                "description": "Postpone workstation sleep by N minutes without a named lease",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "minutes": { "type": "number", "description": "Number of minutes to postpone" }
+                    }
+                }
+            }
+        ]
+    });
+
+    let mut line = String::new();
+    while let Ok(n) = reader.read_line(&mut line) {
+        if n == 0 { break; }
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            line.clear();
+            continue;
+        }
+
+        if let Ok(req) = serde_json::from_str::<serde_json::Value>(trimmed) {
+            let id = req.get("id").cloned().unwrap_or(serde_json::Value::Null);
+            let method = req.get("method").and_then(|m| m.as_str()).unwrap_or("");
+
+            match method {
+                "initialize" => {
+                    let resp = serde_json::json!({
+                        "jsonrpc": "2.0",
+                        "id": id,
+                        "result": {
+                            "protocolVersion": "2024-11-05",
+                            "capabilities": {
+                                "tools": {}
+                            },
+                            "serverInfo": {
+                                "name": "agent-power-guard",
+                                "version": "1.1.0"
+                            }
+                        }
+                    });
+                    println!("{}", resp);
+                }
+                "notifications/initialized" => {}
+                "tools/list" => {
+                    let resp = serde_json::json!({
+                        "jsonrpc": "2.0",
+                        "id": id,
+                        "result": tools_list
+                    });
+                    println!("{}", resp);
+                }
+                "tools/call" => {
+                    let params = req.get("params");
+                    let tool_name = params.and_then(|p| p.get("name")).and_then(|n| n.as_str()).unwrap_or("");
+                    let arguments = params.and_then(|p| p.get("arguments")).cloned().unwrap_or(serde_json::json!({}));
+
+                    let result_text = match tool_name {
+                        "keep_awake" => {
+                            let mins = arguments.get("minutes").and_then(|m| m.as_u64()).unwrap_or(30);
+                            let reason = arguments.get("reason").and_then(|r| r.as_str()).unwrap_or("MCP Agent Task");
+                            let path = format!("/api/lease?mins={}&reason={}", mins, reason.replace(' ', "%20"));
+                            send_cli_request(&path).unwrap_or_else(|e| format!("Error: {}", e))
+                        }
+                        "release" => {
+                            send_cli_request("/api/release").unwrap_or_else(|e| format!("Error: {}", e))
+                        }
+                        "status" => {
+                            send_cli_request("/api/status").unwrap_or_else(|e| format!("Error: {}", e))
+                        }
+                        "postpone" => {
+                            let mins = arguments.get("minutes").and_then(|m| m.as_u64()).unwrap_or(15);
+                            let path = format!("/api/postpone?mins={}", mins);
+                            send_cli_request(&path).unwrap_or_else(|e| format!("Error: {}", e))
+                        }
+                        _ => format!("Unknown tool: {}", tool_name),
+                    };
+
+                    let resp = serde_json::json!({
+                        "jsonrpc": "2.0",
+                        "id": id,
+                        "result": {
+                            "content": [
+                                {
+                                    "type": "text",
+                                    "text": result_text
+                                }
+                            ]
+                        }
+                    });
+                    println!("{}", resp);
+                }
+                _ => {
+                    let resp = serde_json::json!({
+                        "jsonrpc": "2.0",
+                        "id": id,
+                        "error": {
+                            "code": -32601,
+                            "message": format!("Method not found: {}", method)
+                        }
+                    });
+                    println!("{}", resp);
+                }
+            }
+        }
+        line.clear();
+    }
+}
+
+// Phase 1.3: Agent Profiles
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentProfile {
+    pub name: String,
+    pub description: String,
+    pub keywords: String,
+    pub agent_cpu_threshold: f32,
+    pub gpu_threshold_pct: f32,
+}
+
+pub fn get_built_in_profiles() -> Vec<AgentProfile> {
+    vec![
+        AgentProfile {
+            name: "Claude Code".to_string(),
+            description: "Watches Claude Code CLI and background worker processes".to_string(),
+            keywords: "claude, code".to_string(),
+            agent_cpu_threshold: 2.0,
+            gpu_threshold_pct: 5.0,
+        },
+        AgentProfile {
+            name: "Cursor".to_string(),
+            description: "Watches Cursor IDE and Language Server indexers".to_string(),
+            keywords: "cursor, code, language_server".to_string(),
+            agent_cpu_threshold: 2.0,
+            gpu_threshold_pct: 5.0,
+        },
+        AgentProfile {
+            name: "Antigravity".to_string(),
+            description: "Watches Antigravity IDE agent runner and MCP sidecars".to_string(),
+            keywords: "antigravity, language_server".to_string(),
+            agent_cpu_threshold: 2.0,
+            gpu_threshold_pct: 5.0,
+        },
+        AgentProfile {
+            name: "Ollama & Local LLM".to_string(),
+            description: "Watches Ollama, llama.cpp, and local GPU inference runners".to_string(),
+            keywords: "ollama, llama, vllm".to_string(),
+            agent_cpu_threshold: 5.0,
+            gpu_threshold_pct: 10.0,
+        },
+        AgentProfile {
+            name: "Docker & Containers".to_string(),
+            description: "Watches Docker daemon, containerd, and WSL2 background tasks".to_string(),
+            keywords: "docker, dockerd, containerd, wsl".to_string(),
+            agent_cpu_threshold: 3.0,
+            gpu_threshold_pct: 5.0,
+        },
+        AgentProfile {
+            name: "Rust / Cargo Toolchain".to_string(),
+            description: "Watches cargo builds, rustc, and rust-analyzer".to_string(),
+            keywords: "cargo, rustc, rust-analyzer".to_string(),
+            agent_cpu_threshold: 5.0,
+            gpu_threshold_pct: 5.0,
+        },
+        AgentProfile {
+            name: "Node / Web Toolchain".to_string(),
+            description: "Watches node, npm, pnpm, bun, tsc, vite, and next dev servers".to_string(),
+            keywords: "node, npm, pnpm, bun, tsc, esbuild, vite".to_string(),
+            agent_cpu_threshold: 3.0,
+            gpu_threshold_pct: 5.0,
+        },
+        AgentProfile {
+            name: "Python ML".to_string(),
+            description: "Watches python training scripts, PyTorch, and Jupyter kernels".to_string(),
+            keywords: "python, torch, jupyter".to_string(),
+            agent_cpu_threshold: 5.0,
+            gpu_threshold_pct: 10.0,
+        },
+    ]
+}
+
 fn handle_cli_command(args: &[String]) {
     #[cfg(windows)]
     unsafe {
@@ -1194,6 +2174,12 @@ fn handle_cli_command(args: &[String]) {
     }
     let cmd = args[1].to_lowercase();
     match cmd.as_str() {
+        "run" => {
+            run_cli_wrapper(&args[2..]);
+        }
+        "mcp" => {
+            run_mcp_server();
+        }
         "lease" => {
             let mins = args.get(2).and_then(|m| m.parse::<u32>().ok()).unwrap_or(30);
             let reason = args.get(3).cloned().unwrap_or_else(|| "CLI Lease".to_string());
@@ -1228,6 +2214,9 @@ fn handle_cli_command(args: &[String]) {
                         println!("Whole-PC Network : {:.0} KB/s", v["live_pc_net"]);
                         println!("Mic/Cam In Use   : {}", v["live_mic_cam_active"]);
                         println!("Agent Lease      : {} ({})", v["agent_lease_active"], v["agent_lease_reason"]);
+                        if let Some(pid) = v["agent_lease_pid"].as_u64() {
+                            println!("Bound Process PID: {}", pid);
+                        }
                         println!("Local Web URL    : http://{}:49281", v["local_ip"]);
                         println!("==================================================");
                     } else {
@@ -1254,12 +2243,14 @@ fn handle_cli_command(args: &[String]) {
             println!("Agent Power Guard CLI");
             println!();
             println!("Usage:");
-            println!("  agent-power-guard lease [mins] [reason]  - Block sleep with an active agent lease");
-            println!("  agent-power-guard release                - Release active agent lease");
-            println!("  agent-power-guard status                 - Query watchdog status");
-            println!("  agent-power-guard postpone [mins]        - Postpone sleep by N minutes");
-            println!("  agent-power-guard sleep                  - Trigger immediate system sleep");
-            println!("  agent-power-guard help                   - Show this help message");
+            println!("  agent-power-guard run [--max-mins N] [--reason \"text\"] -- <cmd...>  - Keep awake while command runs (process-bound lease)");
+            println!("  agent-power-guard mcp                                              - Launch stdio Model Context Protocol (MCP) server");
+            println!("  agent-power-guard lease [mins] [reason]                            - Block sleep with an active agent lease");
+            println!("  agent-power-guard release                                          - Release active agent lease");
+            println!("  agent-power-guard status                                           - Query watchdog status");
+            println!("  agent-power-guard postpone [mins]                                  - Postpone sleep by N minutes");
+            println!("  agent-power-guard sleep                                            - Trigger immediate system sleep");
+            println!("  agent-power-guard help                                             - Show this help message");
         }
         _ => {
             eprintln!("Unknown command: '{}'. Run 'agent-power-guard help' for options.", cmd);
@@ -1291,7 +2282,6 @@ pub fn start_watchdog_thread(state: Arc<Mutex<SharedState>>, egui_ctx: egui::Con
 
         let mut cached_display_request = false;
         let mut last_requests_check = Instant::now() - Duration::from_secs(10);
-        let mut consecutive_spikes: u32 = 0;
 
         loop {
             let loop_start = Instant::now();
@@ -1308,7 +2298,6 @@ pub fn start_watchdog_thread(state: Arc<Mutex<SharedState>>, egui_ctx: egui::Con
                 if s.last_wall_clock_secs > 0 && now_wall > s.last_wall_clock_secs + 10 {
                     s.countdown_secs = s.countdown_max;
                     s.set_toast("System woke from sleep! Watchdog countdown reset.");
-                    consecutive_spikes = 0;
                     s.pc_spike_sustained_counter = 0;
                     woke_from_sleep = true;
                 }
@@ -1367,7 +2356,7 @@ pub fn start_watchdog_thread(state: Arc<Mutex<SharedState>>, egui_ctx: egui::Con
                 last_requests_check = Instant::now();
             }
 
-            let mut trigger_sleep = false;
+            let trigger_sleep;
 
             {
                 let mut s = state.lock().unwrap();
@@ -1389,6 +2378,14 @@ pub fn start_watchdog_thread(state: Arc<Mutex<SharedState>>, egui_ctx: egui::Con
                     .filter(|w| !w.is_empty())
                     .collect();
 
+                let ignored_keywords: Vec<String> = s
+                    .config
+                    .ignored_processes
+                    .split(',')
+                    .map(|w| w.trim().to_lowercase())
+                    .filter(|w| !w.is_empty())
+                    .collect();
+
                 let mut max_agent_cpu = 0.0f32;
                 let mut max_agent_proc = "None".to_string();
                 let mut max_dl_kbps = 0.0f32;
@@ -1396,6 +2393,11 @@ pub fn start_watchdog_thread(state: Arc<Mutex<SharedState>>, egui_ctx: egui::Con
 
                 for (_pid, proc) in sys.processes() {
                     let proc_name = proc.name().to_string_lossy().to_lowercase();
+
+                    // Phase 1.3: Ignore list
+                    if ignored_keywords.iter().any(|k| proc_name.contains(k)) {
+                        continue;
+                    }
 
                     for kw in &agent_keywords {
                         if proc_name.contains(kw) {
@@ -1462,285 +2464,80 @@ pub fn start_watchdog_thread(state: Arc<Mutex<SharedState>>, egui_ctx: egui::Con
                 }
                 s.history_pc_net.push_back(whole_pc_net_kbps);
 
-                // 3. Condition Evaluation
-                let cfg = s.config.clone();
-                let mut blockers = Vec::new();
-
-                // Condition 1: Human Input Idle
-                let cond1_pass = idle_secs >= cfg.idle_threshold_secs;
-                s.cond1_idle = ConditionStatus {
-                    enabled: cfg.cond1_idle_enabled,
-                    is_passing: cond1_pass,
-                    value_text: format!("{}s", idle_secs),
-                    threshold_text: format!(">= {}s", cfg.idle_threshold_secs),
-                    blocker_detail: if !cond1_pass && cfg.cond1_idle_enabled {
-                        Some(format!("Human Activity (User active, idle only {}s < {}s)", idle_secs, cfg.idle_threshold_secs))
-                    } else {
-                        None
-                    },
-                };
-                if cfg.cond1_idle_enabled && !cond1_pass {
-                    blockers.push(format!("Human Idle ({}s < {}s)", idle_secs, cfg.idle_threshold_secs));
-                }
-
-                // Condition 2: Watched Agent CPU %
-                let cond2_pass = max_agent_cpu < cfg.agent_cpu_threshold;
-                s.cond2_agent_cpu = ConditionStatus {
-                    enabled: cfg.cond2_agent_cpu_enabled,
-                    is_passing: cond2_pass,
-                    value_text: format!("{:.1}% ({})", max_agent_cpu, max_agent_proc),
-                    threshold_text: format!("< {:.1}%", cfg.agent_cpu_threshold),
-                    blocker_detail: if !cond2_pass && cfg.cond2_agent_cpu_enabled {
-                        Some(format!("Agent CPU ({} at {:.1}% >= {:.1}%)", max_agent_proc, max_agent_cpu, cfg.agent_cpu_threshold))
-                    } else {
-                        None
-                    },
-                };
-                if cfg.cond2_agent_cpu_enabled && !cond2_pass {
-                    blockers.push(format!("Agent CPU ({} at {:.1}% >= {:.1}%)", max_agent_proc, max_agent_cpu, cfg.agent_cpu_threshold));
-                }
-
-                // Condition 3: Active Download / IDM
-                let cond3_pass = max_dl_kbps < cfg.download_threshold_kbps;
-                s.cond3_download = ConditionStatus {
-                    enabled: cfg.cond3_download_enabled,
-                    is_passing: cond3_pass,
-                    value_text: format!("{:.0} KB/s ({})", max_dl_kbps, max_dl_proc),
-                    threshold_text: format!("< {:.0} KB/s", cfg.download_threshold_kbps),
-                    blocker_detail: if !cond3_pass && cfg.cond3_download_enabled {
-                        Some(format!("Active Download ({} at {:.0} KB/s >= {:.0} KB/s)", max_dl_proc, max_dl_kbps, cfg.download_threshold_kbps))
-                    } else {
-                        None
-                    },
-                };
-                if cfg.cond3_download_enabled && !cond3_pass {
-                    blockers.push(format!("Active Download ({} at {:.0} KB/s)", max_dl_proc, max_dl_kbps));
-                }
-
-                // Condition 4, 5, 6: Whole-PC Metrics
-                let cond4_pass = whole_pc_cpu < cfg.pc_cpu_threshold;
-                let cond5_pass = whole_pc_disk_kbps < cfg.pc_disk_threshold_kbps;
-                let cond6_pass = whole_pc_net_kbps < cfg.pc_net_threshold_kbps;
-
-                s.cond4_pc_cpu = ConditionStatus {
-                    enabled: cfg.cond4_pc_cpu_enabled,
-                    is_passing: cond4_pass,
-                    value_text: format!("{:.1}%", whole_pc_cpu),
-                    threshold_text: format!("< {:.1}%", cfg.pc_cpu_threshold),
-                    blocker_detail: if !cond4_pass && cfg.cond4_pc_cpu_enabled {
-                        Some(format!("Whole-PC CPU ({:.1}% >= {:.1}%)", whole_pc_cpu, cfg.pc_cpu_threshold))
-                    } else {
-                        None
-                    },
-                };
-
-                s.cond5_pc_disk = ConditionStatus {
-                    enabled: cfg.cond5_pc_disk_enabled,
-                    is_passing: cond5_pass,
-                    value_text: format!("{:.0} KB/s", whole_pc_disk_kbps),
-                    threshold_text: format!("< {:.0} KB/s", cfg.pc_disk_threshold_kbps),
-                    blocker_detail: if !cond5_pass && cfg.cond5_pc_disk_enabled {
-                        Some(format!("Whole-PC Disk I/O ({:.0} KB/s >= {:.0} KB/s)", whole_pc_disk_kbps, cfg.pc_disk_threshold_kbps))
-                    } else {
-                        None
-                    },
-                };
-
-                s.cond6_pc_net = ConditionStatus {
-                    enabled: cfg.cond6_pc_net_enabled,
-                    is_passing: cond6_pass,
-                    value_text: format!("{:.0} KB/s", whole_pc_net_kbps),
-                    threshold_text: format!("< {:.0} KB/s", cfg.pc_net_threshold_kbps),
-                    blocker_detail: if !cond6_pass && cfg.cond6_pc_net_enabled {
-                        Some(format!("Whole-PC Network ({:.0} KB/s >= {:.0} KB/s)", whole_pc_net_kbps, cfg.pc_net_threshold_kbps))
-                    } else {
-                        None
-                    },
-                };
-
-                // Condition 7: Sustained Spike Filter
-                let any_pc_metric_tripped = (cfg.cond4_pc_cpu_enabled && !cond4_pass)
-                    || (cfg.cond5_pc_disk_enabled && !cond5_pass)
-                    || (cfg.cond6_pc_net_enabled && !cond6_pass);
-
-                if any_pc_metric_tripped {
-                    consecutive_spikes = consecutive_spikes.saturating_add(1);
-                } else {
-                    consecutive_spikes = 0;
-                }
-                s.pc_spike_sustained_counter = consecutive_spikes;
-
-                let spike_sustained = consecutive_spikes >= cfg.spike_filter_secs;
-                s.cond7_spike_filter = ConditionStatus {
-                    enabled: cfg.cond7_spike_filter_enabled,
-                    is_passing: !any_pc_metric_tripped || !spike_sustained,
-                    value_text: format!("{}s / {}s", consecutive_spikes, cfg.spike_filter_secs),
-                    threshold_text: format!("Debounce {}s", cfg.spike_filter_secs),
-                    blocker_detail: if any_pc_metric_tripped && spike_sustained && cfg.cond7_spike_filter_enabled {
-                        Some(format!("Sustained PC Spike (Activity exceeded {}s debounce filter)", cfg.spike_filter_secs))
-                    } else {
-                        None
-                    },
-                };
-
-                if cfg.cond7_spike_filter_enabled {
-                    if any_pc_metric_tripped && spike_sustained {
-                        if cfg.cond4_pc_cpu_enabled && !cond4_pass {
-                            blockers.push(format!("Whole-PC CPU ({:.1}%)", whole_pc_cpu));
-                        }
-                        if cfg.cond5_pc_disk_enabled && !cond5_pass {
-                            blockers.push(format!("Whole-PC Disk ({:.0} KB/s)", whole_pc_disk_kbps));
-                        }
-                        if cfg.cond6_pc_net_enabled && !cond6_pass {
-                            blockers.push(format!("Whole-PC Network ({:.0} KB/s)", whole_pc_net_kbps));
-                        }
-                    }
-                } else if any_pc_metric_tripped {
-                    if cfg.cond4_pc_cpu_enabled && !cond4_pass {
-                        blockers.push(format!("Whole-PC CPU ({:.1}%)", whole_pc_cpu));
-                    }
-                    if cfg.cond5_pc_disk_enabled && !cond5_pass {
-                        blockers.push(format!("Whole-PC Disk ({:.0} KB/s)", whole_pc_disk_kbps));
-                    }
-                    if cfg.cond6_pc_net_enabled && !cond6_pass {
-                        blockers.push(format!("Whole-PC Network ({:.0} KB/s)", whole_pc_net_kbps));
-                    }
-                }
-
-                // Condition 8: Monitor Turn-Off Timeout
-                s.cond8_monitor_timeout = ConditionStatus {
-                    enabled: cfg.cond8_monitor_timeout_enabled,
-                    is_passing: true,
-                    value_text: format!("{}m", cfg.monitor_timeout_mins),
-                    threshold_text: "Standby sync".to_string(),
-                    blocker_detail: None,
-                };
-
-                // Track Monitor Off time for Energy Savings
-                let monitor_timeout_secs = cfg.monitor_timeout_mins * 60;
-                if idle_secs >= monitor_timeout_secs {
-                    if s.monitor_standby_start.is_none() {
-                        s.monitor_standby_start = Some(Instant::now());
-                    }
-                } else if let Some(start) = s.monitor_standby_start.take() {
-                    let dur = start.elapsed().as_secs();
-                    if dur > 10 {
-                        s.log_energy_event("monitor_off", dur);
-                    }
-                }
-
-                // Condition 9: Windows Power Requests (DISPLAY lock)
-                let cond9_pass = !cached_display_request;
-                s.cond9_power_requests = ConditionStatus {
-                    enabled: cfg.cond9_power_requests_enabled && cfg.respect_display_requests,
-                    is_passing: cond9_pass,
-                    value_text: if cached_display_request { "Active (Video)".to_string() } else { "None".to_string() },
-                    threshold_text: "Respect DISPLAY".to_string(),
-                    blocker_detail: if !cond9_pass && cfg.cond9_power_requests_enabled && cfg.respect_display_requests {
-                        Some("Windows DISPLAY Request (Active video playback or media lock)".to_string())
-                    } else {
-                        None
-                    },
-                };
-                if cfg.cond9_power_requests_enabled && cfg.respect_display_requests && cached_display_request {
-                    blockers.push("DISPLAY Request (Video playback active)".to_string());
-                }
-
-                // Condition 10: Watched GPU % (AI Models & Compute)
-                let cond10_pass = !cfg.cond10_gpu_enabled || gpu_util < cfg.gpu_threshold_pct;
-                s.cond10_gpu = ConditionStatus {
-                    enabled: cfg.cond10_gpu_enabled,
-                    is_passing: cond10_pass,
-                    value_text: format!("{:.1}%", gpu_util),
-                    threshold_text: format!("< {:.1}%", cfg.gpu_threshold_pct),
-                    blocker_detail: if !cond10_pass && cfg.cond10_gpu_enabled {
-                        Some(format!("Watched GPU ({:.1}%)", gpu_util))
-                    } else {
-                        None
-                    },
-                };
-                if cfg.cond10_gpu_enabled && !cond10_pass {
-                    blockers.push(format!("Watched GPU ({:.1}%)", gpu_util));
-                }
-
-                // Condition 11: Microphone & Camera Active (Meetings & Calls)
-                let cond11_pass = !cfg.cond11_mic_cam_enabled || (!mic_active && !cam_active);
-                s.cond11_mic_cam = ConditionStatus {
-                    enabled: cfg.cond11_mic_cam_enabled,
-                    is_passing: cond11_pass,
-                    value_text: if mic_active || cam_active {
-                        format!("In Use ({})", if mic_cam_app.is_empty() { "Call/Meeting" } else { &mic_cam_app })
-                    } else {
-                        "Quiet".to_string()
-                    },
-                    threshold_text: "Require Idle".to_string(),
-                    blocker_detail: if !cond11_pass && cfg.cond11_mic_cam_enabled {
-                        Some(format!("Microphone/Camera in use ({})", mic_cam_app))
-                    } else {
-                        None
-                    },
-                };
-                if cfg.cond11_mic_cam_enabled && !cond11_pass {
-                    blockers.push(format!("Mic/Cam In Use ({})", if mic_cam_app.is_empty() { "Meeting" } else { &mic_cam_app }));
-                }
-
-                // Check Agent Lease
-                if let Some(lease_until) = s.agent_lease_until {
-                    if Instant::now() < lease_until {
-                        let rem = lease_until.duration_since(Instant::now()).as_secs();
-                        let reason = if s.agent_lease_reason.is_empty() { "Agent Task".to_string() } else { s.agent_lease_reason.clone() };
-                        blockers.push(format!("Agent Lease: \"{}\" ({}s remaining)", reason, rem));
-                    } else {
+                // Phase 1.1: Check PID aliveness for PID-bound lease
+                if let Some(pid) = s.agent_lease_pid {
+                    let sys_pid = sysinfo::Pid::from_u32(pid);
+                    if !sys.processes().contains_key(&sys_pid) {
                         s.agent_lease_until = None;
                         s.agent_lease_reason.clear();
+                        s.agent_lease_pid = None;
+                        s.set_toast(&format!("PID-bound lease auto-released: Process {} exited.", pid));
                     }
                 }
 
-                // Check Postpone
-                if let Some(postponed_until) = s.postponed_until {
-                    if Instant::now() < postponed_until {
-                        let rem = postponed_until.duration_since(Instant::now()).as_secs();
-                        blockers.push(format!("Postponed ({}s remaining)", rem));
-                    } else {
-                        s.postponed_until = None;
-                    }
+                // Phase 0.2: Pure Condition Evaluation via evaluate()
+                let metrics = Metrics {
+                    idle_secs,
+                    max_agent_cpu,
+                    max_agent_proc: max_agent_proc.clone(),
+                    max_dl_kbps,
+                    max_dl_proc: max_dl_proc.clone(),
+                    whole_pc_cpu,
+                    whole_pc_disk_kbps,
+                    whole_pc_net_kbps,
+                    gpu_util,
+                    mic_active,
+                    cam_active,
+                    mic_cam_app: mic_cam_app.clone(),
+                    display_request_active: cached_display_request,
+                    sensor_error: false,
+                    now_epoch_secs: now_wall,
+                };
+
+                let mut eval_state = EvaluationState {
+                    countdown_secs: s.countdown_secs,
+                    pc_spike_sustained_counter: s.pc_spike_sustained_counter,
+                    postponed_until_epoch_secs: s.postponed_until.map(|i| {
+                        let rem = i.saturating_duration_since(Instant::now()).as_secs();
+                        now_wall + rem
+                    }),
+                    agent_lease_until_epoch_secs: s.agent_lease_until.map(|i| {
+                        let rem = i.saturating_duration_since(Instant::now()).as_secs();
+                        now_wall + rem
+                    }),
+                    agent_lease_reason: s.agent_lease_reason.clone(),
+                    agent_lease_pid: s.agent_lease_pid,
+                    last_wall_clock_secs: s.last_wall_clock_secs,
+                    monitor_standby_start_epoch_secs: s.monitor_standby_start.map(|i| {
+                        let dur = i.elapsed().as_secs();
+                        now_wall.saturating_sub(dur)
+                    }),
+                };
+
+                let decision = evaluate(&s.config, &metrics, &mut eval_state);
+
+                s.countdown_secs = decision.countdown_secs;
+                s.countdown_max = decision.countdown_max;
+                s.all_conditions_pass = decision.all_conditions_pass;
+                s.blocker_banner_text = decision.blocker_banner_text;
+                s.pc_spike_sustained_counter = eval_state.pc_spike_sustained_counter;
+                s.grace_active = decision.trigger_grace_banner;
+                s.cond1_idle = decision.cond1_idle;
+                s.cond2_agent_cpu = decision.cond2_agent_cpu;
+                s.cond3_download = decision.cond3_download;
+                s.cond4_pc_cpu = decision.cond4_pc_cpu;
+                s.cond5_pc_disk = decision.cond5_pc_disk;
+                s.cond6_pc_net = decision.cond6_pc_net;
+                s.cond7_spike_filter = decision.cond7_spike_filter;
+                s.cond8_monitor_timeout = decision.cond8_monitor_timeout;
+                s.cond9_power_requests = decision.cond9_power_requests;
+                s.cond10_gpu = decision.cond10_gpu;
+                s.cond11_mic_cam = decision.cond11_mic_cam;
+                trigger_sleep = decision.trigger_sleep;
+
+                if let Some(dur) = decision.log_monitor_off_duration {
+                    s.log_energy_event("monitor_off", dur);
                 }
-
-                // Overall Blocker Evaluation
-                s.countdown_max = cfg.idle_threshold_secs;
-
-                if !cfg.guard_enabled {
-                    s.all_conditions_pass = false;
-                    s.countdown_secs = cfg.idle_threshold_secs;
-                    s.blocker_banner_text = "PAUSED: Master Guard toggle is OFF. Automatic sleep disabled.".to_string();
-                } else if blockers.is_empty() {
-                    s.all_conditions_pass = true;
-                    if s.countdown_secs > 0 {
-                        s.countdown_secs -= 1;
-                    }
-                    s.blocker_banner_text = format!(
-                        "ALL CONDITIONS PASS -> PC Sleeping in {}s / {}s",
-                        s.countdown_secs, s.countdown_max
-                    );
-
-                    if s.countdown_secs == 0 {
-                        trigger_sleep = true;
-                        s.countdown_secs = s.countdown_max;
-                    }
-                } else {
-                    s.all_conditions_pass = false;
-                    s.countdown_secs = cfg.idle_threshold_secs;
-                    let first = &blockers[0];
-                    let extra = if blockers.len() > 1 {
-                        format!(" (+{} other conditions)", blockers.len() - 1)
-                    } else {
-                        String::new()
-                    };
-                    s.blocker_banner_text = format!("BLOCKED BY: {}{}", first, extra);
-                }
-
-                // Grace Period Alert
-                s.grace_active = s.all_conditions_pass && s.countdown_secs <= cfg.grace_period_secs && s.countdown_secs > 0;
 
                 // Auto-save configuration if dirty
                 if s.config_dirty {
@@ -1859,8 +2656,9 @@ impl AgentPowerGuardApp {
             )
         };
 
-        // Launch embedded Web Server & Remote API
-        start_web_server(Arc::clone(&state), 49281);
+        // Launch embedded Web Server & Remote API with Rate Limiting
+        let rate_limiter = Arc::new(RateLimiter::new());
+        start_web_server(Arc::clone(&state), 49281, rate_limiter);
 
         // Launch background watchdog thread
         start_watchdog_thread(Arc::clone(&state), cc.egui_ctx.clone());
@@ -2714,12 +3512,43 @@ impl eframe::App for AgentPowerGuardApp {
                 ui.label(egui::RichText::new("Control Agent Power Guard from your phone, tablet, or another browser on your local Wi-Fi.").weak());
                 ui.separator();
 
-                let local_url = format!("http://{}:{}", s.local_ip, s.config.web_server_port);
+                // 0. LAN Access Toggle & API Security
+                egui::Frame::new().fill(egui::Color32::from_rgb(22, 29, 39)).corner_radius(10.0).inner_margin(egui::Margin::symmetric(18, 14)).show(ui, |ui| {
+                    ui.heading("🔒 API & Network Security");
+                    ui.add_space(4.0);
+
+                    if ui.checkbox(&mut s.config.allow_lan_access, egui::RichText::new("Allow access from local network (LAN)").strong()).changed() {
+                        s.config_dirty = true;
+                    }
+                    ui.label(egui::RichText::new("When disabled (default), only this computer (127.0.0.1) can reach the API and dashboard. When enabled, other devices on your Wi-Fi/LAN can connect.").weak().size(12.0));
+
+                    ui.add_space(8.0);
+                    ui.horizontal(|ui| {
+                        ui.label(egui::RichText::new("API Token:").strong());
+                        let masked_token = format!("{}...{}", &s.api_token[..8], &s.api_token[56..]);
+                        ui.label(egui::RichText::new(&masked_token).monospace().color(egui::Color32::from_rgb(245, 158, 11)));
+
+                        if ui.button("📋 Copy Token").clicked() {
+                            ui.ctx().copy_text(s.api_token.clone());
+                            s.set_toast("API token copied to clipboard.");
+                        }
+
+                        if ui.button("🔄 Regenerate Token").clicked() {
+                            let new_token = regenerate_api_token();
+                            s.api_token = new_token;
+                            s.set_toast("API token regenerated successfully.");
+                        }
+                    });
+                });
+
+                ui.add_space(10.0);
+
+                let local_url = format!("http://{}:{}/#t={}", s.local_ip, s.config.web_server_port, s.api_token);
 
                 egui::Frame::new().fill(egui::Color32::from_rgb(22, 29, 39)).corner_radius(10.0).inner_margin(egui::Margin::symmetric(18, 14)).show(ui, |ui| {
                     ui.horizontal(|ui| {
                         ui.label(egui::RichText::new("📱 Remote Mobile URL:").strong().size(14.0));
-                        ui.label(egui::RichText::new(&local_url).strong().size(16.0).color(egui::Color32::from_rgb(52, 211, 153)));
+                        ui.label(egui::RichText::new(&local_url).strong().size(14.0).color(egui::Color32::from_rgb(52, 211, 153)));
 
                         if ui.button("🌐 Open in Browser").clicked() {
                             #[cfg(windows)]
@@ -2730,14 +3559,37 @@ impl eframe::App for AgentPowerGuardApp {
                             let _ = Command::new("open").arg(&local_url).status();
                         }
 
-                        if ui.button("📋 Copy Link").clicked() {
+                        if ui.button("📋 Copy Link with Token").clicked() {
                             ui.ctx().copy_text(local_url.clone());
-                            s.set_toast("Mobile remote link copied to clipboard.");
+                            s.set_toast("Mobile remote link with token copied to clipboard.");
                         }
                     });
 
                     ui.add_space(8.0);
-                    ui.label(egui::RichText::new("Open this URL on your phone while connected to the same Wi-Fi. You can view live condition graphs, monitor countdown, put the PC to sleep immediately, postpone sleep by 15 minutes, toggle the guard, or grant/release agent leases from your phone!").weak());
+                    ui.label(egui::RichText::new("Open this URL on your phone while connected to the same Wi-Fi. The token fragment auto-authenticates your phone so you can view live condition graphs, monitor countdown, put the PC to sleep immediately, postpone sleep, or grant/release agent leases!").weak());
+                });
+
+                ui.add_space(10.0);
+
+                // Phase 1.3: Agent Profiles One-Click Selector
+                egui::Frame::new().fill(egui::Color32::from_rgb(22, 29, 39)).corner_radius(10.0).inner_margin(egui::Margin::symmetric(18, 14)).show(ui, |ui| {
+                    ui.heading("🤖 AI Agent Profiles (One-Click Presets)");
+                    ui.add_space(4.0);
+                    ui.label(egui::RichText::new("Apply tailored process watchlists and thresholds for specific AI coding tools and workloads:").weak().size(12.0));
+                    ui.add_space(8.0);
+
+                    let profiles = get_built_in_profiles();
+                    ui.horizontal_wrapped(|ui| {
+                        for p in &profiles {
+                            if ui.button(format!("⚡ {}", p.name)).clicked() {
+                                s.config.agent_keywords = p.keywords.clone();
+                                s.config.agent_cpu_threshold = p.agent_cpu_threshold;
+                                s.config.gpu_threshold_pct = p.gpu_threshold_pct;
+                                s.config_dirty = true;
+                                s.set_toast(format!("Applied profile: {} ({})", p.name, p.keywords));
+                            }
+                        }
+                    });
                 });
 
                 ui.add_space(12.0);
@@ -2876,4 +3728,345 @@ fn main() -> eframe::Result<()> {
         let _ = std::fs::write(log_file, format!("run_native error: {:?}\n", e));
     }
     res
+}
+
+// ----------------------------------------------------------------------------
+// Unit Tests (Decision Evaluator & Security)
+// ----------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_test_config() -> AppConfig {
+        let mut cfg = AppConfig::default();
+        cfg.idle_threshold_secs = 180;
+        cfg.agent_cpu_threshold = 2.0;
+        cfg.download_threshold_kbps = 100.0;
+        cfg.pc_cpu_threshold = 30.0;
+        cfg.pc_disk_threshold_kbps = 5000.0;
+        cfg.pc_net_threshold_kbps = 100.0;
+        cfg.spike_filter_secs = 15;
+        cfg.gpu_threshold_pct = 5.0;
+        cfg.grace_period_secs = 30;
+        cfg.guard_enabled = true;
+        cfg
+    }
+
+    fn make_passing_metrics() -> Metrics {
+        Metrics {
+            idle_secs: 200,
+            max_agent_cpu: 0.5,
+            max_agent_proc: "None".to_string(),
+            max_dl_kbps: 10.0,
+            max_dl_proc: "None".to_string(),
+            whole_pc_cpu: 5.0,
+            whole_pc_disk_kbps: 50.0,
+            whole_pc_net_kbps: 20.0,
+            gpu_util: 1.0,
+            mic_active: false,
+            cam_active: false,
+            mic_cam_app: String::new(),
+            display_request_active: false,
+            sensor_error: false,
+            now_epoch_secs: 1000,
+        }
+    }
+
+    #[test]
+    fn test_all_conditions_pass() {
+        let cfg = make_test_config();
+        let metrics = make_passing_metrics();
+        let mut state = EvaluationState {
+            countdown_secs: 180,
+            last_wall_clock_secs: 999,
+            ..Default::default()
+        };
+
+        let decision = evaluate(&cfg, &metrics, &mut state);
+        assert!(decision.all_conditions_pass);
+        assert!(decision.blockers.is_empty());
+        assert_eq!(decision.countdown_secs, 179);
+    }
+
+    #[test]
+    fn test_cond1_human_idle_boundary() {
+        let cfg = make_test_config();
+        let mut metrics = make_passing_metrics();
+        let mut state = EvaluationState { countdown_secs: 180, last_wall_clock_secs: 999, ..Default::default() };
+
+        // 179s idle -> blocked
+        metrics.idle_secs = 179;
+        let d = evaluate(&cfg, &metrics, &mut state);
+        assert!(!d.all_conditions_pass);
+        assert!(!d.cond1_idle.is_passing);
+
+        // 180s idle -> passes
+        metrics.idle_secs = 180;
+        let d = evaluate(&cfg, &metrics, &mut state);
+        assert!(d.cond1_idle.is_passing);
+    }
+
+    #[test]
+    fn test_cond2_agent_cpu_boundary() {
+        let cfg = make_test_config();
+        let mut metrics = make_passing_metrics();
+        let mut state = EvaluationState { countdown_secs: 180, last_wall_clock_secs: 999, ..Default::default() };
+
+        // 1.9% -> pass
+        metrics.max_agent_cpu = 1.9;
+        let d = evaluate(&cfg, &metrics, &mut state);
+        assert!(d.cond2_agent_cpu.is_passing);
+
+        // 2.1% -> blocked
+        metrics.max_agent_cpu = 2.1;
+        let d = evaluate(&cfg, &metrics, &mut state);
+        assert!(!d.cond2_agent_cpu.is_passing);
+        assert!(!d.all_conditions_pass);
+    }
+
+    #[test]
+    fn test_cond3_download_boundary() {
+        let cfg = make_test_config();
+        let mut metrics = make_passing_metrics();
+        let mut state = EvaluationState { countdown_secs: 180, last_wall_clock_secs: 999, ..Default::default() };
+
+        // 99 KB/s -> pass
+        metrics.max_dl_kbps = 99.0;
+        let d = evaluate(&cfg, &metrics, &mut state);
+        assert!(d.cond3_download.is_passing);
+
+        // 101 KB/s -> blocked
+        metrics.max_dl_kbps = 101.0;
+        let d = evaluate(&cfg, &metrics, &mut state);
+        assert!(!d.cond3_download.is_passing);
+        assert!(!d.all_conditions_pass);
+    }
+
+    #[test]
+    fn test_cond4_5_6_pc_metrics() {
+        let cfg = make_test_config();
+        let mut metrics = make_passing_metrics();
+        let mut state = EvaluationState { countdown_secs: 180, last_wall_clock_secs: 999, ..Default::default() };
+
+        // PC CPU high
+        metrics.whole_pc_cpu = 45.0;
+        let d = evaluate(&cfg, &metrics, &mut state);
+        assert!(!d.cond4_pc_cpu.is_passing);
+
+        // PC Disk high
+        metrics.whole_pc_cpu = 5.0;
+        metrics.whole_pc_disk_kbps = 6000.0;
+        let d = evaluate(&cfg, &metrics, &mut state);
+        assert!(!d.cond5_pc_disk.is_passing);
+
+        // PC Net high
+        metrics.whole_pc_disk_kbps = 50.0;
+        metrics.whole_pc_net_kbps = 200.0;
+        let d = evaluate(&cfg, &metrics, &mut state);
+        assert!(!d.cond6_pc_net.is_passing);
+    }
+
+    #[test]
+    fn test_cond7_sustained_spike_filter() {
+        let cfg = make_test_config(); // spike_filter_secs = 15
+        let mut metrics = make_passing_metrics();
+        metrics.whole_pc_cpu = 50.0; // Spiking
+
+        let mut state = EvaluationState { countdown_secs: 180, last_wall_clock_secs: 999, ..Default::default() };
+
+        // 14 ticks: spike not yet sustained -> spike filter passes!
+        for _ in 0..14 {
+            let d = evaluate(&cfg, &metrics, &mut state);
+            assert!(d.cond7_spike_filter.is_passing);
+            assert!(d.all_conditions_pass);
+        }
+
+        // 15th tick: sustained spike trips!
+        let d = evaluate(&cfg, &metrics, &mut state);
+        assert!(!d.cond7_spike_filter.is_passing);
+        assert!(!d.all_conditions_pass);
+
+        // Activity subsides: counter resets immediately
+        metrics.whole_pc_cpu = 5.0;
+        let d = evaluate(&cfg, &metrics, &mut state);
+        assert!(d.cond7_spike_filter.is_passing);
+        assert_eq!(state.pc_spike_sustained_counter, 0);
+    }
+
+    #[test]
+    fn test_cond9_display_power_request() {
+        let cfg = make_test_config();
+        let mut metrics = make_passing_metrics();
+        let mut state = EvaluationState { countdown_secs: 180, last_wall_clock_secs: 999, ..Default::default() };
+
+        metrics.display_request_active = true;
+        let d = evaluate(&cfg, &metrics, &mut state);
+        assert!(!d.cond9_power_requests.is_passing);
+        assert!(!d.all_conditions_pass);
+    }
+
+    #[test]
+    fn test_cond10_gpu_boundary() {
+        let cfg = make_test_config();
+        let mut metrics = make_passing_metrics();
+        let mut state = EvaluationState { countdown_secs: 180, last_wall_clock_secs: 999, ..Default::default() };
+
+        metrics.gpu_util = 4.9;
+        let d = evaluate(&cfg, &metrics, &mut state);
+        assert!(d.cond10_gpu.is_passing);
+
+        metrics.gpu_util = 5.1;
+        let d = evaluate(&cfg, &metrics, &mut state);
+        assert!(!d.cond10_gpu.is_passing);
+        assert!(!d.all_conditions_pass);
+    }
+
+    #[test]
+    fn test_cond11_mic_cam_active() {
+        let cfg = make_test_config();
+        let mut metrics = make_passing_metrics();
+        let mut state = EvaluationState { countdown_secs: 180, last_wall_clock_secs: 999, ..Default::default() };
+
+        metrics.mic_active = true;
+        let d = evaluate(&cfg, &metrics, &mut state);
+        assert!(!d.cond11_mic_cam.is_passing);
+        assert!(!d.all_conditions_pass);
+
+        metrics.mic_active = false;
+        metrics.cam_active = true;
+        let d = evaluate(&cfg, &metrics, &mut state);
+        assert!(!d.cond11_mic_cam.is_passing);
+        assert!(!d.all_conditions_pass);
+    }
+
+    #[test]
+    fn test_disabled_conditions() {
+        let mut cfg = make_test_config();
+        cfg.cond1_idle_enabled = false;
+        cfg.cond2_agent_cpu_enabled = false;
+        cfg.cond10_gpu_enabled = false;
+        cfg.cond11_mic_cam_enabled = false;
+
+        let mut metrics = make_passing_metrics();
+        metrics.idle_secs = 10;
+        metrics.max_agent_cpu = 20.0;
+        metrics.gpu_util = 80.0;
+        metrics.mic_active = true;
+
+        let mut state = EvaluationState { countdown_secs: 180, last_wall_clock_secs: 999, ..Default::default() };
+        let d = evaluate(&cfg, &metrics, &mut state);
+        assert!(d.all_conditions_pass);
+    }
+
+    #[test]
+    fn test_active_lease_and_postpone() {
+        let cfg = make_test_config();
+        let metrics = make_passing_metrics();
+        let mut state = EvaluationState {
+            countdown_secs: 180,
+            last_wall_clock_secs: 999,
+            agent_lease_until_epoch_secs: Some(1500),
+            agent_lease_reason: "Heavy compilation".to_string(),
+            ..Default::default()
+        };
+
+        // Active lease blocks
+        let d = evaluate(&cfg, &metrics, &mut state);
+        assert!(!d.all_conditions_pass);
+        assert!(d.blockers.iter().any(|b| b.contains("Heavy compilation")));
+
+        // Expired lease clears and allows
+        state.agent_lease_until_epoch_secs = Some(900);
+        let d = evaluate(&cfg, &metrics, &mut state);
+        assert!(d.all_conditions_pass);
+        assert!(state.agent_lease_until_epoch_secs.is_none());
+
+        // Postpone blocks
+        state.postponed_until_epoch_secs = Some(1500);
+        let d = evaluate(&cfg, &metrics, &mut state);
+        assert!(!d.all_conditions_pass);
+        assert!(d.blockers.iter().any(|b| b.contains("Postponed")));
+    }
+
+    #[test]
+    fn test_master_guard_disabled() {
+        let mut cfg = make_test_config();
+        cfg.guard_enabled = false;
+        let metrics = make_passing_metrics();
+        let mut state = EvaluationState { countdown_secs: 50, last_wall_clock_secs: 999, ..Default::default() };
+
+        let d = evaluate(&cfg, &metrics, &mut state);
+        assert!(!d.all_conditions_pass);
+        assert_eq!(state.countdown_secs, cfg.idle_threshold_secs);
+        assert!(d.blocker_banner_text.contains("PAUSED: Master Guard"));
+    }
+
+    #[test]
+    fn test_resume_from_sleep_reset() {
+        let cfg = make_test_config();
+        let metrics = make_passing_metrics();
+        let mut state = EvaluationState {
+            countdown_secs: 10,
+            last_wall_clock_secs: 950, // Jumped by 50 seconds
+            pc_spike_sustained_counter: 12,
+            ..Default::default()
+        };
+
+        let d = evaluate(&cfg, &metrics, &mut state);
+        assert!(d.woke_from_sleep_reset);
+        assert_eq!(state.countdown_secs, cfg.idle_threshold_secs - 1);
+        assert_eq!(state.pc_spike_sustained_counter, 0);
+    }
+
+    #[test]
+    fn test_grace_period_trigger() {
+        let cfg = make_test_config();
+        let metrics = make_passing_metrics();
+        let mut state = EvaluationState {
+            countdown_secs: 31,
+            last_wall_clock_secs: 999,
+            ..Default::default()
+        };
+
+        let d = evaluate(&cfg, &metrics, &mut state);
+        assert_eq!(d.countdown_secs, 30);
+        assert!(d.trigger_grace_banner);
+    }
+
+    #[test]
+    fn test_sensor_error_blocks_sleep() {
+        let cfg = make_test_config();
+        let mut metrics = make_passing_metrics();
+        metrics.sensor_error = true;
+        let mut state = EvaluationState { countdown_secs: 180, last_wall_clock_secs: 999, ..Default::default() };
+
+        let d = evaluate(&cfg, &metrics, &mut state);
+        assert!(!d.all_conditions_pass);
+        assert!(d.blockers.iter().any(|b| b.contains("Sensor Failure")));
+    }
+
+    #[test]
+    fn test_constant_time_eq() {
+        let token = "a1b2c3d4e5f67890123456789012345678901234567890123456789012345678";
+        assert!(constant_time_eq(token, token));
+        assert!(!constant_time_eq(token, "wrong"));
+        assert!(!constant_time_eq(token, "a1b2c3d4e5f67890123456789012345678901234567890123456789012345679"));
+    }
+
+    #[test]
+    fn test_rate_limiter() {
+        let limiter = RateLimiter::new();
+        let ip = "127.0.0.1".parse().unwrap();
+
+        for _ in 0..9 {
+            assert!(limiter.check_allowed(ip));
+            limiter.record_failure(ip);
+        }
+        limiter.record_failure(ip);
+        assert!(!limiter.check_allowed(ip));
+
+        limiter.record_success(ip);
+        assert!(limiter.check_allowed(ip));
+    }
 }

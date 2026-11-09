@@ -47,6 +47,27 @@ Every release on the [Releases page](https://github.com/Subham-Maity/agent-power
 | macOS (Apple Silicon) | `agent-power-guard-macos-aarch64.tar.gz` | M1 and newer. |
 | macOS (Intel) | `agent-power-guard-macos-x86_64.tar.gz` | |
 
+### Package managers
+
+Install Agent Power Guard directly via your preferred package manager:
+
+```bash
+# Windows (WinGet)
+winget install SubhamMaity.AgentPowerGuard
+
+# Windows (Scoop)
+scoop install agent-power-guard
+
+# Windows (Chocolatey)
+choco install agent-power-guard
+
+# macOS & Linux (Homebrew)
+brew install subham-maity/tap/agent-power-guard
+
+# Arch Linux (AUR)
+yay -S agent-power-guard-bin
+```
+
 ### Windows
 
 Run the `.msi` and follow the wizard, then start **Agent Power Guard** from the Start Menu. For a silent install:
@@ -156,9 +177,39 @@ Notes on the less obvious ones:
 
 ## Agent integration
 
-Autonomous agents and long-running scripts can hold sleep off with a lease. A lease keeps the guard open until it expires or is released.
+Autonomous agents and long-running scripts can hold sleep off dynamically. For a complete guide covering copy-paste setup for **Claude Code**, **Cursor**, and **Antigravity**, see [`docs/agents.md`](docs/agents.md).
 
-### CLI
+### 1. Process Wrapper (`run` - Recommended)
+
+The simplest way to run any agent or long task without worrying about stale leases. It automatically tracks the process ID (PID) and releases power hold immediately when the process completes or crashes:
+
+```bash
+# Wrap Claude Code
+agent-power-guard run -- claude
+
+# Wrap long build or test command
+agent-power-guard run -- cargo test --workspace
+
+# Specify a custom reason and maximum safety timeout (e.g., 120 minutes)
+agent-power-guard run --max-mins 120 --reason "LoRA fine-tuning" -- python train.py
+```
+
+### 2. Model Context Protocol (MCP) Server
+
+Agent Power Guard provides a native stdio MCP server (`agent-power-guard mcp`) allowing AI agents to request sleep prevention autonomously:
+
+- **Exposed tools:** `keep_awake(minutes, reason)`, `release()`, `status()`, `postpone(minutes)`.
+- **Claude Code:** `claude mcp add agent-power-guard -- agent-power-guard mcp`
+- **Cursor & Antigravity:** Configure `agent-power-guard mcp` as a stdio command in `.cursor/mcp.json` or agent settings.
+- See detailed configurations in [`docs/agents.md`](docs/agents.md).
+
+### 3. Agent Profiles & Noise Filtering
+
+Quickly switch presets for your specific developer environment under **Conditions > Watched Agent Processes**:
+- **Built-in profiles:** Claude Code, Cursor, Antigravity, Ollama, Docker, Rust/Cargo, Node/JS, Python ML.
+- **Ignore list (`ignored_processes`):** Excludes noisy background daemon processes (e.g. language servers, telemetry) from resetting the sleep timer.
+
+### 4. CLI Commands
 
 ```bash
 agent-power-guard lease 30 "Compiling LLVM release"   # hold for 30 minutes
@@ -168,26 +219,25 @@ agent-power-guard postpone 15                         # delay sleep by 15 minute
 agent-power-guard sleep                               # suspend now
 ```
 
-A typical wrapper around a long job:
+### 5. HTTP API & Security
 
-```bash
-agent-power-guard lease 120 "nightly training"
-./train.sh
-agent-power-guard release
-```
+The app serves a local API on port `49281`. By default, it binds exclusively to `127.0.0.1` and generates a secure random 256-bit token on first run.
 
-### HTTP API
-
-The app serves a local API on port `49281`.
+#### Authentication & Headers
+- All `/api/*` endpoints require the token passed via header:
+  `Authorization: Bearer <token>` or `X-APG-Token: <token>`
+- The CLI reads the token automatically from `%APPDATA%\AgentPowerGuard\api_token.txt` (`~/.config/agent-power-guard/api_token.txt` on Unix).
+- DNS rebinding and cross-origin attacks are prevented with strict `Host` and `Origin` validation.
+- LAN access can be enabled from the **Web & Mobile Remote** tab.
 
 | Endpoint | Method | Parameters | Description |
 |---|---|---|---|
-| `/` | GET | | Remote dashboard |
+| `/` | GET | `#t=<token>` | Remote dashboard (token loaded in URL fragment) |
 | `/api/status` | GET | | Countdown, conditions, blocking reasons, leases |
 | `/api/sleep` | POST | | Suspend immediately |
 | `/api/postpone` | POST | `mins=15` | Postpone sleep |
 | `/api/toggle_guard` | POST | | Turn the master guard on or off |
-| `/api/lease` | POST | `mins=30&reason=Build` | Grant a sleep lease |
+| `/api/lease` | POST | `mins=30&reason=Build&pid=1234` | Grant a sleep lease (optionally PID-bound) |
 | `/api/release` | POST | | Clear all leases |
 | `/api/energy/clear` | POST | | Clear energy history |
 
@@ -209,16 +259,30 @@ Abridged `/api/status` response:
 Python example:
 
 ```python
+import os
 import urllib.request
+from pathlib import Path
 
-base = "http://localhost:49281"
+# Load secure token from config
+token_path = Path(os.environ.get("APPDATA", "")) / "AgentPowerGuard" / "api_token.txt"
+token = token_path.read_text().strip()
 
-# Hold sleep off for 45 minutes during a training run
-urllib.request.urlopen(f"{base}/api/lease?mins=45&reason=PyTorch+Training", data=b"")
+base = "http://127.0.0.1:49281"
+req = urllib.request.Request(
+    f"{base}/api/lease?mins=45&reason=PyTorch+Training",
+    data=b"",
+    headers={"Authorization": f"Bearer {token}"}
+)
+urllib.request.urlopen(req)
 
-# ... run the job ...
+# ... run long job ...
 
-urllib.request.urlopen(f"{base}/api/release", data=b"")
+req = urllib.request.Request(
+    f"{base}/api/release",
+    data=b"",
+    headers={"Authorization": f"Bearer {token}"}
+)
+urllib.request.urlopen(req)
 ```
 
 ## Remote dashboard
@@ -332,12 +396,16 @@ The installer is written to `target\installer`. `generate-icon.ps1` regenerates 
 
 **The machine never sleeps.** Open the app and look for the condition marked **BLOCKING SLEEP**; it shows the reason. The usual causes are a stuck power request (enable the override in condition 9), a background process matching the watch list (the defaults include broad names such as `code`, `node` and `git`), or a threshold that is too tight for your machine's idle noise.
 
-**Antivirus flags or removes the executable.** The app suspends the machine, acquires `SeShutdownPrivilege`, writes a startup entry and polls hardware and registry state. Those are legitimate for a power tool but look similar to suspicious behaviour to heuristic scanners, and the binary is not signed with a paid code-signing certificate. The project is open source and makes no network calls to external services. To resolve it, add an exclusion for the install folder, for example in Microsoft Defender:
+**Antivirus flags or removes the executable.** The app suspends the machine, acquires `SeShutdownPrivilege`, writes a startup entry and polls hardware and registry state. Those are legitimate for a power tool but look similar to suspicious behaviour to heuristic scanners, and the binary is not signed with a paid code-signing certificate. The project is open source and makes no network calls to external services. To resolve it, add an exclusion for the install folder:
 
-1. Open **Windows Security > Virus & threat protection > Manage settings**.
-2. Under **Exclusions**, choose **Add or remove exclusions** and add the folder `C:\Program Files\AgentPowerGuard`.
-
-Other products (Bitdefender and similar) have an equivalent exceptions list; include any behavioural-protection module such as Advanced Threat Defense, and restore the file from quarantine if it was already removed.
+- **Microsoft Defender:**
+  1. Open **Windows Security > Virus & threat protection > Manage settings**.
+  2. Under **Exclusions**, choose **Add or remove exclusions** and add the folder `C:\Program Files\AgentPowerGuard`.
+- **Bitdefender Total Security:**
+  1. Open Bitdefender -> **Protection** tab.
+  2. Under **Antivirus**, open **Settings** -> **Manage exceptions** -> **Add an Exception** -> add folder `C:\Program Files\AgentPowerGuard` (check *On-access*, *On-demand*, *Embedded scripts*).
+  3. Under **Advanced Threat Defense**, open **Settings** -> **Manage exceptions** -> add folder `C:\Program Files\AgentPowerGuard` (check *Advanced Threat Defense*).
+  4. If files were quarantined, go to **Protection** -> **Antivirus** -> **Quarantine** / **Notifications** and choose **Restore**.
 
 **Wake-on-LAN doesn't work.** Check that it is enabled in both the BIOS/UEFI and the adapter properties, and that the PC is on Ethernet rather than Wi-Fi.
 
