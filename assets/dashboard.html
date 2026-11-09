@@ -414,10 +414,12 @@
 
         // Energy Stats
         if (s.energy) {
-          document.getElementById('stat-money').innerText = `$${s.energy.cost_saved.toFixed(2)}`;
+          const sym = s.currency_symbol || '$';
+          document.getElementById('stat-money').innerText = `${sym}${s.energy.cost_saved.toFixed(2)}`;
           document.getElementById('stat-kwh').innerText = `${s.energy.kwh_saved.toFixed(1)}`;
           document.getElementById('stat-hours').innerText = `${(s.energy.duration_secs / 3600).toFixed(1)}h`;
-          document.getElementById('stat-co2').innerText = `${(s.energy.kwh_saved * 0.4).toFixed(1)} kg`;
+          const co2 = (s.energy.co2_saved !== undefined) ? s.energy.co2_saved : (s.energy.kwh_saved * (s.co2_factor || 0.38));
+          document.getElementById('stat-co2').innerText = `${co2.toFixed(1)} kg`;
         }
 
         // WoL Info

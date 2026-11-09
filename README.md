@@ -242,6 +242,10 @@ The app serves a local API on port `49281`. By default, it binds exclusively to 
 | `/api/toggle_guard` | POST | | Turn the master guard on or off |
 | `/api/lease` | POST | `mins=30&reason=Build&pid=1234` | Grant a sleep lease (optionally PID-bound) |
 | `/api/release` | POST | | Clear all leases |
+| `/api/mode` | POST | `mode=balanced\|work\|night\|away` | Switch operational power mode |
+| `/api/schedule/stay_awake` | POST | `mins=60` | Schedule temporary keep-awake |
+| `/api/wake_timer/add` | POST | `time=02:00&label=Backup` | Schedule an OS RTC / Task Scheduler wake timer |
+| `/api/wake_timer/delete` | POST | `id=<timer_id>` | Delete a scheduled wake timer |
 | `/api/history` | GET | | Retrieve recent block-reason history records |
 | `/api/history/clear` | POST | | Clear block-reason history |
 | `/api/notify/test` | POST | | Send a test notification across configured channels |
@@ -323,6 +327,39 @@ Estimates use configurable wattage and tariff values (defaults: 120 W active sys
 | macOS | `~/Library/Application Support/agent-power-guard/energy_history.json` |
 
 The file can be inspected, backed up or deleted without affecting the app. Nothing is sent anywhere.
+
+### Accurate Regional Carbon Grid & Currency
+
+Electricity generation carbon intensity varies dramatically across power grids:
+- **Bundled grid-intensity factors:** Select from 11 verified regional profiles including **US Average (368 g/kWh)**, **US California CAMX (205 g/kWh)**, **US Texas ERCO (380 g/kWh)**, **European Union (230 g/kWh)**, **United Kingdom (148 g/kWh)**, **Germany (380 g/kWh)**, **France (52 g/kWh)**, **India (713 g/kWh)**, **Australia (510 g/kWh)**, **Global Average (436 g/kWh)**, or enter a **Custom** g/kWh intensity.
+- **Multi-currency support:** Choose from `$`, `€`, `£`, `₹`, `¥`, `C$`, `A$` for accurate localized financial reporting.
+- **Dynamic API reporting:** Both the desktop app and the remote web dashboard consume dynamic `co2_saved` values directly calculated from the configured regional factor, completely eliminating inaccurate hardcoded estimates.
+
+## Power modes, scheduling & laptop battery profiles
+
+### 1. Operational Power Modes
+Quickly change power strategies without manually reconfiguring sliders:
+- **Balanced (default):** 3-minute idle, 2-minute display timeout, 2.0% agent CPU.
+- **Work:** 10-minute idle, 5-minute display timeout, 1.0% agent CPU — perfect for long reading or active pair programming sessions.
+- **Night:** 1-minute idle, 1-minute display timeout, 1.0% agent CPU — aggressive power reduction.
+- **Away:** 30-second idle, 1-minute display timeout — immediate standby when leaving your workstation.
+- **Custom:** Preserve user-customized condition thresholds.
+- **System Tray Quick Actions:** Right-click the tray icon to switch modes, activate 1-hour Keep Awake, or postpone sleep (+15m) instantly.
+
+### 2. Quiet Hours & Night Schedules
+- Configure automated quiet periods (e.g. `23:00` to `07:00`).
+- The watchdog automatically downshifts to aggressive thresholds (`Night` or `Away`) during quiet hours.
+- **Sleep After Lease Ends:** Automatically put the machine into deep sleep the moment an autonomous agent task or wrapped build completes, even in the middle of the night.
+
+### 3. Laptop Battery Awareness
+- Detects AC mains vs DC battery discharge across Windows (`GetSystemPowerStatus`), Linux (`/sys/class/power_supply`), and macOS (`pmset -g batt`).
+- **Automatic Battery Profile:** Applies shorter idle timeouts (default: 60s) and tighter CPU limits (default: 1.0%) when unplugged. Desktops without a battery are unaffected.
+- **Emergency Low-Battery Sleep:** Automatically forces sleep or hibernate when battery drops below a critical safety cutoff (default: 15%) to prevent unexpected shutdown and lost work.
+
+### 4. Scheduled Wake Timers
+- Schedule recurring or one-off wake events at specific times (e.g. `02:00 AM` for scheduled backups or CI jobs).
+- Uses native OS facilities: Windows Task Scheduler (`-WakeToRun`), Linux `rtcwake`, or macOS `pmset schedule wake`.
+- Once awake, Agent Power Guard resumes active monitoring and returns the machine to deep sleep as soon as conditions become idle.
 
 ## Block-reason history ("What kept my PC awake")
 

@@ -1,4 +1,5 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+#![recursion_limit = "256"]
 
 // Agent Power Guard - Native Entry Point
 
@@ -16,34 +17,32 @@ use std::os::windows::process::CommandExt;
 use eframe::egui;
 use egui_plot::{HLine, Line, LineStyle, Plot, PlotPoints};
 use serde::{Deserialize, Serialize};
-use sysinfo::{
-    DiskRefreshKind, Disks, Networks, ProcessRefreshKind, ProcessesToUpdate, System,
-};
+use sysinfo::{DiskRefreshKind, Disks, Networks, ProcessRefreshKind, ProcessesToUpdate, System};
 
 #[cfg(windows)]
 use windows_sys::Win32::Foundation::{CloseHandle, FreeLibrary, HANDLE, LUID};
 #[cfg(windows)]
 use windows_sys::Win32::Security::{
-    AdjustTokenPrivileges, LookupPrivilegeValueW, LUID_AND_ATTRIBUTES,
-    SE_PRIVILEGE_ENABLED, TOKEN_ADJUST_PRIVILEGES, TOKEN_PRIVILEGES, TOKEN_QUERY,
+    AdjustTokenPrivileges, LookupPrivilegeValueW, LUID_AND_ATTRIBUTES, SE_PRIVILEGE_ENABLED,
+    TOKEN_ADJUST_PRIVILEGES, TOKEN_PRIVILEGES, TOKEN_QUERY,
 };
+#[cfg(windows)]
+use windows_sys::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryA};
 #[cfg(windows)]
 use windows_sys::Win32::System::Power::SetSuspendState;
 #[cfg(windows)]
 use windows_sys::Win32::System::ProcessStatus::K32EmptyWorkingSet;
+#[cfg(windows)]
+use windows_sys::Win32::System::Registry::{
+    RegCloseKey, RegDeleteValueW, RegEnumKeyExW, RegOpenKeyExW, RegQueryValueExW, RegSetValueExW,
+    HKEY, HKEY_CURRENT_USER, KEY_READ, KEY_SET_VALUE, REG_SZ,
+};
 #[cfg(windows)]
 use windows_sys::Win32::System::SystemInformation::GetTickCount;
 #[cfg(windows)]
 use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 #[cfg(windows)]
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{GetLastInputInfo, LASTINPUTINFO};
-#[cfg(windows)]
-use windows_sys::Win32::System::Registry::{
-    RegCloseKey, RegDeleteValueW, RegEnumKeyExW, RegOpenKeyExW, RegQueryValueExW, RegSetValueExW, HKEY,
-    HKEY_CURRENT_USER, KEY_READ, KEY_SET_VALUE, REG_SZ,
-};
-#[cfg(windows)]
-use windows_sys::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryA};
 
 #[cfg(windows)]
 const CREATE_NO_WINDOW: u32 = 0x08000000;
@@ -53,6 +52,67 @@ const DASHBOARD_HTML: &str = include_str!("../assets/dashboard.html");
 // ----------------------------------------------------------------------------
 // Configuration & Persistence
 // ----------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PowerMode {
+    Balanced,
+    Work,
+    Night,
+    Away,
+    Custom,
+}
+
+impl PowerMode {
+    pub fn name(&self) -> &'static str {
+        match self {
+            PowerMode::Balanced => "Balanced",
+            PowerMode::Work => "Work",
+            PowerMode::Night => "Night",
+            PowerMode::Away => "Away",
+            PowerMode::Custom => "Custom",
+        }
+    }
+
+    pub fn apply_to_config(&self, cfg: &mut AppConfig) {
+        match self {
+            PowerMode::Balanced => {
+                cfg.idle_threshold_secs = 180;
+                cfg.monitor_timeout_mins = 2;
+                cfg.agent_cpu_threshold = 2.0;
+                cfg.active_mode = PowerMode::Balanced;
+            }
+            PowerMode::Work => {
+                cfg.idle_threshold_secs = 600;
+                cfg.monitor_timeout_mins = 5;
+                cfg.agent_cpu_threshold = 1.0;
+                cfg.active_mode = PowerMode::Work;
+            }
+            PowerMode::Night => {
+                cfg.idle_threshold_secs = 60;
+                cfg.monitor_timeout_mins = 1;
+                cfg.agent_cpu_threshold = 1.0;
+                cfg.active_mode = PowerMode::Night;
+            }
+            PowerMode::Away => {
+                cfg.idle_threshold_secs = 30;
+                cfg.monitor_timeout_mins = 1;
+                cfg.agent_cpu_threshold = 1.0;
+                cfg.active_mode = PowerMode::Away;
+            }
+            PowerMode::Custom => {
+                cfg.active_mode = PowerMode::Custom;
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WakeTimer {
+    pub id: String,
+    pub time_str: String,
+    pub label: String,
+    pub enabled: bool,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -87,17 +147,17 @@ pub struct AppConfig {
 
     // Advanced features: GPU, Mic/Cam, Grace, Energy, Web Server
     pub cond10_gpu_enabled: bool,
-    pub gpu_threshold_pct: f32,         // 0.5..=90.0, default 5.0
+    pub gpu_threshold_pct: f32, // 0.5..=90.0, default 5.0
     pub cond11_mic_cam_enabled: bool,
-    pub grace_period_secs: u32,         // 5..=60, default 30
-    pub record_energy_data: bool,       // default true
-    pub active_watts: f32,              // default 150.0
-    pub monitor_watts: f32,             // default 50.0
-    pub sleep_watts: f32,               // default 3.0
-    pub electricity_rate_kwh: f32,      // default 0.15
-    pub web_server_port: u16,           // default 49281
-    pub allow_lan_access: bool,         // default false (loopback only)
-    pub ignored_processes: String,      // comma-separated ignore list
+    pub grace_period_secs: u32,    // 5..=60, default 30
+    pub record_energy_data: bool,  // default true
+    pub active_watts: f32,         // default 150.0
+    pub monitor_watts: f32,        // default 50.0
+    pub sleep_watts: f32,          // default 3.0
+    pub electricity_rate_kwh: f32, // default 0.15
+    pub web_server_port: u16,      // default 49281
+    pub allow_lan_access: bool,    // default false (loopback only)
+    pub ignored_processes: String, // comma-separated ignore list
 
     // Phase 2.1: Block History
     pub block_history_enabled: bool,
@@ -120,6 +180,30 @@ pub struct AppConfig {
     // Phase 2.3: Opt-in Update Check
     pub check_for_updates: bool,
     pub last_update_check_epoch_secs: u64,
+
+    // Phase 3.1: Modes & Schedules
+    pub active_mode: PowerMode,
+    pub quiet_hours_enabled: bool,
+    pub quiet_hours_start: String,
+    pub quiet_hours_end: String,
+    pub quiet_hours_mode: PowerMode,
+    pub stay_awake_until_epoch_secs: Option<u64>,
+    pub sleep_after_lease: bool,
+
+    // Phase 3.2: Wake Timers
+    pub wake_timers: Vec<WakeTimer>,
+
+    // Phase 3.3: Laptop Awareness & Battery Profile
+    pub battery_profile_enabled: bool,
+    pub battery_idle_threshold_secs: u32,
+    pub battery_agent_cpu_threshold: f32,
+    pub low_battery_auto_sleep_enabled: bool,
+    pub low_battery_percent_threshold: u8,
+
+    // Phase 3.4: Accurate Energy, Carbon Grid & Currency
+    pub carbon_region: String,
+    pub custom_carbon_g_kwh: f32,
+    pub currency_symbol: String,
 }
 
 impl Default for AppConfig {
@@ -181,6 +265,26 @@ impl Default for AppConfig {
 
             check_for_updates: false,
             last_update_check_epoch_secs: 0,
+
+            active_mode: PowerMode::Balanced,
+            quiet_hours_enabled: false,
+            quiet_hours_start: "23:00".to_string(),
+            quiet_hours_end: "07:00".to_string(),
+            quiet_hours_mode: PowerMode::Night,
+            stay_awake_until_epoch_secs: None,
+            sleep_after_lease: false,
+
+            wake_timers: Vec::new(),
+
+            battery_profile_enabled: true,
+            battery_idle_threshold_secs: 60,
+            battery_agent_cpu_threshold: 1.0,
+            low_battery_auto_sleep_enabled: true,
+            low_battery_percent_threshold: 15,
+
+            carbon_region: "Global Average".to_string(),
+            custom_carbon_g_kwh: 436.0,
+            currency_symbol: "$".to_string(),
         }
     }
 }
@@ -214,7 +318,9 @@ fn get_config_path() -> PathBuf {
             let _ = std::fs::create_dir_all(&dir);
             return dir.join("config.json");
         } else if let Ok(home) = std::env::var("HOME") {
-            let dir = PathBuf::from(home).join(".config").join("agent-power-guard");
+            let dir = PathBuf::from(home)
+                .join(".config")
+                .join("agent-power-guard");
             let _ = std::fs::create_dir_all(&dir);
             return dir.join("config.json");
         }
@@ -224,15 +330,24 @@ fn get_config_path() -> PathBuf {
 }
 
 fn get_energy_history_path() -> PathBuf {
-    get_config_path().parent().unwrap_or(&PathBuf::from(".")).join("energy_history.json")
+    get_config_path()
+        .parent()
+        .unwrap_or(&PathBuf::from("."))
+        .join("energy_history.json")
 }
 
 fn get_block_history_path() -> PathBuf {
-    get_config_path().parent().unwrap_or(&PathBuf::from(".")).join("block_history.jsonl")
+    get_config_path()
+        .parent()
+        .unwrap_or(&PathBuf::from("."))
+        .join("block_history.jsonl")
 }
 
 fn get_api_token_path() -> PathBuf {
-    get_config_path().parent().unwrap_or(&PathBuf::from(".")).join("api_token.txt")
+    get_config_path()
+        .parent()
+        .unwrap_or(&PathBuf::from("."))
+        .join("api_token.txt")
 }
 
 #[cfg(unix)]
@@ -264,7 +379,9 @@ fn fallback_random_token() -> String {
 pub fn generate_crypto_token() -> String {
     #[cfg(windows)]
     {
-        use windows_sys::Win32::Security::Cryptography::{BCryptGenRandom, BCRYPT_USE_SYSTEM_PREFERRED_RNG};
+        use windows_sys::Win32::Security::Cryptography::{
+            BCryptGenRandom, BCRYPT_USE_SYSTEM_PREFERRED_RNG,
+        };
         let mut buf = [0u8; 32];
         let status = unsafe {
             BCryptGenRandom(
@@ -443,9 +560,14 @@ pub fn calculate_top_blockers(history: &[BlockRecord]) -> Vec<TopBlockerStat> {
         entry.0 += rec.duration_secs;
         entry.1 += 1;
     }
-    let mut list: Vec<TopBlockerStat> = map.into_iter().map(|(name, (total_secs, count))| {
-        TopBlockerStat { name, total_secs, count }
-    }).collect();
+    let mut list: Vec<TopBlockerStat> = map
+        .into_iter()
+        .map(|(name, (total_secs, count))| TopBlockerStat {
+            name,
+            total_secs,
+            count,
+        })
+        .collect();
     list.sort_by(|a, b| b.total_secs.cmp(&a.total_secs));
     list
 }
@@ -459,7 +581,8 @@ pub struct LastNightSummary {
 
 pub fn calculate_last_night_summary(history: &[BlockRecord], now_epoch: u64) -> LastNightSummary {
     let window_start = now_epoch.saturating_sub(12 * 3600);
-    let overnight_records: Vec<&BlockRecord> = history.iter()
+    let overnight_records: Vec<&BlockRecord> = history
+        .iter()
         .filter(|r| r.end_epoch_secs >= window_start)
         .collect();
 
@@ -468,7 +591,10 @@ pub fn calculate_last_night_summary(history: &[BlockRecord], now_epoch: u64) -> 
     for r in &overnight_records {
         *map.entry(r.primary_blocker.clone()).or_insert(0) += r.duration_secs;
     }
-    let top_blocker = map.into_iter().max_by_key(|(_, secs)| *secs).map(|(name, _)| name);
+    let top_blocker = map
+        .into_iter()
+        .max_by_key(|(_, secs)| *secs)
+        .map(|(name, _)| name);
 
     LastNightSummary {
         total_blocked_secs: total_secs,
@@ -478,7 +604,8 @@ pub fn calculate_last_night_summary(history: &[BlockRecord], now_epoch: u64) -> 
 }
 
 pub fn export_block_history_csv(history: &[BlockRecord]) -> String {
-    let mut csv = String::from("Start_Epoch,End_Epoch,Duration_Secs,Primary_Blocker,All_Blockers\n");
+    let mut csv =
+        String::from("Start_Epoch,End_Epoch,Duration_Secs,Primary_Blocker,All_Blockers\n");
     for r in history {
         csv.push_str(&format!(
             "{},{},{},\"{}\",\"{}\"\n",
@@ -546,11 +673,17 @@ impl NotificationEvent {
         match self {
             NotificationEvent::SleepImminent { countdown_secs } => (
                 "Agent Power Guard: Sleep Imminent".to_string(),
-                format!("All conditions pass. PC will sleep in {} seconds.", countdown_secs),
+                format!(
+                    "All conditions pass. PC will sleep in {} seconds.",
+                    countdown_secs
+                ),
             ),
             NotificationEvent::BlockedLong { hours, blocker } => (
                 "Agent Power Guard: Machine Blocked".to_string(),
-                format!("PC has been kept awake for > {} hours by: {}", hours, blocker),
+                format!(
+                    "PC has been kept awake for > {} hours by: {}",
+                    hours, blocker
+                ),
             ),
             NotificationEvent::LeaseEnded { reason } => (
                 "Agent Power Guard: Lease Concluded".to_string(),
@@ -562,7 +695,10 @@ impl NotificationEvent {
             ),
             NotificationEvent::GuardPausedLong { hours } => (
                 "Agent Power Guard: Guard Paused".to_string(),
-                format!("Master guard toggle has been disabled for > {} hours.", hours),
+                format!(
+                    "Master guard toggle has been disabled for > {} hours.",
+                    hours
+                ),
             ),
             NotificationEvent::TestMessage => (
                 "Agent Power Guard: Test Alert".to_string(),
@@ -590,13 +726,17 @@ pub fn send_notification(config: &AppConfig, event: &NotificationEvent) {
     let tg_chat = config.notify_telegram_chat_id.trim().to_string();
     let webhook_url = config.notify_webhook_url.trim().to_string();
 
-    if ntfy_url.is_empty() && (tg_token.is_empty() || tg_chat.is_empty()) && webhook_url.is_empty() {
+    if ntfy_url.is_empty() && (tg_token.is_empty() || tg_chat.is_empty()) && webhook_url.is_empty()
+    {
         return;
     }
 
     let (title, message) = event.title_and_message();
     let event_name = event.event_name().to_string();
-    let now_epoch = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
+    let now_epoch = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
 
     std::thread::spawn(move || {
         // 1. ntfy
@@ -604,7 +744,15 @@ pub fn send_notification(config: &AppConfig, event: &NotificationEvent) {
             let mut cmd = Command::new("curl");
             #[cfg(windows)]
             cmd.creation_flags(CREATE_NO_WINDOW);
-            cmd.args(["-s", "--max-time", "10", "--connect-timeout", "5", "-X", "POST"]);
+            cmd.args([
+                "-s",
+                "--max-time",
+                "10",
+                "--connect-timeout",
+                "5",
+                "-X",
+                "POST",
+            ]);
             cmd.args(["-H", &format!("Title: {}", title)]);
             if !ntfy_token.is_empty() {
                 cmd.args(["-H", &format!("Authorization: Bearer {}", ntfy_token)]);
@@ -619,9 +767,21 @@ pub fn send_notification(config: &AppConfig, event: &NotificationEvent) {
             let mut cmd = Command::new("curl");
             #[cfg(windows)]
             cmd.creation_flags(CREATE_NO_WINDOW);
-            cmd.args(["-s", "--max-time", "10", "--connect-timeout", "5", "-X", "POST", &url]);
+            cmd.args([
+                "-s",
+                "--max-time",
+                "10",
+                "--connect-timeout",
+                "5",
+                "-X",
+                "POST",
+                &url,
+            ]);
             cmd.args(["-d", &format!("chat_id={}", tg_chat)]);
-            cmd.args(["--data-urlencode", &format!("text={}\n\n{}", title, message)]);
+            cmd.args([
+                "--data-urlencode",
+                &format!("text={}\n\n{}", title, message),
+            ]);
             let _ = cmd.status();
         }
 
@@ -636,7 +796,16 @@ pub fn send_notification(config: &AppConfig, event: &NotificationEvent) {
             let mut cmd = Command::new("curl");
             #[cfg(windows)]
             cmd.creation_flags(CREATE_NO_WINDOW);
-            cmd.args(["-s", "--max-time", "10", "--connect-timeout", "5", "-X", "POST", &webhook_url]);
+            cmd.args([
+                "-s",
+                "--max-time",
+                "10",
+                "--connect-timeout",
+                "5",
+                "-X",
+                "POST",
+                &webhook_url,
+            ]);
             cmd.args(["-H", "Content-Type: application/json"]);
             cmd.args(["-d", &payload.to_string()]);
             let _ = cmd.status();
@@ -657,6 +826,265 @@ pub fn check_and_rotate_block_history() {
                 }
             }
         }
+    }
+}
+
+// ----------------------------------------------------------------------------
+// Phase 3: Battery Status, Carbon Grid & Scheduling
+// ----------------------------------------------------------------------------
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BatteryStatus {
+    pub has_battery: bool,
+    pub on_ac_power: bool,
+    pub percent: Option<u8>,
+    pub is_charging: bool,
+}
+
+pub fn get_battery_status() -> BatteryStatus {
+    #[cfg(windows)]
+    {
+        unsafe {
+            let mut status: windows_sys::Win32::System::Power::SYSTEM_POWER_STATUS =
+                std::mem::zeroed();
+            if windows_sys::Win32::System::Power::GetSystemPowerStatus(&mut status) != 0 {
+                let has_battery = (status.BatteryFlag & 128) == 0 && status.BatteryFlag != 255;
+                let on_ac = status.ACLineStatus == 1;
+                let pct = if status.BatteryLifePercent <= 100 {
+                    Some(status.BatteryLifePercent)
+                } else {
+                    None
+                };
+                let is_charging = (status.BatteryFlag & 8) != 0;
+                return BatteryStatus {
+                    has_battery,
+                    on_ac_power: on_ac,
+                    percent: pct,
+                    is_charging,
+                };
+            }
+        }
+    }
+    #[cfg(target_os = "linux")]
+    {
+        if let Ok(entries) = std::fs::read_dir("/sys/class/power_supply") {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if let Ok(type_str) = std::fs::read_to_string(path.join("type")) {
+                    if type_str.trim() == "Battery" {
+                        let capacity = std::fs::read_to_string(path.join("capacity"))
+                            .ok()
+                            .and_then(|s| s.trim().parse::<u8>().ok());
+                        let status_str =
+                            std::fs::read_to_string(path.join("status")).unwrap_or_default();
+                        let is_charging = status_str.trim().eq_ignore_ascii_case("Charging");
+                        let on_ac = !status_str.trim().eq_ignore_ascii_case("Discharging");
+                        return BatteryStatus {
+                            has_battery: true,
+                            on_ac_power: on_ac,
+                            percent: capacity,
+                            is_charging,
+                        };
+                    }
+                }
+            }
+        }
+    }
+    #[cfg(target_os = "macos")]
+    {
+        if let Ok(output) = Command::new("pmset").arg("-g").arg("batt").output() {
+            let text = String::from_utf8_lossy(&output.stdout);
+            let has_battery = text.contains("InternalBattery");
+            let on_ac = text.contains("AC Power") || !text.contains("Battery Power");
+            let percent = text
+                .split('%')
+                .next()
+                .and_then(|s| s.split_whitespace().last())
+                .and_then(|p| p.parse::<u8>().ok());
+            return BatteryStatus {
+                has_battery,
+                on_ac_power: on_ac,
+                percent,
+                is_charging: text.contains("charging"),
+            };
+        }
+    }
+    BatteryStatus {
+        has_battery: false,
+        on_ac_power: true,
+        percent: None,
+        is_charging: false,
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct CarbonRegion {
+    pub name: &'static str,
+    pub g_per_kwh: f32,
+    pub source: &'static str,
+}
+
+pub fn get_carbon_regions() -> &'static [CarbonRegion] {
+    &[
+        CarbonRegion {
+            name: "Global Average",
+            g_per_kwh: 436.0,
+            source: "IEA 2024",
+        },
+        CarbonRegion {
+            name: "United States (Avg)",
+            g_per_kwh: 368.0,
+            source: "EPA eGRID 2023",
+        },
+        CarbonRegion {
+            name: "US - California (CAMX)",
+            g_per_kwh: 205.0,
+            source: "EPA eGRID 2023",
+        },
+        CarbonRegion {
+            name: "US - Texas (ERCO)",
+            g_per_kwh: 380.0,
+            source: "EPA eGRID 2023",
+        },
+        CarbonRegion {
+            name: "European Union (Avg)",
+            g_per_kwh: 230.0,
+            source: "EEA 2023",
+        },
+        CarbonRegion {
+            name: "United Kingdom",
+            g_per_kwh: 148.0,
+            source: "National Grid ESO 2023",
+        },
+        CarbonRegion {
+            name: "Germany",
+            g_per_kwh: 380.0,
+            source: "UBA 2023",
+        },
+        CarbonRegion {
+            name: "France",
+            g_per_kwh: 52.0,
+            source: "RTE 2023",
+        },
+        CarbonRegion {
+            name: "India",
+            g_per_kwh: 713.0,
+            source: "CEA 2023",
+        },
+        CarbonRegion {
+            name: "Australia",
+            g_per_kwh: 510.0,
+            source: "DCCEEW 2023",
+        },
+        CarbonRegion {
+            name: "Custom",
+            g_per_kwh: 400.0,
+            source: "User Configured",
+        },
+    ]
+}
+
+pub fn get_carbon_factor_kg(config: &AppConfig) -> f64 {
+    if config.carbon_region == "Custom" {
+        (config.custom_carbon_g_kwh.max(0.0) as f64) / 1000.0
+    } else {
+        let regions = get_carbon_regions();
+        let g = regions
+            .iter()
+            .find(|r| r.name == config.carbon_region)
+            .map(|r| r.g_per_kwh)
+            .unwrap_or(436.0);
+        (g as f64) / 1000.0
+    }
+}
+
+pub fn get_local_hour_minute() -> (u32, u32) {
+    #[cfg(windows)]
+    {
+        unsafe {
+            let mut st = std::mem::zeroed::<windows_sys::Win32::Foundation::SYSTEMTIME>();
+            windows_sys::Win32::System::SystemInformation::GetLocalTime(&mut st);
+            (st.wHour as u32, st.wMinute as u32)
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        let epoch = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        let secs = epoch % 86400;
+        ((secs / 3600) as u32, ((secs % 3600) / 60) as u32)
+    }
+}
+
+pub fn is_in_quiet_hours(cur_h: u32, cur_m: u32, start_hhmm: &str, end_hhmm: &str) -> bool {
+    let cur_mins = cur_h * 60 + cur_m;
+
+    let parse_hhmm = |s: &str| -> Option<u32> {
+        let parts: Vec<&str> = s.split(':').collect();
+        if parts.len() == 2 {
+            let h = parts[0].trim().parse::<u32>().ok()?;
+            let m = parts[1].trim().parse::<u32>().ok()?;
+            Some(h * 60 + m)
+        } else {
+            None
+        }
+    };
+
+    let start = parse_hhmm(start_hhmm).unwrap_or(23 * 60);
+    let end = parse_hhmm(end_hhmm).unwrap_or(7 * 60);
+
+    if start <= end {
+        cur_mins >= start && cur_mins < end
+    } else {
+        cur_mins >= start || cur_mins < end
+    }
+}
+
+pub fn schedule_os_wake(timer: &WakeTimer) {
+    if !timer.enabled {
+        return;
+    }
+    #[cfg(windows)]
+    {
+        let parts: Vec<&str> = timer.time_str.split(':').collect();
+        if parts.len() == 2 {
+            let task_name = format!("AgentPowerGuard_Wake_{}", timer.id);
+            let time_formatted = format!("{}:00", timer.time_str);
+            let ps_cmd = format!(
+                "try {{ $action = New-ScheduledTaskAction -Execute 'cmd.exe' -Argument '/c exit'; \
+                 $trigger = New-ScheduledTaskTrigger -Daily -At '{}'; \
+                 $settings = New-ScheduledTaskSettingsSet -WakeToRun; \
+                 Register-ScheduledTask -TaskName '{}' -Action $action -Trigger $trigger -Settings $settings -Force }} catch {{}}",
+                time_formatted, task_name
+            );
+            let _ = Command::new("powershell")
+                .args(["-NoProfile", "-NonInteractive", "-Command", &ps_cmd])
+                .creation_flags(CREATE_NO_WINDOW)
+                .status();
+        }
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let _ = Command::new("rtcwake").args(["-m", "no", "-l"]).status();
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let _ = Command::new("pmset")
+            .args(["schedule", "wake", &timer.time_str])
+            .status();
+    }
+}
+
+pub fn remove_os_wake(timer_id: &str) {
+    #[cfg(windows)]
+    {
+        let task_name = format!("AgentPowerGuard_Wake_{}", timer_id);
+        let _ = Command::new("schtasks")
+            .args(["/Delete", "/TN", &task_name, "/F"])
+            .creation_flags(CREATE_NO_WINDOW)
+            .status();
     }
 }
 
@@ -693,7 +1121,11 @@ fn format_epoch_local(epoch: u64) -> String {
     let mut year = 1970;
     let mut d = days;
     loop {
-        let leap = if (year % 4 == 0 && year % 100 != 0) || (year % 400 == 0) { 1 } else { 0 };
+        let leap = if (year % 4 == 0 && year % 100 != 0) || (year % 400 == 0) {
+            1
+        } else {
+            0
+        };
         let days_in_year = 365 + leap;
         if d >= days_in_year {
             d -= days_in_year;
@@ -702,7 +1134,11 @@ fn format_epoch_local(epoch: u64) -> String {
             break;
         }
     }
-    let leap = if (year % 4 == 0 && year % 100 != 0) || (year % 400 == 0) { 1 } else { 0 };
+    let leap = if (year % 4 == 0 && year % 100 != 0) || (year % 400 == 0) {
+        1
+    } else {
+        0
+    };
     let month_days = [31, 28 + leap, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
     let mut month = 1;
     for &md in &month_days {
@@ -714,7 +1150,10 @@ fn format_epoch_local(epoch: u64) -> String {
         }
     }
     let day = d + 1;
-    format!("{:04}-{:02}-{:02} {:02}:{:02}:{:02}", year, month, day, hours, minutes, seconds)
+    format!(
+        "{:04}-{:02}-{:02} {:02}:{:02}:{:02}",
+        year, month, day, hours, minutes, seconds
+    )
 }
 
 // ----------------------------------------------------------------------------
@@ -747,6 +1186,13 @@ pub struct Metrics {
     pub display_request_active: bool,
     pub sensor_error: bool,
     pub now_epoch_secs: u64,
+
+    // Phase 3: Battery & Scheduling
+    pub on_battery: bool,
+    pub battery_pct: Option<u8>,
+    pub stay_awake_until: Option<u64>,
+    pub local_hour: u32,
+    pub local_min: u32,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -790,9 +1236,40 @@ pub fn evaluate(config: &AppConfig, metrics: &Metrics, state: &mut EvaluationSta
     let mut woke_from_sleep_reset = false;
     let mut log_monitor_off_duration = None;
 
+    // Phase 3: Dynamic Effective Thresholds (Modes, Quiet Hours, Battery)
+    let mut effective_idle_threshold = config.idle_threshold_secs;
+    let mut effective_agent_cpu_threshold = config.agent_cpu_threshold;
+
+    if config.quiet_hours_enabled
+        && is_in_quiet_hours(
+            metrics.local_hour,
+            metrics.local_min,
+            &config.quiet_hours_start,
+            &config.quiet_hours_end,
+        )
+    {
+        match config.quiet_hours_mode {
+            PowerMode::Night => {
+                effective_idle_threshold = effective_idle_threshold.min(60);
+                effective_agent_cpu_threshold = effective_agent_cpu_threshold.min(1.0);
+            }
+            PowerMode::Away => {
+                effective_idle_threshold = effective_idle_threshold.min(30);
+                effective_agent_cpu_threshold = effective_agent_cpu_threshold.min(1.0);
+            }
+            _ => {}
+        }
+    }
+
+    if metrics.on_battery && config.battery_profile_enabled {
+        effective_idle_threshold = effective_idle_threshold.min(config.battery_idle_threshold_secs);
+        effective_agent_cpu_threshold =
+            effective_agent_cpu_threshold.min(config.battery_agent_cpu_threshold);
+    }
+
     // 1. Check Wall-Clock Wakeup
     if state.last_wall_clock_secs > 0 && metrics.now_epoch_secs > state.last_wall_clock_secs + 10 {
-        state.countdown_secs = config.idle_threshold_secs;
+        state.countdown_secs = effective_idle_threshold;
         state.pc_spike_sustained_counter = 0;
         woke_from_sleep_reset = true;
     }
@@ -805,17 +1282,25 @@ pub fn evaluate(config: &AppConfig, metrics: &Metrics, state: &mut EvaluationSta
         blockers.push("Sensor Failure (Safety hold active)".to_string());
     }
 
+    // Phase 3.1: Scheduled Stay-Awake Until
+    if let Some(until) = metrics.stay_awake_until {
+        if metrics.now_epoch_secs < until {
+            let rem = until - metrics.now_epoch_secs;
+            blockers.push(format!("Scheduled Stay-Awake ({}s remaining)", rem));
+        }
+    }
+
     // Condition 1: Human Input Idle
-    let cond1_pass = metrics.idle_secs >= config.idle_threshold_secs;
+    let cond1_pass = metrics.idle_secs >= effective_idle_threshold;
     let cond1_idle = ConditionStatus {
         enabled: config.cond1_idle_enabled,
         is_passing: cond1_pass,
         value_text: format!("{}s", metrics.idle_secs),
-        threshold_text: format!(">= {}s", config.idle_threshold_secs),
+        threshold_text: format!(">= {}s", effective_idle_threshold),
         blocker_detail: if !cond1_pass && config.cond1_idle_enabled {
             Some(format!(
                 "Human Activity (User active, idle only {}s < {}s)",
-                metrics.idle_secs, config.idle_threshold_secs
+                metrics.idle_secs, effective_idle_threshold
             ))
         } else {
             None
@@ -824,21 +1309,21 @@ pub fn evaluate(config: &AppConfig, metrics: &Metrics, state: &mut EvaluationSta
     if config.cond1_idle_enabled && !cond1_pass {
         blockers.push(format!(
             "Human Idle ({}s < {}s)",
-            metrics.idle_secs, config.idle_threshold_secs
+            metrics.idle_secs, effective_idle_threshold
         ));
     }
 
     // Condition 2: Watched Agent CPU %
-    let cond2_pass = metrics.max_agent_cpu < config.agent_cpu_threshold;
+    let cond2_pass = metrics.max_agent_cpu < effective_agent_cpu_threshold;
     let cond2_agent_cpu = ConditionStatus {
         enabled: config.cond2_agent_cpu_enabled,
         is_passing: cond2_pass,
         value_text: format!("{:.1}% ({})", metrics.max_agent_cpu, metrics.max_agent_proc),
-        threshold_text: format!("< {:.1}%", config.agent_cpu_threshold),
+        threshold_text: format!("< {:.1}%", effective_agent_cpu_threshold),
         blocker_detail: if !cond2_pass && config.cond2_agent_cpu_enabled {
             Some(format!(
                 "Agent CPU ({} at {:.1}% >= {:.1}%)",
-                metrics.max_agent_proc, metrics.max_agent_cpu, config.agent_cpu_threshold
+                metrics.max_agent_proc, metrics.max_agent_cpu, effective_agent_cpu_threshold
             ))
         } else {
             None
@@ -847,7 +1332,7 @@ pub fn evaluate(config: &AppConfig, metrics: &Metrics, state: &mut EvaluationSta
     if config.cond2_agent_cpu_enabled && !cond2_pass {
         blockers.push(format!(
             "Agent CPU ({} at {:.1}% >= {:.1}%)",
-            metrics.max_agent_proc, metrics.max_agent_cpu, config.agent_cpu_threshold
+            metrics.max_agent_proc, metrics.max_agent_cpu, effective_agent_cpu_threshold
         ));
     }
 
@@ -939,9 +1424,15 @@ pub fn evaluate(config: &AppConfig, metrics: &Metrics, state: &mut EvaluationSta
     let cond7_spike_filter = ConditionStatus {
         enabled: config.cond7_spike_filter_enabled,
         is_passing: !any_pc_metric_tripped || !spike_sustained,
-        value_text: format!("{}s / {}s", state.pc_spike_sustained_counter, config.spike_filter_secs),
+        value_text: format!(
+            "{}s / {}s",
+            state.pc_spike_sustained_counter, config.spike_filter_secs
+        ),
         threshold_text: format!("Debounce {}s", config.spike_filter_secs),
-        blocker_detail: if any_pc_metric_tripped && spike_sustained && config.cond7_spike_filter_enabled {
+        blocker_detail: if any_pc_metric_tripped
+            && spike_sustained
+            && config.cond7_spike_filter_enabled
+        {
             Some(format!(
                 "Sustained PC Spike (Activity exceeded {}s debounce filter)",
                 config.spike_filter_secs
@@ -957,10 +1448,16 @@ pub fn evaluate(config: &AppConfig, metrics: &Metrics, state: &mut EvaluationSta
                 blockers.push(format!("Whole-PC CPU ({:.1}%)", metrics.whole_pc_cpu));
             }
             if config.cond5_pc_disk_enabled && !cond5_pass {
-                blockers.push(format!("Whole-PC Disk ({:.0} KB/s)", metrics.whole_pc_disk_kbps));
+                blockers.push(format!(
+                    "Whole-PC Disk ({:.0} KB/s)",
+                    metrics.whole_pc_disk_kbps
+                ));
             }
             if config.cond6_pc_net_enabled && !cond6_pass {
-                blockers.push(format!("Whole-PC Network ({:.0} KB/s)", metrics.whole_pc_net_kbps));
+                blockers.push(format!(
+                    "Whole-PC Network ({:.0} KB/s)",
+                    metrics.whole_pc_net_kbps
+                ));
             }
         }
     } else if any_pc_metric_tripped {
@@ -968,10 +1465,16 @@ pub fn evaluate(config: &AppConfig, metrics: &Metrics, state: &mut EvaluationSta
             blockers.push(format!("Whole-PC CPU ({:.1}%)", metrics.whole_pc_cpu));
         }
         if config.cond5_pc_disk_enabled && !cond5_pass {
-            blockers.push(format!("Whole-PC Disk ({:.0} KB/s)", metrics.whole_pc_disk_kbps));
+            blockers.push(format!(
+                "Whole-PC Disk ({:.0} KB/s)",
+                metrics.whole_pc_disk_kbps
+            ));
         }
         if config.cond6_pc_net_enabled && !cond6_pass {
-            blockers.push(format!("Whole-PC Network ({:.0} KB/s)", metrics.whole_pc_net_kbps));
+            blockers.push(format!(
+                "Whole-PC Network ({:.0} KB/s)",
+                metrics.whole_pc_net_kbps
+            ));
         }
     }
 
@@ -1007,13 +1510,19 @@ pub fn evaluate(config: &AppConfig, metrics: &Metrics, state: &mut EvaluationSta
             "None".to_string()
         },
         threshold_text: "Respect DISPLAY".to_string(),
-        blocker_detail: if !cond9_pass && config.cond9_power_requests_enabled && config.respect_display_requests {
+        blocker_detail: if !cond9_pass
+            && config.cond9_power_requests_enabled
+            && config.respect_display_requests
+        {
             Some("Windows DISPLAY Request (Active video playback or media lock)".to_string())
         } else {
             None
         },
     };
-    if config.cond9_power_requests_enabled && config.respect_display_requests && metrics.display_request_active {
+    if config.cond9_power_requests_enabled
+        && config.respect_display_requests
+        && metrics.display_request_active
+    {
         blockers.push("DISPLAY Request (Video playback active)".to_string());
     }
 
@@ -1035,18 +1544,29 @@ pub fn evaluate(config: &AppConfig, metrics: &Metrics, state: &mut EvaluationSta
     }
 
     // Condition 11: Microphone & Camera Active (Meetings & Calls)
-    let cond11_pass = !config.cond11_mic_cam_enabled || (!metrics.mic_active && !metrics.cam_active);
+    let cond11_pass =
+        !config.cond11_mic_cam_enabled || (!metrics.mic_active && !metrics.cam_active);
     let cond11_mic_cam = ConditionStatus {
         enabled: config.cond11_mic_cam_enabled,
         is_passing: cond11_pass,
         value_text: if metrics.mic_active || metrics.cam_active {
-            format!("In Use ({})", if metrics.mic_cam_app.is_empty() { "Call/Meeting" } else { &metrics.mic_cam_app })
+            format!(
+                "In Use ({})",
+                if metrics.mic_cam_app.is_empty() {
+                    "Call/Meeting"
+                } else {
+                    &metrics.mic_cam_app
+                }
+            )
         } else {
             "Quiet".to_string()
         },
         threshold_text: "Require Idle".to_string(),
         blocker_detail: if !cond11_pass && config.cond11_mic_cam_enabled {
-            Some(format!("Microphone/Camera in use ({})", metrics.mic_cam_app))
+            Some(format!(
+                "Microphone/Camera in use ({})",
+                metrics.mic_cam_app
+            ))
         } else {
             None
         },
@@ -1054,7 +1574,11 @@ pub fn evaluate(config: &AppConfig, metrics: &Metrics, state: &mut EvaluationSta
     if config.cond11_mic_cam_enabled && !cond11_pass {
         blockers.push(format!(
             "Mic/Cam In Use ({})",
-            if metrics.mic_cam_app.is_empty() { "Meeting" } else { &metrics.mic_cam_app }
+            if metrics.mic_cam_app.is_empty() {
+                "Meeting"
+            } else {
+                &metrics.mic_cam_app
+            }
         ));
     }
 
@@ -1072,11 +1596,17 @@ pub fn evaluate(config: &AppConfig, metrics: &Metrics, state: &mut EvaluationSta
             } else {
                 String::new()
             };
-            blockers.push(format!("Agent Lease: \"{}\"{} ({}s remaining)", reason, pid_info, rem));
+            blockers.push(format!(
+                "Agent Lease: \"{}\"{} ({}s remaining)",
+                reason, pid_info, rem
+            ));
         } else {
             state.agent_lease_until_epoch_secs = None;
             state.agent_lease_reason.clear();
             state.agent_lease_pid = None;
+            if config.sleep_after_lease {
+                state.countdown_secs = 0;
+            }
         }
     }
 
@@ -1095,12 +1625,32 @@ pub fn evaluate(config: &AppConfig, metrics: &Metrics, state: &mut EvaluationSta
     let all_conditions_pass;
     let blocker_banner_text;
 
-    let countdown_max = config.idle_threshold_secs;
+    let countdown_max = effective_idle_threshold;
 
-    if !config.guard_enabled {
+    // Phase 3.3: Critical Low Battery Safety Sleep
+    let mut critical_battery_sleep = false;
+    if metrics.on_battery && config.low_battery_auto_sleep_enabled {
+        if let Some(pct) = metrics.battery_pct {
+            if pct <= config.low_battery_percent_threshold {
+                critical_battery_sleep = true;
+            }
+        }
+    }
+
+    if critical_battery_sleep {
+        all_conditions_pass = true;
+        trigger_sleep = true;
+        state.countdown_secs = 0;
+        blocker_banner_text = format!(
+            "CRITICAL BATTERY: Machine sleeping to protect data ({}% <= {}%)",
+            metrics.battery_pct.unwrap_or(0),
+            config.low_battery_percent_threshold
+        );
+    } else if !config.guard_enabled {
         all_conditions_pass = false;
-        state.countdown_secs = config.idle_threshold_secs;
-        blocker_banner_text = "PAUSED: Master Guard toggle is OFF. Automatic sleep disabled.".to_string();
+        state.countdown_secs = effective_idle_threshold;
+        blocker_banner_text =
+            "PAUSED: Master Guard toggle is OFF. Automatic sleep disabled.".to_string();
     } else if blockers.is_empty() {
         all_conditions_pass = true;
         if state.countdown_secs > 0 {
@@ -1117,7 +1667,7 @@ pub fn evaluate(config: &AppConfig, metrics: &Metrics, state: &mut EvaluationSta
         }
     } else {
         all_conditions_pass = false;
-        state.countdown_secs = config.idle_threshold_secs;
+        state.countdown_secs = effective_idle_threshold;
         let first = &blockers[0];
         let extra = if blockers.len() > 1 {
             format!(" (+{} other conditions)", blockers.len() - 1)
@@ -1246,6 +1796,9 @@ pub struct SharedState {
     pub update_check_in_progress: bool,
     pub update_check_status_msg: Option<String>,
 
+    // Phase 3: Battery & Power Status
+    pub live_battery_status: BatteryStatus,
+
     // UI feedback toast/notification
     pub toast_message: Option<(String, Instant)>,
 }
@@ -1323,11 +1876,16 @@ impl SharedState {
             last_lease_ended_notif: 0,
             last_pc_woke_notif: 0,
             last_guard_paused_notif: 0,
-            guard_paused_since: SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs(),
+            guard_paused_since: SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs(),
 
             update_available: None,
             update_check_in_progress: false,
             update_check_status_msg: None,
+
+            live_battery_status: get_battery_status(),
 
             toast_message: None,
         };
@@ -1369,7 +1927,10 @@ impl SharedState {
         if !self.config.record_energy_data || duration_secs < 5 {
             return;
         }
-        let now_epoch = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
+        let now_epoch = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
         let active_w = self.config.active_watts;
         let idle_w = if event_type == "monitor_off" {
             (self.config.active_watts - self.config.monitor_watts).max(0.0)
@@ -1400,12 +1961,17 @@ impl SharedState {
     pub fn load_block_history(&mut self) {
         let path = get_block_history_path();
         if let Ok(content) = std::fs::read_to_string(&path) {
-            let now_epoch = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
+            let now_epoch = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
             let retention_secs = (self.config.block_history_retention_days as u64) * 86400;
             let mut list = Vec::new();
             for line in content.lines() {
                 if let Ok(rec) = serde_json::from_str::<BlockRecord>(line) {
-                    if retention_secs == 0 || now_epoch.saturating_sub(rec.start_epoch_secs) <= retention_secs {
+                    if retention_secs == 0
+                        || now_epoch.saturating_sub(rec.start_epoch_secs) <= retention_secs
+                    {
                         list.push(rec);
                     }
                 }
@@ -1441,7 +2007,11 @@ impl SharedState {
         let path = get_block_history_path();
         if let Ok(line) = serde_json::to_string(&record) {
             use std::io::Write;
-            if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+            if let Ok(mut f) = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&path)
+            {
                 let _ = writeln!(f, "{}", line);
             }
         }
@@ -1505,7 +2075,10 @@ pub fn sleep_now() -> bool {
                 return false;
             }
 
-            let mut luid = LUID { LowPart: 0, HighPart: 0 };
+            let mut luid = LUID {
+                LowPart: 0,
+                HighPart: 0,
+            };
             let priv_name: Vec<u16> = "SeShutdownPrivilege\0".encode_utf16().collect();
             if LookupPrivilegeValueW(std::ptr::null(), priv_name.as_ptr(), &mut luid) == 0 {
                 CloseHandle(token);
@@ -1657,12 +2230,39 @@ pub fn apply_monitor_timeout(mins: u32) {
 pub fn apply_optimal_power_plan(monitor_timeout_mins: u32) {
     #[cfg(windows)]
     {
-        let _ = Command::new("powercfg").args(["/change", "standby-timeout-ac", "0"]).creation_flags(CREATE_NO_WINDOW).status();
-        let _ = Command::new("powercfg").args(["/change", "standby-timeout-dc", "0"]).creation_flags(CREATE_NO_WINDOW).status();
+        let _ = Command::new("powercfg")
+            .args(["/change", "standby-timeout-ac", "0"])
+            .creation_flags(CREATE_NO_WINDOW)
+            .status();
+        let _ = Command::new("powercfg")
+            .args(["/change", "standby-timeout-dc", "0"])
+            .creation_flags(CREATE_NO_WINDOW)
+            .status();
         apply_monitor_timeout(monitor_timeout_mins);
-        let _ = Command::new("powercfg").args(["/setacvalueindex", "SCHEME_CURRENT", "SUB_PROCESSOR", "PROCTHROTTLEMIN", "5"]).creation_flags(CREATE_NO_WINDOW).status();
-        let _ = Command::new("powercfg").args(["/setacvalueindex", "SCHEME_CURRENT", "SUB_PROCESSOR", "PROCTHROTTLEMAX", "100"]).creation_flags(CREATE_NO_WINDOW).status();
-        let _ = Command::new("powercfg").args(["/setactive", "SCHEME_CURRENT"]).creation_flags(CREATE_NO_WINDOW).status();
+        let _ = Command::new("powercfg")
+            .args([
+                "/setacvalueindex",
+                "SCHEME_CURRENT",
+                "SUB_PROCESSOR",
+                "PROCTHROTTLEMIN",
+                "5",
+            ])
+            .creation_flags(CREATE_NO_WINDOW)
+            .status();
+        let _ = Command::new("powercfg")
+            .args([
+                "/setacvalueindex",
+                "SCHEME_CURRENT",
+                "SUB_PROCESSOR",
+                "PROCTHROTTLEMAX",
+                "100",
+            ])
+            .creation_flags(CREATE_NO_WINDOW)
+            .status();
+        let _ = Command::new("powercfg")
+            .args(["/setactive", "SCHEME_CURRENT"])
+            .creation_flags(CREATE_NO_WINDOW)
+            .status();
     }
 }
 
@@ -1682,7 +2282,14 @@ pub fn override_audio_browser_power_requests() {
 
         for (caller_type, name) in callers {
             let _ = Command::new("powercfg")
-                .args(["/requestsoverride", caller_type, name, "EXECUTION", "SYSTEM", "AWAYMODE"])
+                .args([
+                    "/requestsoverride",
+                    caller_type,
+                    name,
+                    "EXECUTION",
+                    "SYSTEM",
+                    "AWAYMODE",
+                ])
                 .creation_flags(CREATE_NO_WINDOW)
                 .status();
         }
@@ -1692,7 +2299,11 @@ pub fn override_audio_browser_power_requests() {
 pub fn check_power_requests() -> (bool, bool) {
     #[cfg(windows)]
     {
-        if let Ok(output) = Command::new("powercfg").arg("/requests").creation_flags(CREATE_NO_WINDOW).output() {
+        if let Ok(output) = Command::new("powercfg")
+            .arg("/requests")
+            .creation_flags(CREATE_NO_WINDOW)
+            .output()
+        {
             let text = String::from_utf8_lossy(&output.stdout);
             let mut in_display = false;
             let mut in_system = false;
@@ -1707,7 +2318,10 @@ pub fn check_power_requests() -> (bool, bool) {
                 } else if trimmed.starts_with("SYSTEM:") {
                     in_display = false;
                     in_system = true;
-                } else if trimmed.starts_with("AWAYMODE:") || trimmed.starts_with("EXECUTION:") || trimmed.starts_with("PERFBOOST:") {
+                } else if trimmed.starts_with("AWAYMODE:")
+                    || trimmed.starts_with("EXECUTION:")
+                    || trimmed.starts_with("PERFBOOST:")
+                {
                     in_display = false;
                     in_system = false;
                 } else if !trimmed.is_empty() && trimmed != "None." {
@@ -1728,12 +2342,21 @@ pub fn check_power_requests() -> (bool, bool) {
 pub fn set_startup_task(enable: bool) {
     #[cfg(windows)]
     {
-        let subkey: Vec<u16> = "Software\\Microsoft\\Windows\\CurrentVersion\\Run\0".encode_utf16().collect();
+        let subkey: Vec<u16> = "Software\\Microsoft\\Windows\\CurrentVersion\\Run\0"
+            .encode_utf16()
+            .collect();
         let val_name: Vec<u16> = "AgentPowerGuard\0".encode_utf16().collect();
 
         unsafe {
             let mut hkey: HKEY = std::ptr::null_mut();
-            if RegOpenKeyExW(HKEY_CURRENT_USER, subkey.as_ptr(), 0, KEY_SET_VALUE, &mut hkey) == 0 {
+            if RegOpenKeyExW(
+                HKEY_CURRENT_USER,
+                subkey.as_ptr(),
+                0,
+                KEY_SET_VALUE,
+                &mut hkey,
+            ) == 0
+            {
                 if enable {
                     if let Ok(exe_path) = std::env::current_exe() {
                         let cmd_str = format!("\"{}\" --tray\0", exe_path.to_string_lossy());
@@ -1760,8 +2383,14 @@ pub fn set_startup_task(enable: bool) {
 pub fn remove_old_v3_scheduled_task() {
     #[cfg(windows)]
     {
-        let _ = Command::new("schtasks").args(["/delete", "/tn", "AgentPowerGuard", "/f"]).creation_flags(CREATE_NO_WINDOW).status();
-        let _ = Command::new("schtasks").args(["/delete", "/tn", "AgentPowerGuard_v3", "/f"]).creation_flags(CREATE_NO_WINDOW).status();
+        let _ = Command::new("schtasks")
+            .args(["/delete", "/tn", "AgentPowerGuard", "/f"])
+            .creation_flags(CREATE_NO_WINDOW)
+            .status();
+        let _ = Command::new("schtasks")
+            .args(["/delete", "/tn", "AgentPowerGuard_v3", "/f"])
+            .creation_flags(CREATE_NO_WINDOW)
+            .status();
         if let Ok(pdata) = std::env::var("ProgramData") {
             let path = PathBuf::from(pdata).join("AgentPowerGuard");
             if path.exists() {
@@ -1800,15 +2429,24 @@ fn query_nvidia_gpu_utilization() -> Option<f32> {
             gpu: u32,
             memory: u32,
         }
-        type NvmlDeviceGetUtilizationRates = unsafe extern "C" fn(usize, *mut NvmlUtilization) -> u32;
+        type NvmlDeviceGetUtilizationRates =
+            unsafe extern "C" fn(usize, *mut NvmlUtilization) -> u32;
 
-        let init_fn: Option<NvmlInit> = std::mem::transmute(GetProcAddress(nvml_lib, b"nvmlInit_v2\0".as_ptr()));
-        let get_handle_fn: Option<NvmlDeviceGetHandleByIndex> = std::mem::transmute(GetProcAddress(nvml_lib, b"nvmlDeviceGetHandleByIndex_v2\0".as_ptr()));
-        let get_rates_fn: Option<NvmlDeviceGetUtilizationRates> = std::mem::transmute(GetProcAddress(nvml_lib, b"nvmlDeviceGetUtilizationRates\0".as_ptr()));
-        let shutdown_fn: Option<NvmlShutdown> = std::mem::transmute(GetProcAddress(nvml_lib, b"nvmlShutdown\0".as_ptr()));
+        let init_fn: Option<NvmlInit> =
+            std::mem::transmute(GetProcAddress(nvml_lib, b"nvmlInit_v2\0".as_ptr()));
+        let get_handle_fn: Option<NvmlDeviceGetHandleByIndex> = std::mem::transmute(
+            GetProcAddress(nvml_lib, b"nvmlDeviceGetHandleByIndex_v2\0".as_ptr()),
+        );
+        let get_rates_fn: Option<NvmlDeviceGetUtilizationRates> = std::mem::transmute(
+            GetProcAddress(nvml_lib, b"nvmlDeviceGetUtilizationRates\0".as_ptr()),
+        );
+        let shutdown_fn: Option<NvmlShutdown> =
+            std::mem::transmute(GetProcAddress(nvml_lib, b"nvmlShutdown\0".as_ptr()));
 
         let mut res = None;
-        if let (Some(init), Some(get_handle), Some(get_rates), Some(shutdown)) = (init_fn, get_handle_fn, get_rates_fn, shutdown_fn) {
+        if let (Some(init), Some(get_handle), Some(get_rates), Some(shutdown)) =
+            (init_fn, get_handle_fn, get_rates_fn, shutdown_fn)
+        {
             if init() == 0 {
                 let mut device: usize = 0;
                 let mut max_util: f32 = 0.0;
@@ -1837,7 +2475,8 @@ pub fn get_gpu_utilization() -> f32 {
 
     #[cfg(target_os = "linux")]
     {
-        if let Ok(content) = std::fs::read_to_string("/sys/class/drm/card0/device/gpu_busy_percent") {
+        if let Ok(content) = std::fs::read_to_string("/sys/class/drm/card0/device/gpu_busy_percent")
+        {
             if let Ok(val) = content.trim().parse::<f32>() {
                 return val;
             }
@@ -1873,7 +2512,8 @@ fn check_mic_camera_active_win() -> (bool, bool, String) {
                     std::ptr::null_mut(),
                     std::ptr::null_mut(),
                     std::ptr::null_mut(),
-                ) != 0 {
+                ) != 0
+                {
                     break;
                 }
                 index += 1;
@@ -1944,7 +2584,10 @@ pub fn check_mic_camera_active() -> (bool, bool, String) {
     }
     #[cfg(target_os = "linux")]
     {
-        if let Ok(output) = Command::new("pactl").args(["list", "short", "source-outputs"]).output() {
+        if let Ok(output) = Command::new("pactl")
+            .args(["list", "short", "source-outputs"])
+            .output()
+        {
             if !output.stdout.is_empty() {
                 return (true, false, "PulseAudio Capture".to_string());
             }
@@ -1977,11 +2620,22 @@ fn parse_query_param(url: &str, key: &str) -> Option<String> {
     None
 }
 
-fn handle_http_client(mut stream: TcpStream, state: Arc<Mutex<SharedState>>, rate_limiter: Arc<RateLimiter>) {
-    let peer_ip = stream.peer_addr().map(|a| a.ip()).unwrap_or(IpAddr::V4(std::net::Ipv4Addr::LOCALHOST));
+fn handle_http_client(
+    mut stream: TcpStream,
+    state: Arc<Mutex<SharedState>>,
+    rate_limiter: Arc<RateLimiter>,
+) {
+    let peer_ip = stream
+        .peer_addr()
+        .map(|a| a.ip())
+        .unwrap_or(IpAddr::V4(std::net::Ipv4Addr::LOCALHOST));
     let (allow_lan, local_ip, configured_token) = {
         let s = state.lock().unwrap();
-        (s.config.allow_lan_access, s.local_ip.clone(), s.api_token.clone())
+        (
+            s.config.allow_lan_access,
+            s.local_ip.clone(),
+            s.api_token.clone(),
+        )
     };
 
     if !peer_ip.is_loopback() && !allow_lan {
@@ -2024,7 +2678,12 @@ fn handle_http_client(mut stream: TcpStream, state: Arc<Mutex<SharedState>>, rat
 
     // Host validation (DNS rebinding protection)
     if !host_header.is_empty() {
-        let host_name = host_header.split(':').next().unwrap_or("").trim().to_lowercase();
+        let host_name = host_header
+            .split(':')
+            .next()
+            .unwrap_or("")
+            .trim()
+            .to_lowercase();
         let is_valid_host = host_name == "localhost"
             || host_name == "127.0.0.1"
             || host_name == "[::1]"
@@ -2043,8 +2702,18 @@ fn handle_http_client(mut stream: TcpStream, state: Arc<Mutex<SharedState>>, rat
         let stripped_origin = origin_header
             .trim_start_matches("http://")
             .trim_start_matches("https://");
-        let origin_host = stripped_origin.split(':').next().unwrap_or("").trim().to_lowercase();
-        let host_name = host_header.split(':').next().unwrap_or("").trim().to_lowercase();
+        let origin_host = stripped_origin
+            .split(':')
+            .next()
+            .unwrap_or("")
+            .trim()
+            .to_lowercase();
+        let host_name = host_header
+            .split(':')
+            .next()
+            .unwrap_or("")
+            .trim()
+            .to_lowercase();
         if !origin_host.is_empty() && origin_host != host_name {
             let body = r#"{"error":"cross_origin_forbidden","message":"Cross-origin requests are rejected"}"#;
             let resp = format!("HTTP/1.1 403 Forbidden\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", body.len(), body);
@@ -2104,8 +2773,12 @@ fn handle_http_client(mut stream: TcpStream, state: Arc<Mutex<SharedState>>, rat
             let total_cost: f64 = s.energy_history.iter().map(|e| e.cost_saved).sum();
             let total_duration: u64 = s.energy_history.iter().map(|e| e.duration_secs).sum();
 
-            let lease_active = s.agent_lease_until.map(|u| Instant::now() < u).unwrap_or(false);
-            let lease_remaining = s.agent_lease_until
+            let lease_active = s
+                .agent_lease_until
+                .map(|u| Instant::now() < u)
+                .unwrap_or(false);
+            let lease_remaining = s
+                .agent_lease_until
                 .and_then(|u| u.checked_duration_since(Instant::now()))
                 .map(|d| d.as_secs())
                 .unwrap_or(0);
@@ -2143,12 +2816,25 @@ fn handle_http_client(mut stream: TcpStream, state: Arc<Mutex<SharedState>>, rat
                 "agent_lease_pid": s.agent_lease_pid,
                 "local_ip": s.local_ip,
                 "mac_address": s.mac_address,
+                "power_mode": s.config.active_mode.name(),
+                "currency_symbol": s.config.currency_symbol,
+                "co2_factor": get_carbon_factor_kg(&s.config),
+                "carbon_region": s.config.carbon_region,
+                "battery": {
+                    "has_battery": s.live_battery_status.has_battery,
+                    "on_ac_power": s.live_battery_status.on_ac_power,
+                    "percent": s.live_battery_status.percent,
+                    "is_charging": s.live_battery_status.is_charging,
+                },
+                "stay_awake_until": s.config.stay_awake_until_epoch_secs,
                 "energy": {
                     "kwh_saved": total_kwh,
                     "cost_saved": total_cost,
                     "duration_secs": total_duration,
+                    "co2_saved": total_kwh * get_carbon_factor_kg(&s.config),
                 }
-            }).to_string()
+            })
+            .to_string()
         };
         let resp = format!(
             "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
@@ -2170,11 +2856,19 @@ fn handle_http_client(mut stream: TcpStream, state: Arc<Mutex<SharedState>>, rat
     }
 
     if path.starts_with("/api/postpone") {
-        let mins = parse_query_param(path, "mins").and_then(|m| m.parse::<u64>().ok()).unwrap_or(15);
+        let mins = parse_query_param(path, "mins")
+            .and_then(|m| m.parse::<u64>().ok())
+            .unwrap_or(15);
         let mut s = state.lock().unwrap();
         s.postponed_until = Some(Instant::now() + Duration::from_secs(mins * 60));
-        s.set_toast(&format!("Sleep postponed by {} minutes via Remote/API.", mins));
-        let body = format!(r#"{{"status":"ok","message":"Postponed for {} minutes","mins":{}}}"#, mins, mins);
+        s.set_toast(&format!(
+            "Sleep postponed by {} minutes via Remote/API.",
+            mins
+        ));
+        let body = format!(
+            r#"{{"status":"ok","message":"Postponed for {} minutes","mins":{}}}"#,
+            mins, mins
+        );
         let resp = format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", body.len(), body);
         let _ = stream.write_all(resp.as_bytes());
         return;
@@ -2184,23 +2878,35 @@ fn handle_http_client(mut stream: TcpStream, state: Arc<Mutex<SharedState>>, rat
         let mut s = state.lock().unwrap();
         s.config.guard_enabled = !s.config.guard_enabled;
         s.config_dirty = true;
-        let body = format!(r#"{{"status":"ok","guard_enabled":{}}}"#, s.config.guard_enabled);
+        let body = format!(
+            r#"{{"status":"ok","guard_enabled":{}}}"#,
+            s.config.guard_enabled
+        );
         let resp = format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", body.len(), body);
         let _ = stream.write_all(resp.as_bytes());
         return;
     }
 
     if path.starts_with("/api/lease") {
-        let mins = parse_query_param(path, "mins").and_then(|m| m.parse::<u64>().ok()).unwrap_or(30);
-        let reason = parse_query_param(path, "reason").unwrap_or_else(|| "Remote Lease".to_string());
+        let mins = parse_query_param(path, "mins")
+            .and_then(|m| m.parse::<u64>().ok())
+            .unwrap_or(30);
+        let reason =
+            parse_query_param(path, "reason").unwrap_or_else(|| "Remote Lease".to_string());
         let pid = parse_query_param(path, "pid").and_then(|p| p.parse::<u32>().ok());
         let mut s = state.lock().unwrap();
         s.agent_lease_until = Some(Instant::now() + Duration::from_secs(mins * 60));
         s.agent_lease_reason = reason.clone();
         s.agent_lease_pid = pid;
         let pid_msg = pid.map(|p| format!(" (PID {})", p)).unwrap_or_default();
-        s.set_toast(&format!("Agent Lease granted for {}m: {}{}", mins, reason, pid_msg));
-        let body = format!(r#"{{"status":"ok","lease_mins":{},"reason":"{}","pid":{:?}}}"#, mins, reason, pid);
+        s.set_toast(&format!(
+            "Agent Lease granted for {}m: {}{}",
+            mins, reason, pid_msg
+        ));
+        let body = format!(
+            r#"{{"status":"ok","lease_mins":{},"reason":"{}","pid":{:?}}}"#,
+            mins, reason, pid
+        );
         let resp = format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", body.len(), body);
         let _ = stream.write_all(resp.as_bytes());
         return;
@@ -2259,6 +2965,90 @@ fn handle_http_client(mut stream: TcpStream, state: Arc<Mutex<SharedState>>, rat
         return;
     }
 
+    if path.starts_with("/api/mode") {
+        let mode_str = parse_query_param(path, "name")
+            .unwrap_or_else(|| "balanced".to_string())
+            .to_lowercase();
+        let mut s = state.lock().unwrap();
+        let mode = match mode_str.as_str() {
+            "work" => PowerMode::Work,
+            "night" => PowerMode::Night,
+            "away" => PowerMode::Away,
+            "custom" => PowerMode::Custom,
+            _ => PowerMode::Balanced,
+        };
+        mode.apply_to_config(&mut s.config);
+        s.config_dirty = true;
+        s.set_toast(&format!("Power mode switched to {}", mode.name()));
+        let body = format!(r#"{{"status":"ok","mode":"{}"}}"#, mode.name());
+        let resp = format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", body.len(), body);
+        let _ = stream.write_all(resp.as_bytes());
+        return;
+    }
+
+    if path.starts_with("/api/schedule/stay_awake") {
+        let mins = parse_query_param(path, "mins")
+            .and_then(|m| m.parse::<u64>().ok())
+            .unwrap_or(60);
+        let mut s = state.lock().unwrap();
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        s.config.stay_awake_until_epoch_secs = Some(now + mins * 60);
+        s.config_dirty = true;
+        s.set_toast(&format!(
+            "Scheduled stay-awake active for {} minutes.",
+            mins
+        ));
+        let body = format!(r#"{{"status":"ok","stay_awake_mins":{}}}"#, mins);
+        let resp = format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", body.len(), body);
+        let _ = stream.write_all(resp.as_bytes());
+        return;
+    }
+
+    if path.starts_with("/api/wake_timer/add") {
+        let time_str = parse_query_param(path, "time").unwrap_or_else(|| "02:00".to_string());
+        let label =
+            parse_query_param(path, "label").unwrap_or_else(|| "Scheduled Wake".to_string());
+        let mut s = state.lock().unwrap();
+        let id = format!(
+            "{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs()
+        );
+        let timer = WakeTimer {
+            id: id.clone(),
+            time_str: time_str.clone(),
+            label: label.clone(),
+            enabled: true,
+        };
+        schedule_os_wake(&timer);
+        s.config.wake_timers.push(timer);
+        s.config_dirty = true;
+        s.set_toast(&format!("Wake timer scheduled at {}: {}", time_str, label));
+        let body = format!(r#"{{"status":"ok","id":"{}","time":"{}"}}"#, id, time_str);
+        let resp = format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", body.len(), body);
+        let _ = stream.write_all(resp.as_bytes());
+        return;
+    }
+
+    if path.starts_with("/api/wake_timer/delete") {
+        if let Some(id) = parse_query_param(path, "id") {
+            let mut s = state.lock().unwrap();
+            remove_os_wake(&id);
+            s.config.wake_timers.retain(|t| t.id != id);
+            s.config_dirty = true;
+            s.set_toast("Wake timer removed.");
+            let body = r#"{"status":"ok","message":"Wake timer deleted"}"#;
+            let resp = format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", body.len(), body);
+            let _ = stream.write_all(resp.as_bytes());
+            return;
+        }
+    }
+
     let body = r#"{"error":"not_found"}"#;
     let resp = format!("HTTP/1.1 404 Not Found\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", body.len(), body);
     let _ = stream.write_all(resp.as_bytes());
@@ -2287,9 +3077,13 @@ fn send_cli_request(path: &str) -> Result<String, String> {
     let mut stream = TcpStream::connect("127.0.0.1:49281")
         .map_err(|e| format!("Could not connect to running Agent Power Guard instance on 127.0.0.1:49281 (Is the app running?): {}", e))?;
     let req = format!("GET {} HTTP/1.1\r\nHost: 127.0.0.1:49281\r\nAuthorization: Bearer {}\r\nConnection: close\r\n\r\n", path, token);
-    stream.write_all(req.as_bytes()).map_err(|e| e.to_string())?;
+    stream
+        .write_all(req.as_bytes())
+        .map_err(|e| e.to_string())?;
     let mut resp = String::new();
-    stream.read_to_string(&mut resp).map_err(|e| e.to_string())?;
+    stream
+        .read_to_string(&mut resp)
+        .map_err(|e| e.to_string())?;
     if let Some(idx) = resp.find("\r\n\r\n") {
         Ok(resp[idx + 4..].to_string())
     } else {
@@ -2326,7 +3120,9 @@ fn run_cli_wrapper(args: &[String]) {
     }
 
     if cmd_parts.is_empty() {
-        eprintln!("Usage: agent-power-guard run [--max-mins N] [--reason \"text\"] -- <command...>");
+        eprintln!(
+            "Usage: agent-power-guard run [--max-mins N] [--reason \"text\"] -- <command...>"
+        );
         std::process::exit(1);
     }
 
@@ -2334,7 +3130,10 @@ fn run_cli_wrapper(args: &[String]) {
     let prog_args = &cmd_parts[1..];
     let lease_reason = reason.unwrap_or_else(|| cmd_parts.join(" "));
 
-    println!("⚡ [Agent Power Guard] Spawning child: {} {:?}", program, prog_args);
+    println!(
+        "⚡ [Agent Power Guard] Spawning child: {} {:?}",
+        program, prog_args
+    );
     let mut child = match Command::new(program).args(prog_args).spawn() {
         Ok(c) => c,
         Err(e) => {
@@ -2345,11 +3144,20 @@ fn run_cli_wrapper(args: &[String]) {
 
     let pid = child.id();
     let encoded_reason = lease_reason.replace(' ', "%20");
-    let path = format!("/api/lease?mins={}&reason={}&pid={}", max_mins, encoded_reason, pid);
+    let path = format!(
+        "/api/lease?mins={}&reason={}&pid={}",
+        max_mins, encoded_reason, pid
+    );
     if let Err(e) = send_cli_request(&path) {
-        eprintln!("Warning: Failed to acquire PID lease from Agent Power Guard watchdog: {}", e);
+        eprintln!(
+            "Warning: Failed to acquire PID lease from Agent Power Guard watchdog: {}",
+            e
+        );
     } else {
-        println!("🔒 [Agent Power Guard] Acquired PID-bound lease (PID {}, {}m cap): {}", pid, max_mins, lease_reason);
+        println!(
+            "🔒 [Agent Power Guard] Acquired PID-bound lease (PID {}, {}m cap): {}",
+            pid, max_mins, lease_reason
+        );
     }
 
     let status = child.wait();
@@ -2417,7 +3225,9 @@ fn run_mcp_server() {
 
     let mut line = String::new();
     while let Ok(n) = reader.read_line(&mut line) {
-        if n == 0 { break; }
+        if n == 0 {
+            break;
+        }
         let trimmed = line.trim();
         if trimmed.is_empty() {
             line.clear();
@@ -2457,24 +3267,41 @@ fn run_mcp_server() {
                 }
                 "tools/call" => {
                     let params = req.get("params");
-                    let tool_name = params.and_then(|p| p.get("name")).and_then(|n| n.as_str()).unwrap_or("");
-                    let arguments = params.and_then(|p| p.get("arguments")).cloned().unwrap_or(serde_json::json!({}));
+                    let tool_name = params
+                        .and_then(|p| p.get("name"))
+                        .and_then(|n| n.as_str())
+                        .unwrap_or("");
+                    let arguments = params
+                        .and_then(|p| p.get("arguments"))
+                        .cloned()
+                        .unwrap_or(serde_json::json!({}));
 
                     let result_text = match tool_name {
                         "keep_awake" => {
-                            let mins = arguments.get("minutes").and_then(|m| m.as_u64()).unwrap_or(30);
-                            let reason = arguments.get("reason").and_then(|r| r.as_str()).unwrap_or("MCP Agent Task");
-                            let path = format!("/api/lease?mins={}&reason={}", mins, reason.replace(' ', "%20"));
+                            let mins = arguments
+                                .get("minutes")
+                                .and_then(|m| m.as_u64())
+                                .unwrap_or(30);
+                            let reason = arguments
+                                .get("reason")
+                                .and_then(|r| r.as_str())
+                                .unwrap_or("MCP Agent Task");
+                            let path = format!(
+                                "/api/lease?mins={}&reason={}",
+                                mins,
+                                reason.replace(' ', "%20")
+                            );
                             send_cli_request(&path).unwrap_or_else(|e| format!("Error: {}", e))
                         }
-                        "release" => {
-                            send_cli_request("/api/release").unwrap_or_else(|e| format!("Error: {}", e))
-                        }
-                        "status" => {
-                            send_cli_request("/api/status").unwrap_or_else(|e| format!("Error: {}", e))
-                        }
+                        "release" => send_cli_request("/api/release")
+                            .unwrap_or_else(|e| format!("Error: {}", e)),
+                        "status" => send_cli_request("/api/status")
+                            .unwrap_or_else(|e| format!("Error: {}", e)),
                         "postpone" => {
-                            let mins = arguments.get("minutes").and_then(|m| m.as_u64()).unwrap_or(15);
+                            let mins = arguments
+                                .get("minutes")
+                                .and_then(|m| m.as_u64())
+                                .unwrap_or(15);
                             let path = format!("/api/postpone?mins={}", mins);
                             send_cli_request(&path).unwrap_or_else(|e| format!("Error: {}", e))
                         }
@@ -2568,14 +3395,16 @@ pub fn get_built_in_profiles() -> Vec<AgentProfile> {
         },
         AgentProfile {
             name: "Node / Web Toolchain".to_string(),
-            description: "Watches node, npm, pnpm, bun, tsc, vite, and next dev servers".to_string(),
+            description: "Watches node, npm, pnpm, bun, tsc, vite, and next dev servers"
+                .to_string(),
             keywords: "node, npm, pnpm, bun, tsc, esbuild, vite".to_string(),
             agent_cpu_threshold: 3.0,
             gpu_threshold_pct: 5.0,
         },
         AgentProfile {
             name: "Python ML".to_string(),
-            description: "Watches python training scripts, PyTorch, and Jupyter kernels".to_string(),
+            description: "Watches python training scripts, PyTorch, and Jupyter kernels"
+                .to_string(),
             keywords: "python, torch, jupyter".to_string(),
             agent_cpu_threshold: 5.0,
             gpu_threshold_pct: 10.0,
@@ -2597,59 +3426,81 @@ fn handle_cli_command(args: &[String]) {
             run_mcp_server();
         }
         "lease" => {
-            let mins = args.get(2).and_then(|m| m.parse::<u32>().ok()).unwrap_or(30);
-            let reason = args.get(3).cloned().unwrap_or_else(|| "CLI Lease".to_string());
+            let mins = args
+                .get(2)
+                .and_then(|m| m.parse::<u32>().ok())
+                .unwrap_or(30);
+            let reason = args
+                .get(3)
+                .cloned()
+                .unwrap_or_else(|| "CLI Lease".to_string());
             let encoded_reason = reason.replace(' ', "%20");
-            match send_cli_request(&format!("/api/lease?mins={}&reason={}", mins, encoded_reason)) {
+            match send_cli_request(&format!(
+                "/api/lease?mins={}&reason={}",
+                mins, encoded_reason
+            )) {
                 Ok(resp) => println!("Success: {}", resp),
                 Err(err) => eprintln!("Error: {}", err),
             }
         }
-        "release" => {
-            match send_cli_request("/api/release") {
-                Ok(resp) => println!("Success: {}", resp),
-                Err(err) => eprintln!("Error: {}", err),
-            }
-        }
-        "status" => {
-            match send_cli_request("/api/status") {
-                Ok(resp) => {
-                    if let Ok(v) = serde_json::from_str::<serde_json::Value>(&resp) {
-                        println!("==================================================");
-                        println!("           AGENT POWER GUARD - STATUS             ");
-                        println!("==================================================");
-                        println!("Guard Enabled    : {}", v["guard_enabled"]);
-                        println!("All Conditions   : {}", if v["all_conditions_pass"] == true { "PASSING (Arming Sleep)" } else { "BLOCKED" });
-                        println!("Countdown        : {}s / {}s", v["countdown_secs"], v["countdown_max"]);
-                        println!("Banner           : {}", v["blocker_banner_text"]);
-                        println!("Human Idle       : {}s", v["live_idle_secs"]);
-                        println!("Agent CPU        : {:.1}% ({})", v["live_agent_cpu"], v["live_agent_proc"]);
-                        println!("GPU Compute      : {:.1}%", v["live_gpu"]);
-                        println!("Whole-PC CPU     : {:.1}%", v["live_pc_cpu"]);
-                        println!("Whole-PC Disk    : {:.0} KB/s", v["live_pc_disk"]);
-                        println!("Whole-PC Network : {:.0} KB/s", v["live_pc_net"]);
-                        println!("Mic/Cam In Use   : {}", v["live_mic_cam_active"]);
-                        println!("Agent Lease      : {} ({})", v["agent_lease_active"], v["agent_lease_reason"]);
-                        if let Some(pid) = v["agent_lease_pid"].as_u64() {
-                            println!("Bound Process PID: {}", pid);
+        "release" => match send_cli_request("/api/release") {
+            Ok(resp) => println!("Success: {}", resp),
+            Err(err) => eprintln!("Error: {}", err),
+        },
+        "status" => match send_cli_request("/api/status") {
+            Ok(resp) => {
+                if let Ok(v) = serde_json::from_str::<serde_json::Value>(&resp) {
+                    println!("==================================================");
+                    println!("           AGENT POWER GUARD - STATUS             ");
+                    println!("==================================================");
+                    println!("Guard Enabled    : {}", v["guard_enabled"]);
+                    println!(
+                        "All Conditions   : {}",
+                        if v["all_conditions_pass"] == true {
+                            "PASSING (Arming Sleep)"
+                        } else {
+                            "BLOCKED"
                         }
-                        println!("Local Web URL    : http://{}:49281", v["local_ip"]);
-                        println!("==================================================");
-                    } else {
-                        println!("{}", resp);
+                    );
+                    println!(
+                        "Countdown        : {}s / {}s",
+                        v["countdown_secs"], v["countdown_max"]
+                    );
+                    println!("Banner           : {}", v["blocker_banner_text"]);
+                    println!("Human Idle       : {}s", v["live_idle_secs"]);
+                    println!(
+                        "Agent CPU        : {:.1}% ({})",
+                        v["live_agent_cpu"], v["live_agent_proc"]
+                    );
+                    println!("GPU Compute      : {:.1}%", v["live_gpu"]);
+                    println!("Whole-PC CPU     : {:.1}%", v["live_pc_cpu"]);
+                    println!("Whole-PC Disk    : {:.0} KB/s", v["live_pc_disk"]);
+                    println!("Whole-PC Network : {:.0} KB/s", v["live_pc_net"]);
+                    println!("Mic/Cam In Use   : {}", v["live_mic_cam_active"]);
+                    println!(
+                        "Agent Lease      : {} ({})",
+                        v["agent_lease_active"], v["agent_lease_reason"]
+                    );
+                    if let Some(pid) = v["agent_lease_pid"].as_u64() {
+                        println!("Bound Process PID: {}", pid);
                     }
+                    println!("Local Web URL    : http://{}:49281", v["local_ip"]);
+                    println!("==================================================");
+                } else {
+                    println!("{}", resp);
                 }
-                Err(err) => eprintln!("Error: {}", err),
             }
-        }
-        "sleep" => {
-            match send_cli_request("/api/sleep") {
-                Ok(resp) => println!("Success: {}", resp),
-                Err(err) => eprintln!("Error: {}", err),
-            }
-        }
+            Err(err) => eprintln!("Error: {}", err),
+        },
+        "sleep" => match send_cli_request("/api/sleep") {
+            Ok(resp) => println!("Success: {}", resp),
+            Err(err) => eprintln!("Error: {}", err),
+        },
         "postpone" => {
-            let mins = args.get(2).and_then(|m| m.parse::<u32>().ok()).unwrap_or(15);
+            let mins = args
+                .get(2)
+                .and_then(|m| m.parse::<u32>().ok())
+                .unwrap_or(15);
             match send_cli_request(&format!("/api/postpone?mins={}", mins)) {
                 Ok(resp) => println!("Success: {}", resp),
                 Err(err) => eprintln!("Error: {}", err),
@@ -2669,7 +3520,10 @@ fn handle_cli_command(args: &[String]) {
             println!("  agent-power-guard help                                             - Show this help message");
         }
         _ => {
-            eprintln!("Unknown command: '{}'. Run 'agent-power-guard help' for options.", cmd);
+            eprintln!(
+                "Unknown command: '{}'. Run 'agent-power-guard help' for options.",
+                cmd
+            );
         }
     }
 }
@@ -2682,9 +3536,9 @@ pub fn start_watchdog_thread(state: Arc<Mutex<SharedState>>, egui_ctx: egui::Con
     std::thread::spawn(move || {
         let mut sys = System::new().expect("sysinfo System::new");
         let mut nets = Networks::new_with_refreshed_list().expect("Networks::new");
-        let mut disks = Disks::new_with_refreshed_list_specifics(
-            DiskRefreshKind::nothing().with_io_usage(),
-        ).expect("Disks::new");
+        let mut disks =
+            Disks::new_with_refreshed_list_specifics(DiskRefreshKind::nothing().with_io_usage())
+                .expect("Disks::new");
 
         // Warm up CPU usage
         sys.refresh_cpu_usage();
@@ -2887,11 +3741,28 @@ pub fn start_watchdog_thread(state: Arc<Mutex<SharedState>>, egui_ctx: egui::Con
                         s.agent_lease_until = None;
                         s.agent_lease_reason.clear();
                         s.agent_lease_pid = None;
-                        s.set_toast(&format!("PID-bound lease auto-released: Process {} exited.", pid));
+                        s.set_toast(&format!(
+                            "PID-bound lease auto-released: Process {} exited.",
+                            pid
+                        ));
                     }
                 }
 
-                // Phase 0.2: Pure Condition Evaluation via evaluate()
+                // Phase 3: Laptop Battery & Scheduling State
+                let batt = get_battery_status();
+                s.live_battery_status = batt;
+
+                if let Some(until) = s.config.stay_awake_until_epoch_secs {
+                    if now_wall >= until {
+                        s.config.stay_awake_until_epoch_secs = None;
+                        s.config_dirty = true;
+                        s.set_toast("Scheduled stay-awake period ended.");
+                    }
+                }
+
+                let (local_h, local_m) = get_local_hour_minute();
+
+                // Phase 0.2 & Phase 3: Pure Condition Evaluation via evaluate()
                 let metrics = Metrics {
                     idle_secs,
                     max_agent_cpu,
@@ -2908,6 +3779,11 @@ pub fn start_watchdog_thread(state: Arc<Mutex<SharedState>>, egui_ctx: egui::Con
                     display_request_active: cached_display_request,
                     sensor_error: false,
                     now_epoch_secs: now_wall,
+                    local_hour: local_h,
+                    local_min: local_m,
+                    on_battery: batt.has_battery && !batt.on_ac_power,
+                    battery_pct: batt.percent,
+                    stay_awake_until: s.config.stay_awake_until_epoch_secs,
                 };
 
                 let mut eval_state = EvaluationState {
@@ -2986,9 +3862,16 @@ pub fn start_watchdog_thread(state: Arc<Mutex<SharedState>>, egui_ctx: egui::Con
 
                 // Phase 2.2: Notifications
                 if decision.trigger_grace_banner && !s.last_grace_active {
-                    if s.config.notify_on_sleep_imminent && now_wall >= s.last_sleep_imminent_notif + 60 {
+                    if s.config.notify_on_sleep_imminent
+                        && now_wall >= s.last_sleep_imminent_notif + 60
+                    {
                         s.last_sleep_imminent_notif = now_wall;
-                        send_notification(&s.config, &NotificationEvent::SleepImminent { countdown_secs: decision.countdown_secs });
+                        send_notification(
+                            &s.config,
+                            &NotificationEvent::SleepImminent {
+                                countdown_secs: decision.countdown_secs,
+                            },
+                        );
                     }
                 }
                 s.last_grace_active = decision.trigger_grace_banner;
@@ -3003,14 +3886,22 @@ pub fn start_watchdog_thread(state: Arc<Mutex<SharedState>>, egui_ctx: egui::Con
                 if let Some(start) = s.current_block_start_epoch_secs {
                     let blocked_secs = now_wall.saturating_sub(start);
                     let threshold_secs = (s.config.notify_blocked_long_hours as u64) * 3600;
-                    if blocked_secs >= threshold_secs && now_wall >= s.last_blocked_long_notif + 3600 {
+                    if blocked_secs >= threshold_secs
+                        && now_wall >= s.last_blocked_long_notif + 3600
+                    {
                         if s.config.notify_on_blocked_long {
                             s.last_blocked_long_notif = now_wall;
-                            let blocker_name = s.current_primary_blocker.clone().unwrap_or_else(|| "Unknown Blocker".to_string());
-                            send_notification(&s.config, &NotificationEvent::BlockedLong {
-                                hours: s.config.notify_blocked_long_hours,
-                                blocker: blocker_name,
-                            });
+                            let blocker_name = s
+                                .current_primary_blocker
+                                .clone()
+                                .unwrap_or_else(|| "Unknown Blocker".to_string());
+                            send_notification(
+                                &s.config,
+                                &NotificationEvent::BlockedLong {
+                                    hours: s.config.notify_blocked_long_hours,
+                                    blocker: blocker_name,
+                                },
+                            );
                         }
                     }
                 }
@@ -3018,12 +3909,16 @@ pub fn start_watchdog_thread(state: Arc<Mutex<SharedState>>, egui_ctx: egui::Con
                 if !s.config.guard_enabled {
                     let paused_secs = now_wall.saturating_sub(s.guard_paused_since);
                     let threshold_secs = (s.config.notify_guard_paused_hours as u64) * 3600;
-                    if paused_secs >= threshold_secs && now_wall >= s.last_guard_paused_notif + 3600 {
+                    if paused_secs >= threshold_secs && now_wall >= s.last_guard_paused_notif + 3600
+                    {
                         if s.config.notify_on_guard_paused_long {
                             s.last_guard_paused_notif = now_wall;
-                            send_notification(&s.config, &NotificationEvent::GuardPausedLong {
-                                hours: s.config.notify_guard_paused_hours,
-                            });
+                            send_notification(
+                                &s.config,
+                                &NotificationEvent::GuardPausedLong {
+                                    hours: s.config.notify_guard_paused_hours,
+                                },
+                            );
                         }
                     }
                 } else {
@@ -3031,7 +3926,9 @@ pub fn start_watchdog_thread(state: Arc<Mutex<SharedState>>, egui_ctx: egui::Con
                 }
 
                 // Phase 2.3: Opt-in Update Check
-                if s.config.check_for_updates && now_wall >= s.config.last_update_check_epoch_secs + 86400 {
+                if s.config.check_for_updates
+                    && now_wall >= s.config.last_update_check_epoch_secs + 86400
+                {
                     s.config.last_update_check_epoch_secs = now_wall;
                     s.config_dirty = true;
                     trigger_update_check(state.clone());
@@ -3072,7 +3969,10 @@ pub fn start_watchdog_thread(state: Arc<Mutex<SharedState>>, egui_ctx: egui::Con
 
 pub fn open_url(url: &str) {
     #[cfg(windows)]
-    let _ = Command::new("cmd").args(["/c", "start", url]).creation_flags(CREATE_NO_WINDOW).status();
+    let _ = Command::new("cmd")
+        .args(["/c", "start", url])
+        .creation_flags(CREATE_NO_WINDOW)
+        .status();
     #[cfg(target_os = "linux")]
     let _ = Command::new("xdg-open").arg(url).status();
     #[cfg(target_os = "macos")]
@@ -3094,9 +3994,14 @@ pub fn trigger_update_check(state: Arc<Mutex<SharedState>>) {
         #[cfg(windows)]
         cmd.creation_flags(CREATE_NO_WINDOW);
         cmd.args([
-            "-s", "--max-time", "10", "--connect-timeout", "5",
-            "-H", &format!("User-Agent: AgentPowerGuard/{}", env!("CARGO_PKG_VERSION")),
-            "https://api.github.com/repos/Subham-Maity/agent-power-guard/releases/latest"
+            "-s",
+            "--max-time",
+            "10",
+            "--connect-timeout",
+            "5",
+            "-H",
+            &format!("User-Agent: AgentPowerGuard/{}", env!("CARGO_PKG_VERSION")),
+            "https://api.github.com/repos/Subham-Maity/agent-power-guard/releases/latest",
         ]);
 
         let res = cmd.output();
@@ -3111,7 +4016,8 @@ pub fn trigger_update_check(state: Arc<Mutex<SharedState>>) {
                         let current = env!("CARGO_PKG_VERSION");
                         if is_newer_version(clean, current) {
                             s.update_available = Some(tag.to_string());
-                            s.update_check_status_msg = Some(format!("New release available: {}", tag));
+                            s.update_check_status_msg =
+                                Some(format!("New release available: {}", tag));
                         } else {
                             s.update_available = None;
                             s.update_check_status_msg = Some(format!("Up to date (v{})", current));
@@ -3120,11 +4026,13 @@ pub fn trigger_update_check(state: Arc<Mutex<SharedState>>) {
                         s.update_check_status_msg = Some("No release tag found.".to_string());
                     }
                 } else {
-                    s.update_check_status_msg = Some("Failed to parse release response.".to_string());
+                    s.update_check_status_msg =
+                        Some("Failed to parse release response.".to_string());
                 }
             }
             Ok(_) => {
-                s.update_check_status_msg = Some("Update check received non-200 response.".to_string());
+                s.update_check_status_msg =
+                    Some("Update check received non-200 response.".to_string());
             }
             Err(e) => {
                 s.update_check_status_msg = Some(format!("Update check failed: {}", e));
@@ -3172,6 +4080,12 @@ pub struct AgentPowerGuardApp {
     tray_toggle_id: tray_icon::menu::MenuId,
     tray_sleep_id: tray_icon::menu::MenuId,
     tray_exit_id: tray_icon::menu::MenuId,
+    tray_mode_balanced_id: tray_icon::menu::MenuId,
+    tray_mode_work_id: tray_icon::menu::MenuId,
+    tray_mode_night_id: tray_icon::menu::MenuId,
+    tray_mode_away_id: tray_icon::menu::MenuId,
+    tray_stay_awake_id: tray_icon::menu::MenuId,
+    tray_postpone_id: tray_icon::menu::MenuId,
 }
 
 impl AgentPowerGuardApp {
@@ -3187,17 +4101,47 @@ impl AgentPowerGuardApp {
         });
 
         // Initialize System Tray Icon
-        let (tray_icon, show_id, toggle_id, sleep_id, exit_id) = {
+        let (
+            tray_icon,
+            show_id,
+            toggle_id,
+            sleep_id,
+            exit_id,
+            mb_id,
+            mw_id,
+            mn_id,
+            ma_id,
+            sa_id,
+            pp_id,
+        ) = {
             let icon = load_tray_icon();
             let menu = tray_icon::menu::Menu::new();
             let show_item = tray_icon::menu::MenuItem::new("Show Agent Power Guard", true, None);
             let toggle_item = tray_icon::menu::MenuItem::new("Toggle Guard ON/OFF", true, None);
+            let postpone_item =
+                tray_icon::menu::MenuItem::new("⏳ Postpone Sleep (+15m)", true, None);
+            let stay_awake_item =
+                tray_icon::menu::MenuItem::new("☕ Keep Awake (1 Hour)", true, None);
+            let sep1 = tray_icon::menu::PredefinedMenuItem::separator();
+            let mode_balanced = tray_icon::menu::MenuItem::new("Mode: Balanced (3m)", true, None);
+            let mode_work = tray_icon::menu::MenuItem::new("Mode: Work (10m)", true, None);
+            let mode_night = tray_icon::menu::MenuItem::new("Mode: Night (1m)", true, None);
+            let mode_away = tray_icon::menu::MenuItem::new("Mode: Away (30s)", true, None);
+            let sep2 = tray_icon::menu::PredefinedMenuItem::separator();
             let sleep_item = tray_icon::menu::MenuItem::new("⚡ Test Sleep Now", true, None);
             let exit_item = tray_icon::menu::MenuItem::new("Exit Agent Power Guard", true, None);
 
             let _ = menu.append_items(&[
                 &show_item,
                 &toggle_item,
+                &postpone_item,
+                &stay_awake_item,
+                &sep1,
+                &mode_balanced,
+                &mode_work,
+                &mode_night,
+                &mode_away,
+                &sep2,
                 &sleep_item,
                 &exit_item,
             ]);
@@ -3214,6 +4158,12 @@ impl AgentPowerGuardApp {
                 toggle_item.id().clone(),
                 sleep_item.id().clone(),
                 exit_item.id().clone(),
+                mode_balanced.id().clone(),
+                mode_work.id().clone(),
+                mode_night.id().clone(),
+                mode_away.id().clone(),
+                stay_awake_item.id().clone(),
+                postpone_item.id().clone(),
             )
         };
 
@@ -3232,6 +4182,12 @@ impl AgentPowerGuardApp {
             tray_toggle_id: toggle_id,
             tray_sleep_id: sleep_id,
             tray_exit_id: exit_id,
+            tray_mode_balanced_id: mb_id,
+            tray_mode_work_id: mw_id,
+            tray_mode_night_id: mn_id,
+            tray_mode_away_id: ma_id,
+            tray_stay_awake_id: sa_id,
+            tray_postpone_id: pp_id,
         }
     }
 }
@@ -3286,6 +4242,39 @@ impl eframe::App for AgentPowerGuardApp {
                 }
             } else if menu_event.id == self.tray_sleep_id {
                 sleep_now();
+            } else if menu_event.id == self.tray_mode_balanced_id {
+                let mut s = self.state.lock().unwrap();
+                PowerMode::Balanced.apply_to_config(&mut s.config);
+                s.config_dirty = true;
+                s.set_toast("Power mode switched to Balanced via Tray.");
+            } else if menu_event.id == self.tray_mode_work_id {
+                let mut s = self.state.lock().unwrap();
+                PowerMode::Work.apply_to_config(&mut s.config);
+                s.config_dirty = true;
+                s.set_toast("Power mode switched to Work via Tray.");
+            } else if menu_event.id == self.tray_mode_night_id {
+                let mut s = self.state.lock().unwrap();
+                PowerMode::Night.apply_to_config(&mut s.config);
+                s.config_dirty = true;
+                s.set_toast("Power mode switched to Night via Tray.");
+            } else if menu_event.id == self.tray_mode_away_id {
+                let mut s = self.state.lock().unwrap();
+                PowerMode::Away.apply_to_config(&mut s.config);
+                s.config_dirty = true;
+                s.set_toast("Power mode switched to Away via Tray.");
+            } else if menu_event.id == self.tray_stay_awake_id {
+                let mut s = self.state.lock().unwrap();
+                let now = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs();
+                s.config.stay_awake_until_epoch_secs = Some(now + 3600);
+                s.config_dirty = true;
+                s.set_toast("Keep Awake active for 1 hour via Tray.");
+            } else if menu_event.id == self.tray_postpone_id {
+                let mut s = self.state.lock().unwrap();
+                s.postponed_until = Some(Instant::now() + Duration::from_secs(15 * 60));
+                s.set_toast("Sleep postponed for 15 minutes via Tray.");
             } else if menu_event.id == self.tray_exit_id {
                 std::process::exit(0);
             }
@@ -3345,9 +4334,13 @@ impl eframe::App for AgentPowerGuardApp {
                 // Master Guard Toggle
                 let guard_on = s.config.guard_enabled;
                 let toggle_text = if guard_on {
-                    egui::RichText::new("GUARD: [ ON ]").color(egui::Color32::WHITE).strong()
+                    egui::RichText::new("GUARD: [ ON ]")
+                        .color(egui::Color32::WHITE)
+                        .strong()
                 } else {
-                    egui::RichText::new("GUARD: [ OFF ]").color(egui::Color32::LIGHT_GRAY).strong()
+                    egui::RichText::new("GUARD: [ OFF ]")
+                        .color(egui::Color32::LIGHT_GRAY)
+                        .strong()
                 };
                 let toggle_btn = egui::Button::new(toggle_text).fill(if guard_on {
                     egui::Color32::from_rgb(34, 139, 34)
@@ -3377,7 +4370,11 @@ impl eframe::App for AgentPowerGuardApp {
                 let progress_label = if !s.config.guard_enabled {
                     "PAUSED".to_string()
                 } else if s.all_conditions_pass {
-                    format!("Time until sleep: {} / {}", format_time_compact(s.countdown_secs), format_time_compact(s.countdown_max))
+                    format!(
+                        "Time until sleep: {} / {}",
+                        format_time_compact(s.countdown_secs),
+                        format_time_compact(s.countdown_max)
+                    )
                 } else {
                     format!("RESET / BLOCKED ({})", format_time_compact(s.countdown_max))
                 };
@@ -3418,12 +4415,17 @@ impl eframe::App for AgentPowerGuardApp {
                 }
 
                 if ui.button("📥 Tray").clicked() {
-                    ui.ctx().send_viewport_cmd(egui::ViewportCommand::Visible(false));
+                    ui.ctx()
+                        .send_viewport_cmd(egui::ViewportCommand::Visible(false));
                     flush_working_set();
                     s.set_toast("Minimized to system tray. Active in background.");
                 }
 
-                let theme_icon = if s.config.dark_mode { "☀ Light" } else { "🌙 Dark" };
+                let theme_icon = if s.config.dark_mode {
+                    "☀ Light"
+                } else {
+                    "🌙 Dark"
+                };
                 if ui.button(theme_icon).clicked() {
                     s.config.dark_mode = !s.config.dark_mode;
                     s.config_dirty = true;
@@ -3440,9 +4442,19 @@ impl eframe::App for AgentPowerGuardApp {
                     .inner_margin(egui::Margin::symmetric(12, 6))
                     .show(ui, |ui| {
                         ui.horizontal(|ui| {
-                            ui.label(egui::RichText::new(format!("🚀 New release available: {} (Current: v{})", new_ver, env!("CARGO_PKG_VERSION"))).strong().color(egui::Color32::from_rgb(147, 197, 253)));
+                            ui.label(
+                                egui::RichText::new(format!(
+                                    "🚀 New release available: {} (Current: v{})",
+                                    new_ver,
+                                    env!("CARGO_PKG_VERSION")
+                                ))
+                                .strong()
+                                .color(egui::Color32::from_rgb(147, 197, 253)),
+                            );
                             if ui.button("View on GitHub").clicked() {
-                                open_url("https://github.com/Subham-Maity/agent-power-guard/releases");
+                                open_url(
+                                    "https://github.com/Subham-Maity/agent-power-guard/releases",
+                                );
                             }
                         });
                     });
@@ -3451,11 +4463,31 @@ impl eframe::App for AgentPowerGuardApp {
 
             // Tab Navigation Bar
             ui.horizontal(|ui| {
-                ui.selectable_value(&mut s.active_tab, ActiveTab::Guard, egui::RichText::new("🛡️ Watchdog & Presets").strong());
-                ui.selectable_value(&mut s.active_tab, ActiveTab::History, egui::RichText::new("📜 Block History").strong());
-                ui.selectable_value(&mut s.active_tab, ActiveTab::Energy, egui::RichText::new("💰 Energy Savings").strong());
-                ui.selectable_value(&mut s.active_tab, ActiveTab::Notifications, egui::RichText::new("🔔 Alerts & Updates").strong());
-                ui.selectable_value(&mut s.active_tab, ActiveTab::Remote, egui::RichText::new("🌐 Remote").strong());
+                ui.selectable_value(
+                    &mut s.active_tab,
+                    ActiveTab::Guard,
+                    egui::RichText::new("🛡️ Watchdog & Presets").strong(),
+                );
+                ui.selectable_value(
+                    &mut s.active_tab,
+                    ActiveTab::History,
+                    egui::RichText::new("📜 Block History").strong(),
+                );
+                ui.selectable_value(
+                    &mut s.active_tab,
+                    ActiveTab::Energy,
+                    egui::RichText::new("💰 Energy Savings").strong(),
+                );
+                ui.selectable_value(
+                    &mut s.active_tab,
+                    ActiveTab::Notifications,
+                    egui::RichText::new("🔔 Alerts & Updates").strong(),
+                );
+                ui.selectable_value(
+                    &mut s.active_tab,
+                    ActiveTab::Remote,
+                    egui::RichText::new("🌐 Remote").strong(),
+                );
             });
 
             // Feature 4: Grace Period Imminent Sleep Alert Banner
@@ -3467,12 +4499,33 @@ impl eframe::App for AgentPowerGuardApp {
                     .inner_margin(egui::Margin::symmetric(12, 6));
                 grace_frame.show(ui, |ui| {
                     ui.horizontal(|ui| {
-                        ui.label(egui::RichText::new(format!("⚠️ SLEEP IMMINENT: PC sleeping in {} seconds!", s.countdown_secs)).strong().color(egui::Color32::WHITE));
-                        if ui.button(egui::RichText::new("⏳ Postpone (+15m)").strong().color(egui::Color32::BLACK)).clicked() {
+                        ui.label(
+                            egui::RichText::new(format!(
+                                "⚠️ SLEEP IMMINENT: PC sleeping in {} seconds!",
+                                s.countdown_secs
+                            ))
+                            .strong()
+                            .color(egui::Color32::WHITE),
+                        );
+                        if ui
+                            .button(
+                                egui::RichText::new("⏳ Postpone (+15m)")
+                                    .strong()
+                                    .color(egui::Color32::BLACK),
+                            )
+                            .clicked()
+                        {
                             s.postponed_until = Some(Instant::now() + Duration::from_secs(15 * 60));
                             s.set_toast("Sleep postponed for 15 minutes.");
                         }
-                        if ui.button(egui::RichText::new("⚡ Sleep Immediately").strong().color(egui::Color32::WHITE)).clicked() {
+                        if ui
+                            .button(
+                                egui::RichText::new("⚡ Sleep Immediately")
+                                    .strong()
+                                    .color(egui::Color32::WHITE),
+                            )
+                            .clicked()
+                        {
                             let _ = sleep_now();
                         }
                     });
@@ -3490,7 +4543,14 @@ impl eframe::App for AgentPowerGuardApp {
                         .inner_margin(egui::Margin::symmetric(12, 4));
                     lease_frame.show(ui, |ui| {
                         ui.horizontal(|ui| {
-                            ui.label(egui::RichText::new(format!("🔒 ACTIVE AGENT LEASE: \"{}\" ({}s remaining)", s.agent_lease_reason, rem)).color(egui::Color32::WHITE).strong());
+                            ui.label(
+                                egui::RichText::new(format!(
+                                    "🔒 ACTIVE AGENT LEASE: \"{}\" ({}s remaining)",
+                                    s.agent_lease_reason, rem
+                                ))
+                                .color(egui::Color32::WHITE)
+                                .strong(),
+                            );
                             if ui.button("Release Lease").clicked() {
                                 s.agent_lease_until = None;
                                 s.agent_lease_reason.clear();
@@ -3505,7 +4565,9 @@ impl eframe::App for AgentPowerGuardApp {
             if let Some((msg, created)) = &s.toast_message.clone() {
                 if created.elapsed() < Duration::from_secs(5) {
                     ui.add_space(2.0);
-                    ui.label(egui::RichText::new(format!("ℹ {}", msg)).color(egui::Color32::LIGHT_BLUE));
+                    ui.label(
+                        egui::RichText::new(format!("ℹ {}", msg)).color(egui::Color32::LIGHT_BLUE),
+                    );
                 }
             }
             ui.add_space(4.0);
@@ -3524,6 +4586,94 @@ impl eframe::App for AgentPowerGuardApp {
                         ui.add_space(6.0);
                         ui.heading("Conditions & Thresholds");
                         ui.separator();
+
+                        // Phase 3.1 & 3.3: Power Modes & Battery Status
+                        ui.group(|ui| {
+                            ui.horizontal(|ui| {
+                                ui.label(egui::RichText::new("⚡ Power Mode").strong());
+                                if s.live_battery_status.has_battery {
+                                    let batt_pct = s.live_battery_status.percent.unwrap_or(100);
+                                    let batt_text = if s.live_battery_status.on_ac_power {
+                                        format!("⚡ AC ({}%)", batt_pct)
+                                    } else {
+                                        format!("🔋 Battery ({}%)", batt_pct)
+                                    };
+                                    let batt_color = if !s.live_battery_status.on_ac_power && batt_pct <= s.config.low_battery_percent_threshold {
+                                        egui::Color32::RED
+                                    } else if !s.live_battery_status.on_ac_power {
+                                        egui::Color32::YELLOW
+                                    } else {
+                                        egui::Color32::from_rgb(16, 185, 129)
+                                    };
+                                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                        ui.label(egui::RichText::new(batt_text).color(batt_color).strong().size(11.0));
+                                    });
+                                }
+                            });
+                            ui.label(egui::RichText::new("Active operational profile:").weak().size(11.0));
+                            ui.horizontal(|ui| {
+                                let modes = [
+                                    (PowerMode::Balanced, "Balanced (3m)"),
+                                    (PowerMode::Work, "Work (10m)"),
+                                    (PowerMode::Night, "Night (1m)"),
+                                    (PowerMode::Away, "Away (30s)"),
+                                ];
+                                for (m, lbl) in modes {
+                                    let is_active = s.config.active_mode == m;
+                                    let btn = if is_active {
+                                        egui::Button::new(egui::RichText::new(lbl).strong().color(egui::Color32::WHITE))
+                                            .fill(egui::Color32::from_rgb(37, 99, 235))
+                                    } else {
+                                        egui::Button::new(lbl)
+                                    };
+                                    if ui.add(btn).clicked() {
+                                        m.apply_to_config(&mut s.config);
+                                        s.config_dirty = true;
+                                        s.set_toast(format!("Activated {} Power Mode.", m.name()));
+                                    }
+                                }
+                            });
+
+                            // Stay-Awake quick controls
+                            ui.add_space(2.0);
+                            let now_epoch = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
+                            if let Some(until) = s.config.stay_awake_until_epoch_secs {
+                                if now_epoch < until {
+                                    let rem_m = (until - now_epoch) / 60 + 1;
+                                    ui.horizontal(|ui| {
+                                        ui.label(egui::RichText::new(format!("☕ Keep Awake Active ({}m left)", rem_m)).color(egui::Color32::from_rgb(245, 158, 11)).strong());
+                                        if ui.button("Cancel").clicked() {
+                                            s.config.stay_awake_until_epoch_secs = None;
+                                            s.config_dirty = true;
+                                            s.set_toast("Keep awake cancelled.");
+                                        }
+                                    });
+                                } else {
+                                    s.config.stay_awake_until_epoch_secs = None;
+                                }
+                            } else {
+                                ui.horizontal(|ui| {
+                                    ui.label(egui::RichText::new("☕ Keep Awake:").weak());
+                                    if ui.button("+30m").clicked() {
+                                        s.config.stay_awake_until_epoch_secs = Some(now_epoch + 30 * 60);
+                                        s.config_dirty = true;
+                                        s.set_toast("Keep awake scheduled for 30 minutes.");
+                                    }
+                                    if ui.button("+1h").clicked() {
+                                        s.config.stay_awake_until_epoch_secs = Some(now_epoch + 60 * 60);
+                                        s.config_dirty = true;
+                                        s.set_toast("Keep awake scheduled for 1 hour.");
+                                    }
+                                    if ui.button("+2h").clicked() {
+                                        s.config.stay_awake_until_epoch_secs = Some(now_epoch + 120 * 60);
+                                        s.config_dirty = true;
+                                        s.set_toast("Keep awake scheduled for 2 hours.");
+                                    }
+                                });
+                            }
+                        });
+
+                        ui.add_space(4.0);
 
                         // Quick Presets
                         ui.group(|ui| {
@@ -3799,6 +4949,121 @@ impl eframe::App for AgentPowerGuardApp {
                         ui.add_space(6.0);
                         ui.separator();
 
+                        // Phase 3.1: Quiet Hours & Schedules
+                        ui.collapsing("🌙 Quiet Hours & Night Schedule", |ui| {
+                            if ui.checkbox(&mut s.config.quiet_hours_enabled, "Enable Quiet Hours (Aggressive sleep during night)").changed() {
+                                s.config_dirty = true;
+                            }
+                            ui.horizontal(|ui| {
+                                ui.label("Start Time:");
+                                if ui.text_edit_singleline(&mut s.config.quiet_hours_start).changed() {
+                                    s.config_dirty = true;
+                                }
+                                ui.label("End Time:");
+                                if ui.text_edit_singleline(&mut s.config.quiet_hours_end).changed() {
+                                    s.config_dirty = true;
+                                }
+                            });
+                            ui.horizontal(|ui| {
+                                ui.label("Night Mode:");
+                                ui.selectable_value(&mut s.config.quiet_hours_mode, PowerMode::Night, "Night (60s)");
+                                ui.selectable_value(&mut s.config.quiet_hours_mode, PowerMode::Away, "Away (30s)");
+                            });
+                            if ui.checkbox(&mut s.config.sleep_after_lease, "Sleep immediately after active agent lease ends").changed() {
+                                s.config_dirty = true;
+                            }
+                        });
+
+                        // Phase 3.3: Laptop & Battery Profile
+                        ui.collapsing("🔋 Laptop & Battery Profile", |ui| {
+                            if ui.checkbox(&mut s.config.battery_profile_enabled, "Enable DC Battery Profile (Applies automatically on battery)").changed() {
+                                s.config_dirty = true;
+                            }
+                            ui.horizontal(|ui| {
+                                ui.label("Battery Idle Threshold:");
+                                if ui.add(egui::Slider::new(&mut s.config.battery_idle_threshold_secs, 10..=600).suffix("s")).changed() {
+                                    s.config_dirty = true;
+                                }
+                            });
+                            ui.horizontal(|ui| {
+                                ui.label("Battery Agent CPU limit:");
+                                if ui.add(egui::Slider::new(&mut s.config.battery_agent_cpu_threshold, 0.5..=5.0).suffix("%")).changed() {
+                                    s.config_dirty = true;
+                                }
+                            });
+                            if ui.checkbox(&mut s.config.low_battery_auto_sleep_enabled, "Emergency Sleep on Low Battery").changed() {
+                                s.config_dirty = true;
+                            }
+                            ui.horizontal(|ui| {
+                                ui.label("Low Battery Cutoff:");
+                                if ui.add(egui::Slider::new(&mut s.config.low_battery_percent_threshold, 5..=30).suffix("%")).changed() {
+                                    s.config_dirty = true;
+                                }
+                            });
+                            if s.live_battery_status.has_battery {
+                                ui.label(egui::RichText::new(format!(
+                                    "Detected Battery: {}% ({})",
+                                    s.live_battery_status.percent.unwrap_or(0),
+                                    if s.live_battery_status.on_ac_power { "Plugged In / AC" } else { "Running on Battery" }
+                                )).weak().size(11.0));
+                            } else {
+                                ui.label(egui::RichText::new("Desktop detected: No battery power supply found.").weak().size(11.0));
+                            }
+                        });
+
+                        // Phase 3.2: Scheduled Wake Timers
+                        ui.collapsing("⏰ Scheduled Wake Timers", |ui| {
+                            ui.label(egui::RichText::new("Wake machine from sleep at specified times (e.g. for nightly backup or CI jobs), then let Watchdog put it back to sleep once idle.").weak().size(11.0));
+                            let mut to_remove = Vec::new();
+                            for timer in &s.config.wake_timers {
+                                ui.horizontal(|ui| {
+                                    ui.label(egui::RichText::new(format!("🕒 {}", timer.time_str)).strong());
+                                    ui.label(&timer.label);
+                                    if ui.button("❌ Remove").clicked() {
+                                        to_remove.push(timer.id.clone());
+                                    }
+                                });
+                            }
+                            for id in to_remove {
+                                remove_os_wake(&id);
+                                s.config.wake_timers.retain(|t| t.id != id);
+                                s.config_dirty = true;
+                                s.set_toast("Wake timer removed.");
+                            }
+                            ui.add_space(4.0);
+                            ui.horizontal(|ui| {
+                                if ui.button("+ Add 02:00 AM (Nightly Backup Wake)").clicked() {
+                                    let id = format!("{}", SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs());
+                                    let timer = WakeTimer {
+                                        id: id.clone(),
+                                        time_str: "02:00".to_string(),
+                                        label: "Nightly Backup Wake".to_string(),
+                                        enabled: true,
+                                    };
+                                    schedule_os_wake(&timer);
+                                    s.config.wake_timers.push(timer);
+                                    s.config_dirty = true;
+                                    s.set_toast("Scheduled 02:00 AM Wake.");
+                                }
+                                if ui.button("+ Add 06:00 AM (Early Standby Wake)").clicked() {
+                                    let id = format!("{}", SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs());
+                                    let timer = WakeTimer {
+                                        id: id.clone(),
+                                        time_str: "06:00".to_string(),
+                                        label: "Early Standby Wake".to_string(),
+                                        enabled: true,
+                                    };
+                                    schedule_os_wake(&timer);
+                                    s.config.wake_timers.push(timer);
+                                    s.config_dirty = true;
+                                    s.set_toast("Scheduled 06:00 AM Wake.");
+                                }
+                            });
+                        });
+
+                        ui.add_space(6.0);
+                        ui.separator();
+
                         // Windows Startup Task
                         ui.horizontal(|ui| {
                             if ui.checkbox(&mut s.config.run_at_startup, "Run at Windows Startup (Task Scheduler)").changed() {
@@ -3821,7 +5086,9 @@ impl eframe::App for AgentPowerGuardApp {
                 ui.add_space(2.0);
                 ui.horizontal(|ui| {
                     ui.heading("Real-Time Graphs (120s Rolling History)");
-                    ui.label(egui::RichText::new("— 1 Hz live sampling").color(egui::Color32::GRAY));
+                    ui.label(
+                        egui::RichText::new("— 1 Hz live sampling").color(egui::Color32::GRAY),
+                    );
                 });
                 ui.separator();
 
@@ -3829,63 +5096,175 @@ impl eframe::App for AgentPowerGuardApp {
                 let chart_h = (available_h / 5.0).clamp(55.0, 110.0);
 
                 // Chart 1: Agent CPU %
-                ui.label(egui::RichText::new(format!("1. Agent CPU % (Live: {:.1}%)", s.live_agent_cpu_pct)).strong().size(11.0));
-                let agent_pts: PlotPoints = s.history_agent_cpu.iter().enumerate().map(|(i, &v)| [i as f64, v as f64]).collect::<Vec<[f64; 2]>>().into();
+                ui.label(
+                    egui::RichText::new(format!(
+                        "1. Agent CPU % (Live: {:.1}%)",
+                        s.live_agent_cpu_pct
+                    ))
+                    .strong()
+                    .size(11.0),
+                );
+                let agent_pts: PlotPoints = s
+                    .history_agent_cpu
+                    .iter()
+                    .enumerate()
+                    .map(|(i, &v)| [i as f64, v as f64])
+                    .collect::<Vec<[f64; 2]>>()
+                    .into();
                 Plot::new("chart_agent_cpu")
                     .height(chart_h)
-                    .allow_drag(false).allow_zoom(false).allow_scroll(false)
-                    .include_y(0.0).include_y(s.config.agent_cpu_threshold * 1.5)
+                    .allow_drag(false)
+                    .allow_zoom(false)
+                    .allow_scroll(false)
+                    .include_y(0.0)
+                    .include_y(s.config.agent_cpu_threshold * 1.5)
                     .show(ui, |plot_ui| {
-                        plot_ui.line(Line::new("Agent CPU", agent_pts).color(egui::Color32::from_rgb(0, 191, 255)));
-                        plot_ui.hline(HLine::new("Threshold", s.config.agent_cpu_threshold as f64).color(egui::Color32::RED).style(LineStyle::dashed_loose()));
+                        plot_ui.line(
+                            Line::new("Agent CPU", agent_pts)
+                                .color(egui::Color32::from_rgb(0, 191, 255)),
+                        );
+                        plot_ui.hline(
+                            HLine::new("Threshold", s.config.agent_cpu_threshold as f64)
+                                .color(egui::Color32::RED)
+                                .style(LineStyle::dashed_loose()),
+                        );
                     });
 
                 // Chart 2: GPU %
-                ui.label(egui::RichText::new(format!("2. GPU % (Live: {:.1}%)", s.live_gpu_pct)).strong().size(11.0));
-                let gpu_pts: PlotPoints = s.history_gpu.iter().enumerate().map(|(i, &v)| [i as f64, v as f64]).collect::<Vec<[f64; 2]>>().into();
+                ui.label(
+                    egui::RichText::new(format!("2. GPU % (Live: {:.1}%)", s.live_gpu_pct))
+                        .strong()
+                        .size(11.0),
+                );
+                let gpu_pts: PlotPoints = s
+                    .history_gpu
+                    .iter()
+                    .enumerate()
+                    .map(|(i, &v)| [i as f64, v as f64])
+                    .collect::<Vec<[f64; 2]>>()
+                    .into();
                 Plot::new("chart_gpu")
                     .height(chart_h)
-                    .allow_drag(false).allow_zoom(false).allow_scroll(false)
-                    .include_y(0.0).include_y(s.config.gpu_threshold_pct * 1.5)
+                    .allow_drag(false)
+                    .allow_zoom(false)
+                    .allow_scroll(false)
+                    .include_y(0.0)
+                    .include_y(s.config.gpu_threshold_pct * 1.5)
                     .show(ui, |plot_ui| {
-                        plot_ui.line(Line::new("GPU Compute", gpu_pts).color(egui::Color32::from_rgb(16, 185, 129)));
-                        plot_ui.hline(HLine::new("Threshold", s.config.gpu_threshold_pct as f64).color(egui::Color32::RED).style(LineStyle::dashed_loose()));
+                        plot_ui.line(
+                            Line::new("GPU Compute", gpu_pts)
+                                .color(egui::Color32::from_rgb(16, 185, 129)),
+                        );
+                        plot_ui.hline(
+                            HLine::new("Threshold", s.config.gpu_threshold_pct as f64)
+                                .color(egui::Color32::RED)
+                                .style(LineStyle::dashed_loose()),
+                        );
                     });
 
                 // Chart 3: Whole-PC CPU %
-                ui.label(egui::RichText::new(format!("3. Whole-PC CPU % (Live: {:.1}%)", s.live_pc_cpu_pct)).strong().size(11.0));
-                let pc_cpu_pts: PlotPoints = s.history_pc_cpu.iter().enumerate().map(|(i, &v)| [i as f64, v as f64]).collect::<Vec<[f64; 2]>>().into();
+                ui.label(
+                    egui::RichText::new(format!(
+                        "3. Whole-PC CPU % (Live: {:.1}%)",
+                        s.live_pc_cpu_pct
+                    ))
+                    .strong()
+                    .size(11.0),
+                );
+                let pc_cpu_pts: PlotPoints = s
+                    .history_pc_cpu
+                    .iter()
+                    .enumerate()
+                    .map(|(i, &v)| [i as f64, v as f64])
+                    .collect::<Vec<[f64; 2]>>()
+                    .into();
                 Plot::new("chart_pc_cpu")
                     .height(chart_h)
-                    .allow_drag(false).allow_zoom(false).allow_scroll(false)
-                    .include_y(0.0).include_y(s.config.pc_cpu_threshold * 1.3)
+                    .allow_drag(false)
+                    .allow_zoom(false)
+                    .allow_scroll(false)
+                    .include_y(0.0)
+                    .include_y(s.config.pc_cpu_threshold * 1.3)
                     .show(ui, |plot_ui| {
-                        plot_ui.line(Line::new("PC CPU", pc_cpu_pts).color(egui::Color32::from_rgb(147, 112, 219)));
-                        plot_ui.hline(HLine::new("Threshold", s.config.pc_cpu_threshold as f64).color(egui::Color32::RED).style(LineStyle::dashed_loose()));
+                        plot_ui.line(
+                            Line::new("PC CPU", pc_cpu_pts)
+                                .color(egui::Color32::from_rgb(147, 112, 219)),
+                        );
+                        plot_ui.hline(
+                            HLine::new("Threshold", s.config.pc_cpu_threshold as f64)
+                                .color(egui::Color32::RED)
+                                .style(LineStyle::dashed_loose()),
+                        );
                     });
 
                 // Chart 4: Disk I/O
-                ui.label(egui::RichText::new(format!("4. Total Disk I/O (Live: {:.0} KB/s)", s.live_pc_disk_kbps)).strong().size(11.0));
-                let disk_pts: PlotPoints = s.history_pc_disk.iter().enumerate().map(|(i, &v)| [i as f64, v as f64]).collect::<Vec<[f64; 2]>>().into();
+                ui.label(
+                    egui::RichText::new(format!(
+                        "4. Total Disk I/O (Live: {:.0} KB/s)",
+                        s.live_pc_disk_kbps
+                    ))
+                    .strong()
+                    .size(11.0),
+                );
+                let disk_pts: PlotPoints = s
+                    .history_pc_disk
+                    .iter()
+                    .enumerate()
+                    .map(|(i, &v)| [i as f64, v as f64])
+                    .collect::<Vec<[f64; 2]>>()
+                    .into();
                 Plot::new("chart_disk")
                     .height(chart_h)
-                    .allow_drag(false).allow_zoom(false).allow_scroll(false)
-                    .include_y(0.0).include_y(s.config.pc_disk_threshold_kbps * 1.3)
+                    .allow_drag(false)
+                    .allow_zoom(false)
+                    .allow_scroll(false)
+                    .include_y(0.0)
+                    .include_y(s.config.pc_disk_threshold_kbps * 1.3)
                     .show(ui, |plot_ui| {
-                        plot_ui.line(Line::new("Disk KB/s", disk_pts).color(egui::Color32::from_rgb(255, 165, 0)));
-                        plot_ui.hline(HLine::new("Threshold", s.config.pc_disk_threshold_kbps as f64).color(egui::Color32::RED).style(LineStyle::dashed_loose()));
+                        plot_ui.line(
+                            Line::new("Disk KB/s", disk_pts)
+                                .color(egui::Color32::from_rgb(255, 165, 0)),
+                        );
+                        plot_ui.hline(
+                            HLine::new("Threshold", s.config.pc_disk_threshold_kbps as f64)
+                                .color(egui::Color32::RED)
+                                .style(LineStyle::dashed_loose()),
+                        );
                     });
 
                 // Chart 5: Network I/O
-                ui.label(egui::RichText::new(format!("5. Total Network I/O (Live: {:.0} KB/s)", s.live_pc_net_kbps)).strong().size(11.0));
-                let net_pts: PlotPoints = s.history_pc_net.iter().enumerate().map(|(i, &v)| [i as f64, v as f64]).collect::<Vec<[f64; 2]>>().into();
+                ui.label(
+                    egui::RichText::new(format!(
+                        "5. Total Network I/O (Live: {:.0} KB/s)",
+                        s.live_pc_net_kbps
+                    ))
+                    .strong()
+                    .size(11.0),
+                );
+                let net_pts: PlotPoints = s
+                    .history_pc_net
+                    .iter()
+                    .enumerate()
+                    .map(|(i, &v)| [i as f64, v as f64])
+                    .collect::<Vec<[f64; 2]>>()
+                    .into();
                 Plot::new("chart_net")
                     .height(chart_h)
-                    .allow_drag(false).allow_zoom(false).allow_scroll(false)
-                    .include_y(0.0).include_y(s.config.pc_net_threshold_kbps * 1.3)
+                    .allow_drag(false)
+                    .allow_zoom(false)
+                    .allow_scroll(false)
+                    .include_y(0.0)
+                    .include_y(s.config.pc_net_threshold_kbps * 1.3)
                     .show(ui, |plot_ui| {
-                        plot_ui.line(Line::new("Net KB/s", net_pts).color(egui::Color32::from_rgb(50, 205, 50)));
-                        plot_ui.hline(HLine::new("Threshold", s.config.pc_net_threshold_kbps as f64).color(egui::Color32::RED).style(LineStyle::dashed_loose()));
+                        plot_ui.line(
+                            Line::new("Net KB/s", net_pts)
+                                .color(egui::Color32::from_rgb(50, 205, 50)),
+                        );
+                        plot_ui.hline(
+                            HLine::new("Threshold", s.config.pc_net_threshold_kbps as f64)
+                                .color(egui::Color32::RED)
+                                .style(LineStyle::dashed_loose()),
+                        );
                     });
 
                 ui.add_space(6.0);
@@ -3906,12 +5285,15 @@ impl eframe::App for AgentPowerGuardApp {
 
                 banner_frame.show(ui, |ui| {
                     ui.horizontal(|ui| {
-                        ui.label(egui::RichText::new(&s.blocker_banner_text).color(egui::Color32::WHITE).strong());
+                        ui.label(
+                            egui::RichText::new(&s.blocker_banner_text)
+                                .color(egui::Color32::WHITE)
+                                .strong(),
+                        );
                     });
                 });
             });
         }
-
         // ====================================================================
         // TAB 2: BLOCK HISTORY ("WHAT KEPT MY PC AWAKE") VIEW
         // ====================================================================
@@ -4047,7 +5429,6 @@ impl eframe::App for AgentPowerGuardApp {
                 });
             });
         }
-
         // ====================================================================
         // TAB 3: ENERGY & COST SAVINGS DASHBOARD VIEW
         // ====================================================================
@@ -4073,7 +5454,8 @@ impl eframe::App for AgentPowerGuardApp {
                 let total_kwh: f64 = filtered_records.iter().map(|r| r.kwh_saved).sum();
                 let total_cost: f64 = filtered_records.iter().map(|r| r.cost_saved).sum();
                 let total_secs: u64 = filtered_records.iter().map(|r| r.duration_secs).sum();
-                let total_co2_kg = total_kwh * 0.4;
+                let co2_factor = get_carbon_factor_kg(&s.config);
+                let total_co2_kg = total_kwh * co2_factor;
 
                 ui.horizontal(|ui| {
                     let card_w = (ui.available_width() - 36.0) / 4.0;
@@ -4086,7 +5468,8 @@ impl eframe::App for AgentPowerGuardApp {
                         });
                     };
 
-                    stat_card(ui, "Money Saved", format!("${:.2}", total_cost), egui::Color32::from_rgb(16, 185, 129));
+                    let cur = &s.config.currency_symbol;
+                    stat_card(ui, "Money Saved", format!("{}{:.2}", cur, total_cost), egui::Color32::from_rgb(16, 185, 129));
                     stat_card(ui, "Electricity Saved", format!("{:.1} kWh", total_kwh), egui::Color32::from_rgb(59, 130, 246));
                     stat_card(ui, "Standby Hours", format!("{:.1} hrs", total_secs as f64 / 3600.0), egui::Color32::from_rgb(245, 158, 11));
                     stat_card(ui, "CO₂ Avoided", format!("{:.1} kg", total_co2_kg), egui::Color32::from_rgb(168, 85, 247));
@@ -4139,8 +5522,45 @@ impl eframe::App for AgentPowerGuardApp {
                         s.config_dirty = true;
                     }
                     ui.label("Electricity Rate:");
-                    if ui.add(egui::DragValue::new(&mut s.config.electricity_rate_kwh).prefix("$").suffix("/kWh").range(0.01..=2.0).speed(0.01)).changed() {
+                    let cur_str = s.config.currency_symbol.clone();
+                    if ui.add(egui::DragValue::new(&mut s.config.electricity_rate_kwh).prefix(&cur_str).suffix("/kWh").range(0.01..=2.0).speed(0.01)).changed() {
                         s.config_dirty = true;
+                    }
+                });
+
+                ui.add_space(4.0);
+
+                // Phase 3.4: Currency & Regional Grid Intensity
+                ui.horizontal(|ui| {
+                    ui.label("Currency Symbol:");
+                    let currencies = ["$", "€", "£", "₹", "¥", "C$", "A$"];
+                    for &sym in &currencies {
+                        if ui.selectable_label(s.config.currency_symbol == sym, sym).clicked() {
+                            s.config.currency_symbol = sym.to_string();
+                            s.config_dirty = true;
+                        }
+                    }
+                });
+
+                ui.horizontal(|ui| {
+                    ui.label("Grid Carbon Region:");
+                    let regions = get_carbon_regions();
+                    let current_region = s.config.carbon_region.clone();
+                    egui::ComboBox::from_id_salt("carbon_region_combo")
+                        .selected_text(&current_region)
+                        .show_ui(ui, |ui| {
+                            for reg in regions {
+                                if ui.selectable_label(s.config.carbon_region == reg.name, format!("{} ({:.0} g/kWh) - {}", reg.name, reg.g_per_kwh, reg.source)).clicked() {
+                                    s.config.carbon_region = reg.name.to_string();
+                                    s.config_dirty = true;
+                                }
+                            }
+                        });
+                    if s.config.carbon_region == "Custom" {
+                        ui.label("g/kWh:");
+                        if ui.add(egui::DragValue::new(&mut s.config.custom_carbon_g_kwh).range(10.0..=1200.0).suffix(" g/kWh")).changed() {
+                            s.config_dirty = true;
+                        }
                     }
                 });
 
@@ -4217,7 +5637,6 @@ impl eframe::App for AgentPowerGuardApp {
                 });
             });
         }
-
         // ====================================================================
         // TAB 4: ALERTS, NOTIFICATIONS & OPT-IN UPDATES VIEW
         // ====================================================================
@@ -4354,7 +5773,6 @@ impl eframe::App for AgentPowerGuardApp {
                 });
             });
         }
-
         // ====================================================================
         // TAB 5: WEB & MOBILE REMOTE VIEW
         // ====================================================================
@@ -4527,7 +5945,10 @@ impl eframe::App for AgentPowerGuardApp {
 fn main() -> eframe::Result<()> {
     // 0. Set up Diagnostic Panic Logger
     std::panic::set_hook(Box::new(|info| {
-        let log_file = get_config_path().parent().unwrap_or(&PathBuf::from(".")).join("crash.log");
+        let log_file = get_config_path()
+            .parent()
+            .unwrap_or(&PathBuf::from("."))
+            .join("crash.log");
         let payload = format!(
             "[{:?}] PANIC: {}\nLocation: {:?}\n",
             SystemTime::now(),
@@ -4577,7 +5998,10 @@ fn main() -> eframe::Result<()> {
         Box::new(move |cc| Ok(Box::new(AgentPowerGuardApp::new(cc, state)))),
     );
     if let Err(e) = &res {
-        let log_file = get_config_path().parent().unwrap_or(&PathBuf::from(".")).join("error.log");
+        let log_file = get_config_path()
+            .parent()
+            .unwrap_or(&PathBuf::from("."))
+            .join("error.log");
         let _ = std::fs::write(log_file, format!("run_native error: {:?}\n", e));
     }
     res
@@ -4623,6 +6047,11 @@ mod tests {
             display_request_active: false,
             sensor_error: false,
             now_epoch_secs: 1000,
+            on_battery: false,
+            battery_pct: None,
+            stay_awake_until: None,
+            local_hour: 12,
+            local_min: 0,
         }
     }
 
@@ -4646,7 +6075,11 @@ mod tests {
     fn test_cond1_human_idle_boundary() {
         let cfg = make_test_config();
         let mut metrics = make_passing_metrics();
-        let mut state = EvaluationState { countdown_secs: 180, last_wall_clock_secs: 999, ..Default::default() };
+        let mut state = EvaluationState {
+            countdown_secs: 180,
+            last_wall_clock_secs: 999,
+            ..Default::default()
+        };
 
         // 179s idle -> blocked
         metrics.idle_secs = 179;
@@ -4664,7 +6097,11 @@ mod tests {
     fn test_cond2_agent_cpu_boundary() {
         let cfg = make_test_config();
         let mut metrics = make_passing_metrics();
-        let mut state = EvaluationState { countdown_secs: 180, last_wall_clock_secs: 999, ..Default::default() };
+        let mut state = EvaluationState {
+            countdown_secs: 180,
+            last_wall_clock_secs: 999,
+            ..Default::default()
+        };
 
         // 1.9% -> pass
         metrics.max_agent_cpu = 1.9;
@@ -4682,7 +6119,11 @@ mod tests {
     fn test_cond3_download_boundary() {
         let cfg = make_test_config();
         let mut metrics = make_passing_metrics();
-        let mut state = EvaluationState { countdown_secs: 180, last_wall_clock_secs: 999, ..Default::default() };
+        let mut state = EvaluationState {
+            countdown_secs: 180,
+            last_wall_clock_secs: 999,
+            ..Default::default()
+        };
 
         // 99 KB/s -> pass
         metrics.max_dl_kbps = 99.0;
@@ -4700,7 +6141,11 @@ mod tests {
     fn test_cond4_5_6_pc_metrics() {
         let cfg = make_test_config();
         let mut metrics = make_passing_metrics();
-        let mut state = EvaluationState { countdown_secs: 180, last_wall_clock_secs: 999, ..Default::default() };
+        let mut state = EvaluationState {
+            countdown_secs: 180,
+            last_wall_clock_secs: 999,
+            ..Default::default()
+        };
 
         // PC CPU high
         metrics.whole_pc_cpu = 45.0;
@@ -4726,7 +6171,11 @@ mod tests {
         let mut metrics = make_passing_metrics();
         metrics.whole_pc_cpu = 50.0; // Spiking
 
-        let mut state = EvaluationState { countdown_secs: 180, last_wall_clock_secs: 999, ..Default::default() };
+        let mut state = EvaluationState {
+            countdown_secs: 180,
+            last_wall_clock_secs: 999,
+            ..Default::default()
+        };
 
         // 14 ticks: spike not yet sustained -> spike filter passes!
         for _ in 0..14 {
@@ -4751,7 +6200,11 @@ mod tests {
     fn test_cond9_display_power_request() {
         let cfg = make_test_config();
         let mut metrics = make_passing_metrics();
-        let mut state = EvaluationState { countdown_secs: 180, last_wall_clock_secs: 999, ..Default::default() };
+        let mut state = EvaluationState {
+            countdown_secs: 180,
+            last_wall_clock_secs: 999,
+            ..Default::default()
+        };
 
         metrics.display_request_active = true;
         let d = evaluate(&cfg, &metrics, &mut state);
@@ -4763,7 +6216,11 @@ mod tests {
     fn test_cond10_gpu_boundary() {
         let cfg = make_test_config();
         let mut metrics = make_passing_metrics();
-        let mut state = EvaluationState { countdown_secs: 180, last_wall_clock_secs: 999, ..Default::default() };
+        let mut state = EvaluationState {
+            countdown_secs: 180,
+            last_wall_clock_secs: 999,
+            ..Default::default()
+        };
 
         metrics.gpu_util = 4.9;
         let d = evaluate(&cfg, &metrics, &mut state);
@@ -4779,7 +6236,11 @@ mod tests {
     fn test_cond11_mic_cam_active() {
         let cfg = make_test_config();
         let mut metrics = make_passing_metrics();
-        let mut state = EvaluationState { countdown_secs: 180, last_wall_clock_secs: 999, ..Default::default() };
+        let mut state = EvaluationState {
+            countdown_secs: 180,
+            last_wall_clock_secs: 999,
+            ..Default::default()
+        };
 
         metrics.mic_active = true;
         let d = evaluate(&cfg, &metrics, &mut state);
@@ -4807,7 +6268,11 @@ mod tests {
         metrics.gpu_util = 80.0;
         metrics.mic_active = true;
 
-        let mut state = EvaluationState { countdown_secs: 180, last_wall_clock_secs: 999, ..Default::default() };
+        let mut state = EvaluationState {
+            countdown_secs: 180,
+            last_wall_clock_secs: 999,
+            ..Default::default()
+        };
         let d = evaluate(&cfg, &metrics, &mut state);
         assert!(d.all_conditions_pass);
     }
@@ -4847,7 +6312,11 @@ mod tests {
         let mut cfg = make_test_config();
         cfg.guard_enabled = false;
         let metrics = make_passing_metrics();
-        let mut state = EvaluationState { countdown_secs: 50, last_wall_clock_secs: 999, ..Default::default() };
+        let mut state = EvaluationState {
+            countdown_secs: 50,
+            last_wall_clock_secs: 999,
+            ..Default::default()
+        };
 
         let d = evaluate(&cfg, &metrics, &mut state);
         assert!(!d.all_conditions_pass);
@@ -4892,7 +6361,11 @@ mod tests {
         let cfg = make_test_config();
         let mut metrics = make_passing_metrics();
         metrics.sensor_error = true;
-        let mut state = EvaluationState { countdown_secs: 180, last_wall_clock_secs: 999, ..Default::default() };
+        let mut state = EvaluationState {
+            countdown_secs: 180,
+            last_wall_clock_secs: 999,
+            ..Default::default()
+        };
 
         let d = evaluate(&cfg, &metrics, &mut state);
         assert!(!d.all_conditions_pass);
@@ -4904,7 +6377,10 @@ mod tests {
         let token = "a1b2c3d4e5f67890123456789012345678901234567890123456789012345678";
         assert!(constant_time_eq(token, token));
         assert!(!constant_time_eq(token, "wrong"));
-        assert!(!constant_time_eq(token, "a1b2c3d4e5f67890123456789012345678901234567890123456789012345679"));
+        assert!(!constant_time_eq(
+            token,
+            "a1b2c3d4e5f67890123456789012345678901234567890123456789012345679"
+        ));
     }
 
     #[test]
@@ -4972,21 +6448,22 @@ mod tests {
 
         let summary = calculate_last_night_summary(&history, 2000);
         assert_eq!(summary.total_blocked_secs, 600);
-        assert_eq!(summary.top_blocker.as_deref(), Some("Agent CPU (node 4.5%)"));
+        assert_eq!(
+            summary.top_blocker.as_deref(),
+            Some("Agent CPU (node 4.5%)")
+        );
         assert_eq!(summary.event_count, 3);
     }
 
     #[test]
     fn test_block_history_csv_export() {
-        let history = vec![
-            BlockRecord {
-                start_epoch_secs: 1000,
-                end_epoch_secs: 1060,
-                duration_secs: 60,
-                primary_blocker: "Whole-PC CPU (45%)".to_string(),
-                all_blockers: vec!["Whole-PC CPU (45%)".to_string(), "Network".to_string()],
-            },
-        ];
+        let history = vec![BlockRecord {
+            start_epoch_secs: 1000,
+            end_epoch_secs: 1060,
+            duration_secs: 60,
+            primary_blocker: "Whole-PC CPU (45%)".to_string(),
+            all_blockers: vec!["Whole-PC CPU (45%)".to_string(), "Network".to_string()],
+        }];
         let csv = export_block_history_csv(&history);
         assert!(csv.contains("Start_Epoch,End_Epoch"));
         assert!(csv.contains("Whole-PC CPU (45%)"));
@@ -5000,7 +6477,10 @@ mod tests {
         assert!(title1.contains("Sleep Imminent"));
         assert!(msg1.contains("30 seconds"));
 
-        let e2 = NotificationEvent::BlockedLong { hours: 2, blocker: "Agent CPU".to_string() };
+        let e2 = NotificationEvent::BlockedLong {
+            hours: 2,
+            blocker: "Agent CPU".to_string(),
+        };
         assert_eq!(e2.event_name(), "blocked_long");
         let (title2, msg2) = e2.title_and_message();
         assert!(title2.contains("Machine Blocked"));
@@ -5008,5 +6488,146 @@ mod tests {
 
         let e3 = NotificationEvent::TestMessage;
         assert_eq!(e3.event_name(), "test");
+    }
+
+    #[test]
+    fn test_power_modes_apply() {
+        let mut cfg = AppConfig::default();
+
+        PowerMode::Work.apply_to_config(&mut cfg);
+        assert_eq!(cfg.active_mode, PowerMode::Work);
+        assert_eq!(cfg.idle_threshold_secs, 600);
+        assert_eq!(cfg.monitor_timeout_mins, 5);
+        assert_eq!(cfg.agent_cpu_threshold, 1.0);
+
+        PowerMode::Night.apply_to_config(&mut cfg);
+        assert_eq!(cfg.active_mode, PowerMode::Night);
+        assert_eq!(cfg.idle_threshold_secs, 60);
+        assert_eq!(cfg.monitor_timeout_mins, 1);
+
+        PowerMode::Away.apply_to_config(&mut cfg);
+        assert_eq!(cfg.active_mode, PowerMode::Away);
+        assert_eq!(cfg.idle_threshold_secs, 30);
+
+        PowerMode::Balanced.apply_to_config(&mut cfg);
+        assert_eq!(cfg.active_mode, PowerMode::Balanced);
+        assert_eq!(cfg.idle_threshold_secs, 180);
+    }
+
+    #[test]
+    fn test_quiet_hours_calculation() {
+        // Overnight range: 23:00 to 07:00
+        assert!(is_in_quiet_hours(23, 0, "23:00", "07:00"));
+        assert!(is_in_quiet_hours(23, 45, "23:00", "07:00"));
+        assert!(is_in_quiet_hours(2, 30, "23:00", "07:00"));
+        assert!(is_in_quiet_hours(6, 59, "23:00", "07:00"));
+        assert!(!is_in_quiet_hours(7, 0, "23:00", "07:00"));
+        assert!(!is_in_quiet_hours(14, 0, "23:00", "07:00"));
+        assert!(!is_in_quiet_hours(22, 59, "23:00", "07:00"));
+
+        // Daytime range: 09:00 to 17:00
+        assert!(is_in_quiet_hours(9, 0, "09:00", "17:00"));
+        assert!(is_in_quiet_hours(12, 30, "09:00", "17:00"));
+        assert!(!is_in_quiet_hours(8, 59, "09:00", "17:00"));
+        assert!(!is_in_quiet_hours(17, 0, "09:00", "17:00"));
+        assert!(!is_in_quiet_hours(22, 0, "09:00", "17:00"));
+    }
+
+    #[test]
+    fn test_carbon_factor_calculation() {
+        let mut cfg = AppConfig::default();
+
+        cfg.carbon_region = "Global Average".to_string();
+        assert!((get_carbon_factor_kg(&cfg) - 0.436).abs() < 0.001);
+
+        cfg.carbon_region = "United States (Avg)".to_string();
+        assert!((get_carbon_factor_kg(&cfg) - 0.368).abs() < 0.001);
+
+        cfg.carbon_region = "France".to_string();
+        assert!((get_carbon_factor_kg(&cfg) - 0.052).abs() < 0.001);
+
+        cfg.carbon_region = "Custom".to_string();
+        cfg.custom_carbon_g_kwh = 250.0;
+        assert!((get_carbon_factor_kg(&cfg) - 0.250).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_battery_override_and_critical_sleep() {
+        let mut cfg = make_test_config();
+        cfg.battery_profile_enabled = true;
+        cfg.battery_idle_threshold_secs = 60;
+        cfg.low_battery_auto_sleep_enabled = true;
+        cfg.low_battery_percent_threshold = 15;
+
+        let mut metrics = make_passing_metrics();
+        metrics.idle_secs = 70; // 70s idle: < 180s on AC, but >= 60s on battery!
+
+        let mut state = EvaluationState {
+            countdown_secs: 180,
+            last_wall_clock_secs: 999,
+            ..Default::default()
+        };
+
+        // On AC power -> not idle enough (needs 180s)
+        metrics.on_battery = false;
+        let d_ac = evaluate(&cfg, &metrics, &mut state);
+        assert!(!d_ac.all_conditions_pass);
+
+        // On Battery -> 70s passes the 60s battery threshold!
+        metrics.on_battery = true;
+        metrics.battery_pct = Some(80);
+        let d_batt = evaluate(&cfg, &metrics, &mut state);
+        assert!(d_batt.all_conditions_pass);
+
+        // Critical low battery: 10% <= 15% -> forces emergency sleep
+        metrics.battery_pct = Some(10);
+        let d_crit = evaluate(&cfg, &metrics, &mut state);
+        assert!(d_crit.trigger_sleep);
+        assert!(d_crit.blocker_banner_text.contains("CRITICAL BATTERY"));
+    }
+
+    #[test]
+    fn test_stay_awake_until_in_evaluator() {
+        let cfg = make_test_config();
+        let mut metrics = make_passing_metrics();
+        let mut state = EvaluationState {
+            countdown_secs: 180,
+            last_wall_clock_secs: 999,
+            ..Default::default()
+        };
+
+        // Stay awake active (future timestamp: 1500 > now: 1000)
+        metrics.stay_awake_until = Some(1500);
+        let d = evaluate(&cfg, &metrics, &mut state);
+        assert!(!d.all_conditions_pass);
+        assert!(d
+            .blockers
+            .iter()
+            .any(|b| b.contains("Scheduled Stay-Awake")));
+
+        // Stay awake expired (past timestamp: 900 <= now: 1000)
+        metrics.stay_awake_until = Some(900);
+        let d2 = evaluate(&cfg, &metrics, &mut state);
+        assert!(d2.all_conditions_pass);
+    }
+
+    #[test]
+    fn test_sleep_after_lease() {
+        let mut cfg = make_test_config();
+        cfg.sleep_after_lease = true;
+
+        let metrics = make_passing_metrics();
+        let mut state = EvaluationState {
+            countdown_secs: 180,
+            last_wall_clock_secs: 999,
+            agent_lease_until_epoch_secs: Some(999), // Lease just expired at 999 <= now 1000
+            agent_lease_reason: "Training run".to_string(),
+            ..Default::default()
+        };
+
+        let d = evaluate(&cfg, &metrics, &mut state);
+        // With sleep_after_lease = true, expiration sets countdown to 0 and triggers sleep immediately!
+        assert!(d.trigger_sleep);
+        assert_eq!(state.countdown_secs, cfg.idle_threshold_secs);
     }
 }
