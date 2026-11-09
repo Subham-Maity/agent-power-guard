@@ -1,336 +1,357 @@
 # Agent Power Guard
 
-<img width="1069" height="1149" alt="Agent Power Guard GUI" src="https://github.com/user-attachments/assets/8d286957-530a-43a6-90ae-dbd3d4641a6c" />
+**Sleep your PC only when you and your background coding agents are idle.**
 
-A native, high-performance power guardian for developers and power users that puts your PC to sleep only when **you AND your background coding agents / AI workflows are truly idle**.
-
-Written in Rust (`egui` + `glow`). Single lightweight executable, trims memory to under 5 MB of physical RAM in the system tray, zero Electron, zero WebView, zero heavy runtimes.
+Agent Power Guard is a small native utility written in Rust that replaces the fixed OS sleep timer with one that knows what the machine is actually doing. It watches input activity, developer tooling, GPU load, disk, network and meetings, and suspends the system only when all of them are quiet. Long builds, local LLM inference and autonomous agent runs (Claude Code, Cursor, Antigravity, Ollama) are no longer killed by a power plan that can't tell idle from busy.
 
 [![Release](https://img.shields.io/github/v/release/Subham-Maity/agent-power-guard?label=release)](https://github.com/Subham-Maity/agent-power-guard/releases)
 [![CI](https://img.shields.io/github/actions/workflow/status/Subham-Maity/agent-power-guard/ci.yml?label=build)](https://github.com/Subham-Maity/agent-power-guard/actions)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 ![Platforms](https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20%7C%20macOS-lightgrey)
 
-> **Quick Download:** Grab the latest installer or archive for your operating system from the **[Releases Page](https://github.com/Subham-Maity/agent-power-guard/releases)**.
+<img width="1069" height="1149" alt="Agent Power Guard GUI" src="https://github.com/user-attachments/assets/8d286957-530a-43a6-90ae-dbd3d4641a6c" />
 
----
+> **Installation:** download the installer or archive for your platform from the [Releases page](https://github.com/Subham-Maity/agent-power-guard/releases). Step-by-step instructions are in [Installation](#installation).
 
-## Table of Contents
+## Why
 
-- [Why Agent Power Guard?](#why-agent-power-guard)
-- [How It Works: Two-Stage Sleep](#how-it-works-two-stage-sleep)
-- [Core Features](#core-features)
-- [Presets & Idle Timer Guide](#presets--idle-timer-guide)
-- [Guard Conditions & Thresholds (11-Point Verification)](#guard-conditions--thresholds-11-point-verification)
-- [Pre-Sleep Grace Period Notification](#pre-sleep-grace-period-notification)
-- [Agent Heartbeat API & CLI](#agent-heartbeat-api--cli)
-- [Web & Mobile Remote Dashboard (Over Wi-Fi)](#web--mobile-remote-dashboard-over-wi-fi)
-- [Energy & Cost Savings Dashboard](#energy--cost-savings-dashboard)
-- [System Tray & Memory Trimming](#system-tray--memory-trimming)
-- [Installation & Multi-Platform Support](#installation--multi-platform-support)
-- [Platform Implementation Details](#platform-implementation-details)
-- [Contributing & License](#contributing--license)
+- **Fixed timers sleep at the wrong moment.** A 15-minute OS timer will happily suspend the machine halfway through `cargo build`, `npm install`, a fine-tuning run or a multi-step agent task.
+- **Stuck power requests keep it awake all night.** Audio drivers, paused browser tabs and download managers often hold a `SYSTEM_REQUIRED` lock, leaving the machine (and its GPU) running at full power for no reason.
+- **Displays burn power and panels.** Leaving a monitor on wastes electricity and risks OLED burn-in, even when the machine itself still has work to do.
 
----
+Agent Power Guard evaluates 11 independent conditions every second and only suspends the system when every enabled one passes.
 
-## Why Agent Power Guard?
+## Features
 
-Default operating system power plans are blind to developer workflows:
-- **Premature Standby During Builds & LLM Inference:** Fixed OS timers can put your computer to sleep right in the middle of a long `cargo build`, `npm install`, PyTorch fine-tuning, or a multi-step autonomous coding agent task (Cursor, Claude Code, Antigravity, Ollama).
-- **Stuck Sleep Locks:** Audio drivers (VB-Audio, FxSound), paused browser video tabs, or tray download tools often request `SYSTEM_REQUIRED` power locks, leaving your workstation and hungry GPUs running at full power all night.
-- **Power Waste & Burn-In:** Leaving monitors on burns electricity and risks OLED burn-in. Conversely, sleeping prematurely destroys unfinished agent runs.
+- **11 guard conditions** with individual toggles, thresholds and live pass/fail status
+- **Two-stage power saving:** turn the display off first, suspend the system later
+- **Agent leases:** coding agents and scripts can hold sleep off through a CLI or local HTTP API
+- **GPU awareness:** NVIDIA (NVML), Linux DRM and macOS IOAccelerator
+- **Meeting detection:** microphone and camera use by Zoom, Teams, Meet, Discord, Slack and OBS
+- **Pre-sleep grace period:** a 30-second warning with postpone and sleep-now actions
+- **Remote dashboard:** control and monitor the machine from a phone or another computer on your network, with Wake-on-LAN details
+- **Energy tracking:** estimated kWh, cost and CO2 avoided, stored locally
+- **Live graphs:** agent CPU, whole-PC CPU, disk, network and GPU over a rolling 120-second window
+- **Tray mode:** runs hidden in the system tray and trims its working set to under 5 MB of RAM
+- **No Electron, no WebView, no runtime:** one native executable built on `egui`
 
-Agent Power Guard watches what is **actually occurring** across 11 distinct system metrics (human input, watched dev processes, active downloads, global CPU/disk/network, sustained spikes, display locks, GPU compute, and microphone/camera activity). It sleeps your machine only when everything is genuinely quiet.
+## Installation
 
----
+Every release on the [Releases page](https://github.com/Subham-Maity/agent-power-guard/releases) includes the files below and a `SHA256SUMS.txt` for verification.
 
-## How It Works: Two-Stage Sleep
-
-Instead of an abrupt sleep, Agent Power Guard manages power in two coordinated stages:
-
-```
-User steps away
-   │
-   ├─► Stage 1: Display Off (default: 2 min idle)
-   │   └─► Turns off monitors, saving 40-120 W and preventing OLED burn-in.
-   │       CPU, GPU, network, and background agents continue working uninterrupted.
-   │
-   └─► Stage 2: Deep System Sleep (default: 3 min idle)
-       ├─► Evaluates all 11 Guard Conditions + Agent Leases
-       ├─► If any condition blocks ──► System stays awake (display stays dark)
-       ├─► At ≤ 30s remaining ───────► Grace Notification banner with [Postpone (+15m)]
-       └─► When all conditions pass ─► Enters S3 / Modern Standby (< 1 W draw)
-```
-
----
-
-## Core Features
-
-- 🎯 **11 Real-Time Guard Conditions:** Per-condition toggles, thresholds, and live pass/fail indicators.
-- 📉 **5 Rolling Real-Time Graphs (120s History):**
-  1. Agent CPU %
-  2. Whole-PC CPU %
-  3. Total Disk I/O (KB/s)
-  4. Total Network I/O (KB/s)
-  5. GPU Compute % (1 Hz sampling)
-- 🎮 **GPU Activity Monitoring:** Native NVIDIA NVML dynamic linking on Windows, `/sys/class/drm` on Linux, and IOAccelerator on macOS. Blocks sleep when Ollama, CUDA, Stable Diffusion, or PyTorch is running.
-- 🎙️ **Microphone, Camera & Meeting Detection:** Prevents sleep during active calls on Zoom, Microsoft Teams, Google Meet, Discord, Slack, and OBS.
-- ⏳ **Pre-Sleep Grace Period Notification:** Visual countdown alert at $\le 30\text{s}$ before sleep with **[ ⏳ Postpone (+15m) ]** and **[ ⚡ Sleep Immediately ]** quick actions.
-- 🔌 **Agent Heartbeat REST API & CLI:** Embedded HTTP API on port `49281` and CLI commands (`lease`, `release`, `status`, `sleep`, `postpone`) allowing autonomous AI agents to lease sleep prevention.
-- 🌐 **Web & Mobile Remote Dashboard (over Wi-Fi):** Control your PC from your smartphone or tablet browser over local network. Includes Wake-on-LAN (WoL) MAC broadcast instructions.
-- 💰 **Energy & Cost Savings Dashboard:** Historical analytics tracking sleep sessions, monitor-off time, estimated kWh saved, financial cost saved, and $\text{CO}_2$ emissions avoided. Includes date filters, recording toggle, and direct JSON data controls.
-- 📥 **System Tray with Memory Trimming:** Minimize or close to system tray. Automatically trims memory working set (`K32EmptyWorkingSet`) to maintain $< 5\text{ MB}$ RAM footprint.
-
----
-
-## Presets & Idle Timer Guide
-
-Agent Power Guard provides quick-access presets tailored for different tasks:
-
-| Preset | Sleep After | Display Off | Recommended Use Case |
-|---|---|---|---|
-| **15s Test** | 15 seconds | 1 minute | Instant verification of sleep readiness and threshold tuning |
-| **3m (Default)** | 3 minutes | 2 minutes | General coding and everyday web browsing |
-| **5m** | 5 minutes | 3 minutes | Reading documentation, drafting emails, light code review |
-| **10m** | 10 minutes | 5 minutes | Docker container launches, medium test suites, LLM queries |
-| **15m** | 15 minutes | 10 minutes | Short meetings, coffee breaks, medium compilation jobs |
-| **30m** | 30 minutes | 15 minutes | Large database migrations, heavy package installs, small training runs |
-| **45m** | 45 minutes | 20 minutes | Multi-agent autonomous workflows and git monorepo builds |
-| **1h** | 1 hour | 30 minutes | Extended compilation, video rendering, full test matrices |
-| **2h / 3h** | 2 - 3 hours | 45 - 60 min | Overnight autonomous agent executions and massive dataset processing |
-| **Custom** | 10s - 3 hours | 1m - 3 hours | Fully custom sliders for tailored power policies |
-
-### How to Test Immediately
-
-1. Click **15s Test** preset in the UI.
-2. If any condition shows <span style="color:#e05252">**BLOCKING SLEEP**</span>, inspect its reason (e.g. human idle, disk activity, or an active download).
-3. Take your hands off the mouse and keyboard.
-4. Watch the countdown timer reach `0s`. When all conditions pass, the machine suspends smoothly.
-5. Move your mouse or press a key to wake the machine up. Agent Power Guard detects the sleep resume and restarts its watchdog cycle.
-
----
-
-## Guard Conditions & Thresholds (11-Point Verification)
-
-Every condition can be toggled on or off and tuned with its own dedicated threshold slider:
-
-| # | Condition | What It Measures | Default Threshold |
-|---|---|---|---|
-| **1** | **Human Input Idle** | Time since last physical mouse move, click, or keyboard keystroke | 180 s (3 min) |
-| **2** | **Watched Agent CPU** | Normalized CPU % across all cores for monitored developer and AI tools | 2.0 % |
-| **3** | **Active Download / IDM** | Active disk I/O of download managers (`idman`, `aria2c`, `qbittorrent`, `fdm`) | 100 KB/s |
-| **4** | **Whole-PC CPU** | Global aggregate CPU utilization across all system threads | 30.0 % |
-| **5** | **Whole-PC Disk I/O** | Combined read and write throughput across all physical storage drives | 5,000 KB/s |
-| **6** | **Whole-PC Network** | Combined send/receive throughput across all network interfaces | 100 KB/s |
-| **7** | **Sustained Spike Filter** | Duration a CPU/disk/network blip must persist before resetting idle counter | 15 s |
-| **8** | **Monitor Timeout** | Synchronizes system display-off timeout with Stage 1 power policy | 2 min |
-| **9** | **Power Requests** | Honors active `DISPLAY:` locks (e.g. fullscreen video) with audio lock override | Enabled |
-| **10** | **GPU Activity Monitoring** | GPU compute load for active AI inference, CUDA shaders, and local LLMs | 5.0 % |
-| **11** | **Mic & Camera Meetings** | Detects active recording by Zoom, Teams, Meet, Discord, Slack, OBS | Enabled |
-
-### In-Depth Condition Notes
-
-- **Condition 2 (Watched Agent Processes):** Normalizes process CPU across total logical threads. An 8-core CPU process using 16% in Task Manager evaluates to 2.0% global load. Default watch list: `antigravity, language_server, cursor, claude, gemini, code, node, npm, pnpm, bun, tsc, esbuild, vite, next, nest, git, cargo, rustc, python, docker, wsl`. Edit anytime via **Edit Process Keywords**.
-- **Condition 7 (Sustained Spike Filter):** Prevents background OS noise (Windows Search indexing, anti-malware blips, Edge tab refreshes) from permanently aborting sleep countdowns.
-- **Condition 9 (Override Audio / Browser Locks):** Automatically tells Windows powercfg to ignore wake locks from virtual audio loopbacks (VB-Audio, voicemeeter) and paused browser media tabs.
-- **Condition 10 (GPU Compute):** Dynamically loads `nvml.dll` at runtime without CUDA SDK dependencies; gracefully handles AMD and Intel integrated graphics via OS hardware counters.
-- **Condition 11 (Meeting Detection):** Queries Windows `CapabilityAccessManager\ConsentStore` registry keys (`LastUsedTimeStop == 0`) and Linux PulseAudio/PipeWire capture streams for instant call detection.
-
----
-
-## Pre-Sleep Grace Period Notification
-
-When the countdown reaches $\le 30\text{s}$ before sleep, Agent Power Guard triggers an interactive Grace Period banner in the UI and Web Remote:
-
-```
-⚠️ SYSTEM SLEEP IMMINENT — Suspending in 24s. Click 'Postpone' to delay sleep.
-[ ⏳ Postpone (+15m) ]    [ ⚡ Sleep Immediately ]
-```
-
-- **[ ⏳ Postpone (+15m) ]**: Instantly delays sleep by 15 minutes, allowing you to wrap up your work or extend an active coding session.
-- **[ ⚡ Sleep Immediately ]**: Bypasses remaining countdown and suspends the PC right away.
-
----
-
-## Agent Heartbeat API & CLI
-
-Agent Power Guard embeds a lightweight, zero-dependency HTTP server on port `49281` (`http://localhost:49281`). Any terminal script, Python job, or autonomous agent (Cursor Composer, Claude Code, Antigravity, AutoGen) can acquire sleep-prevention leases.
-
-### CLI Subcommands
-
-Agent Power Guard can be invoked directly from your command line:
-
-```bash
-# Acquire a 30-minute lease for a background task
-agent-power-guard lease 30 "Compiling LLVM release"
-
-# Release the active lease immediately
-agent-power-guard release
-
-# Query current watchdog status in JSON format
-agent-power-guard status
-
-# Postpone sleep by 15 minutes
-agent-power-guard postpone 15
-
-# Trigger immediate system sleep
-agent-power-guard sleep
-```
-
-### REST API Endpoints
-
-| Endpoint | Method | Parameters | Description |
-|---|---|---|---|
-| `/` | `GET` | — | Serves the responsive Web & Mobile Remote Dashboard |
-| `/api/status` | `GET` | — | Returns JSON status (countdown, conditions, blocking reasons, leases) |
-| `/api/sleep` | `POST` | — | Triggers immediate system sleep |
-| `/api/postpone` | `POST` | `?mins=15` | Postpones sleep by specified minutes |
-| `/api/toggle_guard` | `POST` | — | Toggles Master Guard ON/OFF |
-| `/api/lease` | `POST` | `?mins=30&reason=Build` | Grants an agent heartbeat sleep lease |
-| `/api/release` | `POST` | — | Clears all active agent leases |
-| `/api/energy/clear` | `POST` | — | Clears all historical energy records |
-
-#### Python Agent Heartbeat Example
-
-```python
-import urllib.request
-
-# Prevent sleep for 45 minutes while training
-urllib.request.urlopen("http://localhost:49281/api/lease?mins=45&reason=PyTorch+Training", data=b"")
-
-# ... run training code ...
-
-# Release lease when finished
-urllib.request.urlopen("http://localhost:49281/api/release", data=b"")
-```
-
----
-
-## Web & Mobile Remote Dashboard (Over Wi-Fi)
-
-Control your computer from your smartphone, tablet, or another laptop on the same local Wi-Fi network without installing any apps!
-
-1. Open Agent Power Guard and switch to the **🌐 Web & Mobile Remote** tab.
-2. Note your Local Network URL (e.g. `http://192.168.1.15:49281`). Click **Copy URL** or open directly in your mobile browser.
-3. You can remotely:
-   - Monitor live sleep countdown and blocking conditions.
-   - Click **⚡ Sleep Now** to put your PC into deep sleep from across the room.
-   - Click **⏳ Postpone 15m** to extend awake time.
-   - Toggle Master Guard ON or OFF.
-   - Grant or revoke agent leases.
-
-### Remote Wake-on-LAN (WoL)
-
-The Web Remote tab displays your primary Network Interface Name and MAC Address (e.g. `00:1A:2B:3C:4D:5E`). To turn your PC back on remotely from your phone:
-1. Ensure **Wake-on-LAN (Magic Packet)** is enabled in your BIOS/UEFI and network card properties.
-2. Install any free Wake-on-LAN app on your iOS or Android device.
-3. Enter your PC's MAC address and broadcast IP (`255.255.255.255` or subnet broadcast).
-4. Send the packet to power on your PC over Wi-Fi!
-
----
-
-## Energy & Cost Savings Dashboard
-
-Switch to the **💰 Energy & Cost Savings** tab to view your environmental and financial savings:
-
-- **Metrics Tracked:**
-  - Total Sleep Sessions & Monitor-Off Events.
-  - Active Hours vs Sleep Hours.
-  - Cumulative Energy Saved (kWh).
-  - Financial Savings ($ / ₹ / € based on configurable electricity rates).
-  - Estimated $\text{CO}_2$ Emissions Avoided ($\text{kg CO}_2$).
-- **Customizable Wattage Parameters:**
-  - Active System Power (default: 120 W).
-  - Monitor Display Power (default: 45 W).
-  - Deep Sleep Power (default: 2 W).
-  - Electricity Rate ($/kWh).
-- **Date Filtering:** Filter statistics by **Today**, **Last 7 Days**, **This Month**, **This Year**, or **All-Time**.
-- **Data Privacy & Storage:**
-  - Toggle recording ON/OFF at any time.
-  - Click **Clear Filtered** or **Clear All Data** in the UI.
-  - All metrics are stored locally in standard JSON format:
-    - **Windows:** `%APPDATA%\AgentPowerGuard\energy_history.json`
-    - **Linux:** `~/.config/agent-power-guard/energy_history.json`
-    - **macOS:** `~/Library/Application Support/agent-power-guard/energy_history.json`
-  - You can inspect, back up, or delete `energy_history.json` at any time without affecting the application.
-
----
-
-## System Tray & Memory Trimming
-
-- **Close to Tray:** Clicking the window close button **[X]** hides Agent Power Guard into your OS system tray while keeping the watchdog active in the background.
-- **Ultra-Low Memory:** Upon minimizing or hiding, Agent Power Guard trims its working set (`K32EmptyWorkingSet`), dropping RAM consumption to **under 5 MB**.
-- **Tray Menu Actions:** Right-click the tray icon to:
-  - Open / Show GUI
-  - Toggle Guard ON / OFF
-  - ⚡ Test Sleep Now
-  - Exit Agent Power Guard completely
-- **Quick Restore:** Single left-click or double-click the tray icon anytime to unhide and focus the window.
-
----
-
-## Installation & Multi-Platform Support
-
-Download the appropriate binary or installer from the **[Releases Page](https://github.com/Subham-Maity/agent-power-guard/releases)**.
-
-| Platform | Recommended Package | Description |
+| Platform | File | Notes |
 |---|---|---|
-| **Windows 10 / 11 (x64)** | `AgentPowerGuard-1.0.2-x64.msi` | Native WiX MSI Installer with Start Menu shortcut & uninstaller |
-| **Windows (Portable)** | `agent-power-guard-windows-x64.exe` | Zero-dependency standalone executable |
-| **Linux (x86_64)** | `agent-power-guard-linux-x86_64.tar.gz` | Supports both X11 & Wayland compositors |
-| **macOS (Apple Silicon)** | `agent-power-guard-macos-aarch64.tar.gz` | Universal binary for Apple M1, M2, M3, M4 |
-| **macOS (Intel x86_64)** | `agent-power-guard-macos-x86_64.tar.gz` | For Intel-based Macs |
+| Windows 10 / 11 (x64) | `AgentPowerGuard-windows-x64.msi` | Installer with Start Menu and Desktop shortcuts. Recommended. |
+| Windows 10 / 11 (x64) | `agent-power-guard-windows-x64.exe` | Portable single executable. |
+| Linux (x86_64) | `agent-power-guard-linux-x86_64.tar.gz` | X11 and Wayland. |
+| macOS (Apple Silicon) | `agent-power-guard-macos-aarch64.tar.gz` | M1 and newer. |
+| macOS (Intel) | `agent-power-guard-macos-x86_64.tar.gz` | |
 
-### Windows Setup
+### Windows
 
-Run `AgentPowerGuard-1.0.2-x64.msi` and follow the installer wizard. After installation, launch **Agent Power Guard** from your Start Menu.
+Run the `.msi` and follow the wizard, then start **Agent Power Guard** from the Start Menu. For a silent install:
 
-### Linux Setup
+```powershell
+msiexec /i AgentPowerGuard-windows-x64.msi /qn
+```
 
-Install GUI and idle query prerequisites:
+The Windows build requests administrator rights at launch (UAC prompt). It needs them to change power settings and acquire the shutdown privilege required to suspend the machine.
+
+### Linux
 
 ```bash
-# Debian / Ubuntu / Mint
-sudo apt update
-sudo apt install -y pkg-config libx11-dev libxext-dev libxrandr-dev libxinerama-dev libxcursor-dev libxi-dev libgl1-mesa-dev libglu1-mesa-dev libxss-dev libxkbcommon-dev libwayland-dev xprintidle libgtk-3-dev libayatana-appindicator3-dev
-
-# Extract and launch
-tar -xzvf agent-power-guard-linux-x86_64.tar.gz
+tar -xzf agent-power-guard-linux-x86_64.tar.gz
 cd agent-power-guard
 ./agent-power-guard
 ```
 
-### macOS Setup
+Input idle time is read through `xprintidle`, and the tray icon needs GTK 3 and AppIndicator libraries, which most desktop distributions already ship:
 
 ```bash
-tar -xzvf agent-power-guard-macos-aarch64.tar.gz
+sudo apt install xprintidle   # Debian / Ubuntu
+```
+
+### macOS
+
+```bash
+tar -xzf agent-power-guard-macos-aarch64.tar.gz
 ./agent-power-guard
 ```
 
-*Note: If Gatekeeper displays an untrusted developer prompt on first launch, open **System Settings > Privacy & Security** and click **Open Anyway**.*
+On first launch Gatekeeper may block the binary. Open **System Settings > Privacy & Security** and choose **Open Anyway**.
 
----
+### Verify a download
 
-## Platform Implementation Details
+```bash
+sha256sum -c SHA256SUMS.txt          # Linux / macOS (shasum -a 256 -c on macOS)
+Get-FileHash .\AgentPowerGuard-windows-x64.msi   # Windows (PowerShell)
+```
+
+## Quick start
+
+1. Launch the app and select the **15s Test** preset.
+2. Take your hands off the mouse and keyboard.
+3. Watch the countdown. If a condition shows **BLOCKING SLEEP**, its reason is listed (recent input, disk activity, an active download, and so on).
+4. When every condition passes and the countdown reaches zero, the machine suspends. Move the mouse to wake it; the watchdog restarts its cycle automatically.
+5. Switch to a real preset (the default is 3 minutes) once you're happy with the thresholds.
+
+## How it works
+
+```
+User steps away
+   |
+   +--> Stage 1: Display off            (default: 2 min idle)
+   |      Monitors go dark. CPU, GPU, network and agents keep running.
+   |
+   +--> Stage 2: System sleep           (default: 3 min idle)
+          |
+          +-- Evaluate all guard conditions and active agent leases
+          +-- Any condition blocking  -->  stay awake (display stays off)
+          +-- 30 s or less remaining  -->  grace banner: Postpone (+15 min) / Sleep now
+          +-- All conditions pass     -->  suspend (S3 / Modern Standby)
+```
+
+Any blocking condition resets the countdown. Resuming from sleep also resets it, so the machine never suspends again immediately after waking.
+
+## Guard conditions
+
+Each condition can be switched off and tuned independently.
+
+| # | Condition | Blocks sleep when | Default |
+|---|---|---|---|
+| 1 | Human input idle | Last mouse or keyboard input is more recent than the threshold | 180 s |
+| 2 | Watched agent CPU | Processes matching the watch list use more than the threshold | 2.0 % |
+| 3 | Active downloads | Download managers (`idman`, `aria2c`, `qbittorrent`, `fdm`) are doing disk I/O | 100 KB/s |
+| 4 | Whole-PC CPU | Total CPU utilisation exceeds the threshold | 30 % |
+| 5 | Whole-PC disk I/O | Combined read and write throughput exceeds the threshold | 5,000 KB/s |
+| 6 | Whole-PC network | Combined send and receive throughput exceeds the threshold | 100 KB/s |
+| 7 | Sustained-spike filter | Activity from 4-6 persists longer than this window | 15 s |
+| 8 | Monitor timeout | Keeps the OS display timeout in sync with Stage 1 | 2 min |
+| 9 | Power requests | A `DISPLAY` power request is active (for example fullscreen video) | on |
+| 10 | GPU activity | GPU compute load exceeds the threshold (inference, CUDA, local LLMs) | 5 % |
+| 11 | Mic and camera | A meeting app is actively recording | on |
+
+Notes on the less obvious ones:
+
+- **Condition 2** normalises per-process CPU against total logical cores, so a process showing 16% in Task Manager on an 8-core machine counts as 2.0%. The default watch list is `antigravity, language_server, cursor, claude, gemini, code, node, npm, pnpm, bun, tsc, esbuild, vite, next, nest, git, cargo, rustc, python, docker, wsl` and can be edited from **Edit Process Keywords**.
+- **Condition 7** stops short background noise (search indexing, antivirus scans, browser refreshes) from resetting the countdown indefinitely.
+- **Condition 9** can override wake locks held by virtual audio devices (VB-Audio, Voicemeeter) and paused browser media, which are a common cause of machines that never sleep.
+- **Condition 10** loads `nvml.dll` at runtime, so there is no CUDA SDK dependency. AMD and Intel GPUs fall back to OS counters.
+- **Condition 11** reads the Windows `CapabilityAccessManager\ConsentStore` registry keys and PulseAudio / PipeWire capture streams on Linux.
+
+## Presets
+
+| Preset | Sleep after | Display off |
+|---|---|---|
+| 15s Test | 15 s | 1 min |
+| 3m (default) | 3 min | 2 min |
+| 5m | 5 min | 3 min |
+| 10m | 10 min | 5 min |
+| 15m | 15 min | 10 min |
+| 30m | 30 min | 15 min |
+| 45m | 45 min | 20 min |
+| 1h | 1 h | 30 min |
+| 2h / 3h | 2-3 h | 45-60 min |
+| Custom | 10 s - 3 h | 1 min - 3 h |
+
+## Agent integration
+
+Autonomous agents and long-running scripts can hold sleep off with a lease. A lease keeps the guard open until it expires or is released.
+
+### CLI
+
+```bash
+agent-power-guard lease 30 "Compiling LLVM release"   # hold for 30 minutes
+agent-power-guard release                             # release immediately
+agent-power-guard status                              # current state as JSON
+agent-power-guard postpone 15                         # delay sleep by 15 minutes
+agent-power-guard sleep                               # suspend now
+```
+
+A typical wrapper around a long job:
+
+```bash
+agent-power-guard lease 120 "nightly training"
+./train.sh
+agent-power-guard release
+```
+
+### HTTP API
+
+The app serves a local API on port `49281`.
+
+| Endpoint | Method | Parameters | Description |
+|---|---|---|---|
+| `/` | GET | | Remote dashboard |
+| `/api/status` | GET | | Countdown, conditions, blocking reasons, leases |
+| `/api/sleep` | POST | | Suspend immediately |
+| `/api/postpone` | POST | `mins=15` | Postpone sleep |
+| `/api/toggle_guard` | POST | | Turn the master guard on or off |
+| `/api/lease` | POST | `mins=30&reason=Build` | Grant a sleep lease |
+| `/api/release` | POST | | Clear all leases |
+| `/api/energy/clear` | POST | | Clear energy history |
+
+Abridged `/api/status` response:
+
+```json
+{
+  "guard_enabled": true,
+  "all_conditions_pass": false,
+  "countdown_secs": 180,
+  "countdown_max": 180,
+  "blocker_banner_text": "Blocked by agent CPU (node 4.8%)",
+  "live_idle_secs": 42,
+  "live_agent_cpu": 4.8,
+  "agent_lease_active": false
+}
+```
+
+Python example:
+
+```python
+import urllib.request
+
+base = "http://localhost:49281"
+
+# Hold sleep off for 45 minutes during a training run
+urllib.request.urlopen(f"{base}/api/lease?mins=45&reason=PyTorch+Training", data=b"")
+
+# ... run the job ...
+
+urllib.request.urlopen(f"{base}/api/release", data=b"")
+```
+
+## Remote dashboard
+
+The same port serves a responsive dashboard that works in any browser, with nothing to install on the phone or tablet.
+
+1. Open the **Web & Mobile Remote** tab and note the local URL, for example `http://192.168.1.15:49281`.
+2. Open it from a device on the same network.
+3. From there you can watch the live countdown and blocking conditions, sleep or postpone, toggle the guard, and grant or release leases.
+
+The dashboard is served over plain HTTP and is intended for trusted local networks. Do not expose port `49281` to the internet.
+
+### Wake-on-LAN
+
+A sleeping PC can't serve a web page, so waking it uses a Wake-on-LAN magic packet. The remote tab shows the primary interface name and MAC address.
+
+1. Enable Wake-on-LAN (magic packet) in the BIOS/UEFI and in the network adapter's properties.
+2. Send a magic packet from any WoL app, using the MAC address and your subnet broadcast address.
+
+The sending device can be on Wi-Fi, but the PC itself should be on wired Ethernet. Wake-on-LAN over Wi-Fi is unreliable on most hardware.
+
+## Energy tracking
+
+The **Energy & Cost Savings** tab estimates what suspending and display-off saved you: sleep sessions, monitor-off events, active versus sleep hours, kWh, money and CO2. Filter by today, 7 days, this month, this year or all time.
+
+Estimates use configurable wattage and tariff values (defaults: 120 W active system, 45 W display, 2 W sleep). Recording can be turned off at any time, and everything is stored locally as plain JSON:
+
+| OS | Location |
+|---|---|
+| Windows | `%APPDATA%\AgentPowerGuard\energy_history.json` |
+| Linux | `~/.config/agent-power-guard/energy_history.json` |
+| macOS | `~/Library/Application Support/agent-power-guard/energy_history.json` |
+
+The file can be inspected, backed up or deleted without affecting the app. Nothing is sent anywhere.
+
+## Architecture
+
+```
++------------------------------------------------------------------------+
+|                           agent-power-guard                            |
+|                                                                        |
+|  Platform layer              Watchdog thread (1 Hz)       Frontends    |
+|  ---------------             ----------------------       ----------   |
+|  input idle         ------>  sample metrics               egui window  |
+|  sysinfo: CPU,               evaluate guard conditions    system tray  |
+|    disk, net, procs          apply leases / postpones     HTTP API     |
+|  GPU, mic / camera           run the countdown            CLI          |
+|  power requests              trigger display-off / sleep  web dashboard|
+|  suspend, display  <------                                             |
+|                                        ^                               |
+|                                        |                               |
+|                          Arc<Mutex<SharedState>>                       |
++------------------------------------------------------------------------+
+```
+
+Key decisions:
+
+- **The watchdog is independent of the UI.** `eframe` stops running UI code when the window is minimized or the display is off, which is exactly when the sleep timer matters. All timing, sampling and decisions run on a dedicated thread; the GUI, tray, HTTP server and CLI only read and mutate shared state.
+- **Small memory footprint by design.** The renderer is `glow` (OpenGL) rather than `wgpu`, repaints are throttled to 1 Hz, and the working set is trimmed when the window is hidden in the tray.
+- **Allocation-free sampling.** A single `System`, `Networks` and `Disks` instance is created once and refreshed selectively each second instead of calling `refresh_all()`.
+- **Native OS APIs, no helper processes.** Windows uses `windows-sys`; Linux and macOS use the platform tools listed below. Release builds use fat LTO, a single codegen unit, `panic = "abort"` and symbol stripping.
+- **No frontend build step.** The remote dashboard is a single static HTML file served by the embedded HTTP server.
+
+| Component | Crate |
+|---|---|
+| GUI | `eframe` / `egui` (glow backend), `egui_plot` |
+| System sampling | `sysinfo` |
+| Tray | `tray-icon` |
+| Serialization | `serde`, `serde_json` |
+| Windows APIs | `windows-sys` |
+| Windows packaging | `embed-manifest`, `winres`, WiX Toolset v3 |
+
+## Platform support
 
 | Capability | Windows | Linux | macOS |
 |---|---|---|---|
-| **System Sleep** | `SetSuspendState(false, false, false)` | `systemctl suspend` (or `loginctl` / DBus) | `pmset sleepnow` |
-| **Input Idle** | `GetLastInputInfo` | `xprintidle` / X11 extension | `ioreg -c IOHIDSystem` (`HIDIdleTime`) |
-| **Display Timeout** | `powercfg /change monitor-timeout-ac` | `xset dpms` (X11) or Wayland DBus | `pmset -a displaysleep` |
-| **GPU Monitoring** | Dynamically loads `nvml.dll` | DRM sysfs (`/sys/class/drm`) | `IOAccelerator` counters |
-| **Meeting Detection** | `CapabilityAccessManager\ConsentStore` | PulseAudio / PipeWire capture nodes | CoreAudio active IO procs |
-| **Autostart** | Windows Task Scheduler / Startup folder | `~/.config/autostart/*.desktop` | `~/Library/LaunchAgents/*.plist` |
+| System sleep | `SetSuspendState` | `systemctl suspend` | `pmset sleepnow` |
+| Input idle | `GetLastInputInfo` | `xprintidle` / X11 | `ioreg` (`HIDIdleTime`) |
+| Display timeout | `powercfg` | `xset dpms` / Wayland DBus | `pmset displaysleep` |
+| GPU monitoring | NVML (dynamic) | DRM sysfs | IOAccelerator |
+| Meeting detection | `ConsentStore` registry | PulseAudio / PipeWire | CoreAudio |
+| Autostart | Task Scheduler / Startup | `~/.config/autostart` | `~/Library/LaunchAgents` |
 
----
+## Building from source
 
-## Contributing & License
+Requires a recent stable Rust toolchain (`rust-version` is declared in `Cargo.toml`).
 
-Contributions, bug reports, and suggestions are warmly welcome!
+```bash
+git clone https://github.com/Subham-Maity/agent-power-guard.git
+cd agent-power-guard
+cargo build --release
+```
+
+On Linux, install the build dependencies first:
+
+```bash
+sudo apt install -y pkg-config libx11-dev libxext-dev libxrandr-dev libxinerama-dev \
+  libxcursor-dev libxi-dev libgl1-mesa-dev libglu1-mesa-dev libxss-dev libxkbcommon-dev \
+  libwayland-dev xprintidle libgtk-3-dev libayatana-appindicator3-dev
+```
+
+To build the Windows MSI, install [WiX Toolset v3.14](https://wixtoolset.org/) and run:
+
+```powershell
+.\build-msi.ps1
+```
+
+The installer is written to `target\installer`. `generate-icon.ps1` regenerates `assets\app.ico`.
+
+## Troubleshooting
+
+**The machine never sleeps.** Open the app and look for the condition marked **BLOCKING SLEEP**; it shows the reason. The usual causes are a stuck power request (enable the override in condition 9), a background process matching the watch list (the defaults include broad names such as `code`, `node` and `git`), or a threshold that is too tight for your machine's idle noise.
+
+**Antivirus flags or removes the executable.** The app suspends the machine, acquires `SeShutdownPrivilege`, writes a startup entry and polls hardware and registry state. Those are legitimate for a power tool but look similar to suspicious behaviour to heuristic scanners, and the binary is not signed with a paid code-signing certificate. The project is open source and makes no network calls to external services. To resolve it, add an exclusion for the install folder, for example in Microsoft Defender:
+
+1. Open **Windows Security > Virus & threat protection > Manage settings**.
+2. Under **Exclusions**, choose **Add or remove exclusions** and add the folder `C:\Program Files\AgentPowerGuard`.
+
+Other products (Bitdefender and similar) have an equivalent exceptions list; include any behavioural-protection module such as Advanced Threat Defense, and restore the file from quarantine if it was already removed.
+
+**Wake-on-LAN doesn't work.** Check that it is enabled in both the BIOS/UEFI and the adapter properties, and that the PC is on Ethernet rather than Wi-Fi.
+
+## Contributing
+
+Bug reports, ideas and pull requests are welcome.
+
 1. Fork the repository.
-2. Create your feature branch (`git checkout -b feat/my-feature`).
-3. Commit your changes (`git commit -m "feat: add feature"`).
-4. Push to branch (`git push origin feat/my-feature`).
-5. Open a Pull Request.
+2. Create a branch: `git checkout -b feat/my-feature`.
+3. Commit your changes: `git commit -m "feat: add my feature"`.
+4. Push the branch and open a pull request.
 
-This project is licensed under the **[MIT License](LICENSE)**.
+CI builds every pull request on Windows, Linux and macOS.
+
+## License
+
+Released under the [MIT License](LICENSE).

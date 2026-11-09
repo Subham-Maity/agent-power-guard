@@ -19,7 +19,7 @@ use sysinfo::{
 };
 
 #[cfg(windows)]
-use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, LUID};
+use windows_sys::Win32::Foundation::{CloseHandle, FreeLibrary, HANDLE, LUID};
 #[cfg(windows)]
 use windows_sys::Win32::Security::{
     AdjustTokenPrivileges, LookupPrivilegeValueW, LUID_AND_ATTRIBUTES,
@@ -37,7 +37,8 @@ use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken}
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{GetLastInputInfo, LASTINPUTINFO};
 #[cfg(windows)]
 use windows_sys::Win32::System::Registry::{
-    RegCloseKey, RegEnumKeyExW, RegOpenKeyExW, RegQueryValueExW, HKEY, HKEY_CURRENT_USER, KEY_READ,
+    RegCloseKey, RegDeleteValueW, RegEnumKeyExW, RegOpenKeyExW, RegQueryValueExW, RegSetValueExW, HKEY,
+    HKEY_CURRENT_USER, KEY_READ, KEY_SET_VALUE, REG_SZ,
 };
 #[cfg(windows)]
 use windows_sys::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryA};
@@ -551,7 +552,10 @@ pub fn sleep_now() -> bool {
             );
             CloseHandle(token);
 
-            SetSuspendState(false, false, false)
+            let res = SetSuspendState(false, false, false);
+            // Settle time for drivers, WDDM, and display adapters upon resuming from sleep
+            std::thread::sleep(Duration::from_millis(1500));
+            res
         }
     }
 
@@ -747,26 +751,31 @@ pub fn check_power_requests() -> (bool, bool) {
 pub fn set_startup_task(enable: bool) {
     #[cfg(windows)]
     {
-        if enable {
-            if let Ok(exe_path) = std::env::current_exe() {
-                let exe_str = exe_path.to_string_lossy().to_string();
-                let _ = Command::new("schtasks")
-                    .args([
-                        "/create",
-                        "/tn", "AgentPowerGuard",
-                        "/tr", &format!("\"{}\"", exe_str),
-                        "/sc", "onlogon",
-                        "/rl", "highest",
-                        "/f",
-                    ])
-                    .creation_flags(CREATE_NO_WINDOW)
-                    .status();
+        let subkey: Vec<u16> = "Software\\Microsoft\\Windows\\CurrentVersion\\Run\0".encode_utf16().collect();
+        let val_name: Vec<u16> = "AgentPowerGuard\0".encode_utf16().collect();
+
+        unsafe {
+            let mut hkey: HKEY = std::ptr::null_mut();
+            if RegOpenKeyExW(HKEY_CURRENT_USER, subkey.as_ptr(), 0, KEY_SET_VALUE, &mut hkey) == 0 {
+                if enable {
+                    if let Ok(exe_path) = std::env::current_exe() {
+                        let cmd_str = format!("\"{}\" --tray\0", exe_path.to_string_lossy());
+                        let cmd_w: Vec<u16> = cmd_str.encode_utf16().collect();
+                        let byte_len = (cmd_w.len() * 2) as u32;
+                        RegSetValueExW(
+                            hkey,
+                            val_name.as_ptr(),
+                            0,
+                            REG_SZ,
+                            cmd_w.as_ptr() as *const u8,
+                            byte_len,
+                        );
+                    }
+                } else {
+                    RegDeleteValueW(hkey, val_name.as_ptr());
+                }
+                RegCloseKey(hkey);
             }
-        } else {
-            let _ = Command::new("schtasks")
-                .args(["/delete", "/tn", "AgentPowerGuard", "/f"])
-                .creation_flags(CREATE_NO_WINDOW)
-                .status();
         }
     }
 }
@@ -821,6 +830,7 @@ fn query_nvidia_gpu_utilization() -> Option<f32> {
         let get_rates_fn: Option<NvmlDeviceGetUtilizationRates> = std::mem::transmute(GetProcAddress(nvml_lib, b"nvmlDeviceGetUtilizationRates\0".as_ptr()));
         let shutdown_fn: Option<NvmlShutdown> = std::mem::transmute(GetProcAddress(nvml_lib, b"nvmlShutdown\0".as_ptr()));
 
+        let mut res = None;
         if let (Some(init), Some(get_handle), Some(get_rates), Some(shutdown)) = (init_fn, get_handle_fn, get_rates_fn, shutdown_fn) {
             if init() == 0 {
                 let mut device: usize = 0;
@@ -832,10 +842,11 @@ fn query_nvidia_gpu_utilization() -> Option<f32> {
                     }
                 }
                 shutdown();
-                return Some(max_util);
+                res = Some(max_util);
             }
         }
-        None
+        FreeLibrary(nvml_lib);
+        res
     }
 }
 
@@ -1291,6 +1302,7 @@ pub fn start_watchdog_thread(state: Arc<Mutex<SharedState>>, egui_ctx: egui::Con
                 .unwrap_or_default()
                 .as_secs();
 
+            let mut woke_from_sleep = false;
             {
                 let mut s = state.lock().unwrap();
                 if s.last_wall_clock_secs > 0 && now_wall > s.last_wall_clock_secs + 10 {
@@ -1298,8 +1310,13 @@ pub fn start_watchdog_thread(state: Arc<Mutex<SharedState>>, egui_ctx: egui::Con
                     s.set_toast("System woke from sleep! Watchdog countdown reset.");
                     consecutive_spikes = 0;
                     s.pc_spike_sustained_counter = 0;
+                    woke_from_sleep = true;
                 }
                 s.last_wall_clock_secs = now_wall;
+            }
+
+            if woke_from_sleep {
+                std::thread::sleep(Duration::from_millis(1500));
             }
 
             // 2. Sample Metrics
@@ -1929,7 +1946,9 @@ impl eframe::App for AgentPowerGuardApp {
             } else {
                 format!("Agent Power Guard - {}", s.blocker_banner_text)
             };
-            let _ = tray.set_tooltip(Some(&tooltip));
+            // Win32 szTip buffer limit is 128 characters including null terminator.
+            let safe_tooltip: String = tooltip.chars().take(120).collect();
+            let _ = tray.set_tooltip(Some(&safe_tooltip));
         }
 
         // Memory trim when minimized or hidden
@@ -1943,6 +1962,11 @@ impl eframe::App for AgentPowerGuardApp {
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        // Fast-path: When hidden in the system tray, skip all widget layouts and OpenGL rendering
+        if ui.ctx().input(|i| i.viewport().visible() == Some(false)) {
+            return;
+        }
+
         let mut s = self.state.lock().unwrap();
 
         if ui.visuals().dark_mode != s.config.dark_mode {
@@ -2796,15 +2820,39 @@ impl eframe::App for AgentPowerGuardApp {
 // ----------------------------------------------------------------------------
 
 fn main() -> eframe::Result<()> {
-    // 1. Check for CLI Subcommands
+    // 0. Set up Diagnostic Panic Logger
+    std::panic::set_hook(Box::new(|info| {
+        let log_file = get_config_path().parent().unwrap_or(&PathBuf::from(".")).join("crash.log");
+        let payload = format!(
+            "[{:?}] PANIC: {}\nLocation: {:?}\n",
+            SystemTime::now(),
+            info,
+            info.location()
+        );
+        if let Some(parent) = log_file.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let _ = std::fs::write(&log_file, payload);
+    }));
+
+    // 1. Check for CLI Subcommands & Flags
     let args: Vec<String> = std::env::args().collect();
+    let mut start_in_tray = false;
     if args.len() > 1 {
-        handle_cli_command(&args);
-        return Ok(());
+        let first_arg = args[1].to_lowercase();
+        if first_arg == "--tray" || first_arg == "--minimized" || first_arg == "-t" {
+            start_in_tray = true;
+        } else {
+            handle_cli_command(&args);
+            return Ok(());
+        }
     }
 
     // 2. Load Configuration & Initialize State
     let config = AppConfig::load();
+    if config.run_at_startup {
+        set_startup_task(true);
+    }
     let state = Arc::new(Mutex::new(SharedState::new(config)));
 
     // 3. Configure GUI Viewport
@@ -2813,13 +2861,19 @@ fn main() -> eframe::Result<()> {
             .with_title("Agent Power Guard")
             .with_inner_size([1040.0, 740.0])
             .with_min_inner_size([780.0, 520.0])
-            .with_active(true),
+            .with_visible(!start_in_tray)
+            .with_active(!start_in_tray),
         ..Default::default()
     };
 
-    eframe::run_native(
+    let res = eframe::run_native(
         "Agent Power Guard",
         native_options,
         Box::new(move |cc| Ok(Box::new(AgentPowerGuardApp::new(cc, state)))),
-    )
+    );
+    if let Err(e) = &res {
+        let log_file = get_config_path().parent().unwrap_or(&PathBuf::from(".")).join("error.log");
+        let _ = std::fs::write(log_file, format!("run_native error: {:?}\n", e));
+    }
+    res
 }
