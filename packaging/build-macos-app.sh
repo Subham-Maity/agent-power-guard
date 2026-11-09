@@ -41,3 +41,4 @@ cp assets/icon_32.png "${RESOURCES}/app.png"
 cd dist
 zip -r "AgentPowerGuard-macos-universal.zip" "${APP_NAME}"
 echo "macOS Application Bundle created at dist/AgentPowerGuard-macos-universal.zip"
+

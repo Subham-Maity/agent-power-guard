@@ -1,13 +1,13 @@
-# Maintainer: Shashank Maity <shashank@example.com>
+# Maintainer: Subham Maity <97989643+Subham-Maity@users.noreply.github.com>
 pkgname=agent-power-guard-bin
 pkgver=1.1.0
 pkgrel=1
 pkgdesc="Intelligent keep-awake watchdog utility for workstations running autonomous AI coding agents"
 arch=('x86_64')
-url="https://github.com/shashankmaity/agent-power-guard"
+url="https://github.com/Subham-Maity/agent-power-guard"
 license=('MIT')
 depends=('libx11' 'libxext' 'libxrandr' 'libxinerama' 'libxcursor' 'libxi' 'libxss' 'xprintidle' 'gtk3' 'libayatana-appindicator')
-source=("https://github.com/shashankmaity/agent-power-guard/releases/download/v${pkgver}/agent-power-guard-linux-x86_64.tar.gz")
+source=("https://github.com/Subham-Maity/agent-power-guard/releases/download/v${pkgver}/agent-power-guard-linux-x86_64.tar.gz")
 sha256sums=('0000000000000000000000000000000000000000000000000000000000000000')
 
 package() {

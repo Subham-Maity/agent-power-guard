@@ -4,9 +4,9 @@
     <id>agent-power-guard</id>
     <version>1.1.0</version>
     <title>Agent Power Guard</title>
-    <authors>Antigravity Team</authors>
-    <projectUrl>https://github.com/shashankmaity/agent-power-guard</projectUrl>
-    <licenseUrl>https://github.com/shashankmaity/agent-power-guard/blob/main/LICENSE</licenseUrl>
+    <authors>Subham Maity</authors>
+    <projectUrl>https://github.com/Subham-Maity/agent-power-guard</projectUrl>
+    <licenseUrl>https://github.com/Subham-Maity/agent-power-guard/blob/main/LICENSE</licenseUrl>
     <requireLicenseAcceptance>false</requireLicenseAcceptance>
     <description>Lightweight keep-awake watchdog utility for workstations running autonomous AI coding agents.</description>
     <summary>Puts your PC to sleep only when you AND your background AI agents are truly idle.</summary>

@@ -46,3 +46,4 @@ EOF
 
 dpkg-deb --build "${PKG_DIR}" "dist/agent-power-guard_${VERSION}_${ARCH}.deb"
 echo "Debian package created at dist/agent-power-guard_${VERSION}_${ARCH}.deb"
+
