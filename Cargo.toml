@@ -1,6 +1,6 @@
 [package]
 name = "agent-power-guard"
-version = "1.0.1"
+version = "1.0.2"
 edition = "2021"
 rust-version = "1.95"
 description = "Native Windows, Linux & macOS watchdog that sleeps the PC only when you AND your coding agents are idle"
@@ -19,6 +19,7 @@ image = { version = "0.25.10", default-features = false, features = ["png", "ico
 # On Linux, winit requires x11 and/or wayland explicitly enabled
 [target.'cfg(target_os = "linux")'.dependencies]
 eframe = { version = "0.37.0", default-features = false, features = ["x11", "wayland"] }
+winit = { version = "0.30", features = ["x11", "wayland"] }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61.2", features = [
@@ -28,6 +29,8 @@ windows-sys = { version = "0.61.2", features = [
     "Win32_System_ProcessStatus",
     "Win32_System_SystemInformation",
     "Win32_System_Threading",
+    "Win32_System_Registry",
+    "Win32_System_LibraryLoader",
     "Win32_UI_Input_KeyboardAndMouse",
     "Win32_UI_WindowsAndMessaging",
 ] }

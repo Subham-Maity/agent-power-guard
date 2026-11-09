@@ -9,14 +9,21 @@ if (!(Test-Path $candle) -or !(Test-Path $light)) {
     exit 1
 }
 
-$exePath = (Resolve-Path "target\x86_64-pc-windows-msvc\release\agent-power-guard.exe").Path
+$version = (Get-Content Cargo.toml | Select-String '^version = "(.*)"').Matches.Groups[1].Value
+if (!$version) { $version = "1.0.2" }
+
+$exePath = if (Test-Path "target\x86_64-pc-windows-msvc\release\agent-power-guard.exe") {
+    (Resolve-Path "target\x86_64-pc-windows-msvc\release\agent-power-guard.exe").Path
+} else {
+    (Resolve-Path "target\release\agent-power-guard.exe").Path
+}
 $outDir = (Resolve-Path ".").Path + "\target\installer"
 if (!(Test-Path $outDir)) {
     New-Item -ItemType Directory -Path $outDir -Force | Out-Null
 }
 
 $wixObj = Join-Path $outDir "main.wixobj"
-$msiOut = Join-Path $outDir "AgentPowerGuard-1.0.1-x64.msi"
+$msiOut = Join-Path $outDir "AgentPowerGuard-$version-x64.msi"
 
 Write-Host "Compiling WiX source..."
 & $candle -arch x64 "-dSourceExe=$exePath" -out $wixObj "wix\main.wxs"

@@ -1,0 +1,355 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>Agent Power Guard — Web & Mobile Dashboard</title>
+  <style>
+    :root {
+      --bg: #0f141c;
+      --card-bg: #161d27;
+      --card-border: #232d3d;
+      --text: #e2e8f0;
+      --text-muted: #94a3b8;
+      --accent: #10b981;
+      --accent-glow: rgba(16, 185, 129, 0.25);
+      --danger: #ef4444;
+      --warning: #f59e0b;
+      --primary: #3b82f6;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; }
+    body { background-color: var(--bg); color: var(--text); padding: 16px; min-height: 100vh; }
+    .container { max-width: 768px; margin: 0 auto; }
+    header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 20px; }
+    .logo { display: flex; align-items: center; gap: 10px; font-weight: 700; font-size: 1.2rem; }
+    .logo span { color: var(--accent); }
+    .pulse-badge { display: flex; align-items: center; gap: 6px; background: rgba(16, 185, 129, 0.15); color: var(--accent); padding: 4px 10px; border-radius: 999px; font-size: 0.8rem; font-weight: 600; }
+    .pulse-dot { width: 8px; height: 8px; background: var(--accent); border-radius: 50%; animation: pulse 2s infinite; }
+    @keyframes pulse { 0% { opacity: 1; transform: scale(1); } 50% { opacity: 0.4; transform: scale(1.2); } 100% { opacity: 1; transform: scale(1); } }
+    
+    .card { background: var(--card-bg); border: 1px solid var(--card-border); border-radius: 14px; padding: 18px; margin-bottom: 16px; box-shadow: 0 4px 16px rgba(0,0,0,0.2); }
+    .hero { text-align: center; padding: 24px 16px; }
+    .countdown-ring { font-size: 2.8rem; font-weight: 800; font-variant-numeric: tabular-nums; margin: 12px 0; color: #fff; letter-spacing: -1px; }
+    .status-pill { display: inline-block; padding: 6px 14px; border-radius: 999px; font-size: 0.9rem; font-weight: 600; }
+    .status-passing { background: rgba(16, 185, 129, 0.2); color: #34d399; border: 1px solid #10b981; }
+    .status-blocked { background: rgba(239, 68, 68, 0.2); color: #f87171; border: 1px solid #ef4444; }
+    .status-paused { background: rgba(148, 163, 184, 0.2); color: #cbd5e1; border: 1px solid #64748b; }
+    
+    .blocker-msg { margin-top: 10px; font-size: 0.95rem; color: var(--text-muted); font-weight: 500; }
+    
+    .actions-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 10px; margin-top: 16px; }
+    .btn { background: var(--card-border); color: #fff; border: none; padding: 12px 14px; border-radius: 10px; font-weight: 600; font-size: 0.95rem; cursor: pointer; transition: all 0.15s; display: flex; align-items: center; justify-content: center; gap: 8px; }
+    .btn:active { transform: scale(0.98); }
+    .btn-primary { background: var(--primary); }
+    .btn-danger { background: var(--danger); }
+    .btn-warning { background: var(--warning); color: #000; }
+    .btn-accent { background: var(--accent); color: #000; }
+    .btn-outline { background: transparent; border: 1px solid var(--card-border); }
+    
+    .section-title { font-size: 1.05rem; font-weight: 700; margin-bottom: 12px; display: flex; align-items: center; justify-content: space-between; }
+    .grid-2 { display: grid; grid-template-columns: repeat(2, 1fr); gap: 12px; }
+    @media (max-width: 520px) { .grid-2 { grid-template-columns: 1fr; } .actions-grid { grid-template-columns: 1fr; } }
+    
+    .metric-row { display: flex; justify-content: space-between; align-items: center; padding: 8px 0; border-bottom: 1px solid rgba(255,255,255,0.06); font-size: 0.9rem; }
+    .metric-row:last-child { border-bottom: none; }
+    .metric-name { color: var(--text-muted); }
+    .metric-val { font-weight: 600; font-variant-numeric: tabular-nums; }
+    .tag-pass { color: var(--accent); }
+    .tag-block { color: var(--danger); }
+    
+    .energy-stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; text-align: center; }
+    @media (max-width: 580px) { .energy-stats { grid-template-columns: repeat(2, 1fr); } }
+    .stat-box { background: rgba(0,0,0,0.25); padding: 12px 6px; border-radius: 8px; border: 1px solid var(--card-border); }
+    .stat-num { font-size: 1.25rem; font-weight: 700; color: var(--accent); }
+    .stat-lbl { font-size: 0.75rem; color: var(--text-muted); margin-top: 4px; }
+    
+    .wol-box { background: rgba(59, 130, 246, 0.1); border: 1px solid rgba(59, 130, 246, 0.3); border-radius: 10px; padding: 14px; margin-top: 8px; }
+    .code-pill { background: #000; padding: 4px 8px; border-radius: 6px; font-family: monospace; font-size: 0.9rem; color: #60a5fa; user-select: all; }
+    
+    .toast { position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%); background: #1e293b; color: #fff; padding: 10px 18px; border-radius: 999px; box-shadow: 0 4px 20px rgba(0,0,0,0.5); font-size: 0.9rem; font-weight: 600; border: 1px solid var(--card-border); pointer-events: none; opacity: 0; transition: opacity 0.2s; z-index: 1000; }
+    .toast.show { opacity: 1; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <header>
+      <div class="logo">
+        <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#10b981" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"></path></svg>
+        Agent Power <span>Guard</span>
+      </div>
+      <div class="pulse-badge">
+        <div class="pulse-dot"></div>
+        LIVE REMOTE
+      </div>
+    </header>
+
+    <!-- Main Status Card -->
+    <div class="card hero">
+      <div id="status-badge" class="status-pill status-passing">EVALUATING</div>
+      <div class="countdown-ring" id="countdown">--:--</div>
+      <div class="blocker-msg" id="blocker-banner">Connecting to local agent watchdog...</div>
+      
+      <div class="actions-grid">
+        <button class="btn btn-danger" onclick="apiAction('/api/sleep')">
+          ⚡ Sleep Now
+        </button>
+        <button class="btn btn-warning" onclick="apiAction('/api/postpone?mins=15')">
+          ⏳ Postpone 15m
+        </button>
+        <button class="btn btn-primary" onclick="toggleGuard()">
+          <span id="guard-btn-text">⏸️ Toggle Guard</span>
+        </button>
+        <button class="btn btn-outline" onclick="promptLease()">
+          🔒 Agent Lease
+        </button>
+      </div>
+    </div>
+
+    <!-- Active Agent Lease Banner (if any) -->
+    <div class="card" id="lease-card" style="display: none; background: rgba(59, 130, 246, 0.12); border-color: rgba(59, 130, 246, 0.4);">
+      <div style="display: flex; justify-content: space-between; align-items: center;">
+        <div>
+          <div style="font-weight: 700; color: #93c5fd; font-size: 0.95rem;">🔒 Active Agent Lease</div>
+          <div id="lease-detail" style="font-size: 0.85rem; color: #bfdbfe; margin-top: 4px;">Reason: Compiling (14m remaining)</div>
+        </div>
+        <button class="btn btn-outline" style="padding: 6px 12px; font-size: 0.85rem;" onclick="apiAction('/api/release')">Release</button>
+      </div>
+    </div>
+
+    <!-- Live Conditions -->
+    <div class="card">
+      <div class="section-title">
+        <span>Live Watchdog Conditions</span>
+        <span id="conditions-count" style="font-size: 0.8rem; color: var(--text-muted); font-weight: normal;">11 checks</span>
+      </div>
+      <div class="grid-2">
+        <div>
+          <div class="metric-row">
+            <span class="metric-name">1. Human Idle</span>
+            <span class="metric-val" id="cond-idle">0s</span>
+          </div>
+          <div class="metric-row">
+            <span class="metric-name">2. Watched Agent CPU</span>
+            <span class="metric-val" id="cond-agent-cpu">0.0%</span>
+          </div>
+          <div class="metric-row">
+            <span class="metric-name">3. Watched GPU (AI)</span>
+            <span class="metric-val" id="cond-gpu">0.0%</span>
+          </div>
+          <div class="metric-row">
+            <span class="metric-name">4. Active Downloads</span>
+            <span class="metric-val" id="cond-down">0 KB/s</span>
+          </div>
+          <div class="metric-row">
+            <span class="metric-name">5. Mic & Cam (Calls)</span>
+            <span class="metric-val" id="cond-mic-cam">None</span>
+          </div>
+        </div>
+        <div>
+          <div class="metric-row">
+            <span class="metric-name">6. Whole-PC CPU</span>
+            <span class="metric-val" id="cond-pc-cpu">0.0%</span>
+          </div>
+          <div class="metric-row">
+            <span class="metric-name">7. Whole-PC Disk</span>
+            <span class="metric-val" id="cond-pc-disk">0 KB/s</span>
+          </div>
+          <div class="metric-row">
+            <span class="metric-name">8. Whole-PC Network</span>
+            <span class="metric-val" id="cond-pc-net">0 KB/s</span>
+          </div>
+          <div class="metric-row">
+            <span class="metric-name">9. Spike Debounce</span>
+            <span class="metric-val" id="cond-spike">0s / 15s</span>
+          </div>
+          <div class="metric-row">
+            <span class="metric-name">10. Power Requests</span>
+            <span class="metric-val" id="cond-power-req">None</span>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Energy & Cost Savings -->
+    <div class="card">
+      <div class="section-title">
+        <span>💰 Energy & Cost Savings</span>
+        <button class="btn btn-outline" style="padding: 4px 10px; font-size: 0.8rem;" onclick="clearEnergy()">Clear Data</button>
+      </div>
+      <div class="energy-stats">
+        <div class="stat-box">
+          <div class="stat-num" id="stat-money">$0.00</div>
+          <div class="stat-lbl">Money Saved</div>
+        </div>
+        <div class="stat-box">
+          <div class="stat-num" id="stat-kwh">0.0</div>
+          <div class="stat-lbl">kWh Saved</div>
+        </div>
+        <div class="stat-box">
+          <div class="stat-num" id="stat-hours">0h</div>
+          <div class="stat-lbl">Standby Hours</div>
+        </div>
+        <div class="stat-box">
+          <div class="stat-num" id="stat-co2">0 kg</div>
+          <div class="stat-lbl">CO₂ Avoided</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Wake-On-LAN (WoL) Remote Turn-On Card -->
+    <div class="card">
+      <div class="section-title">
+        <span>⚡ Remote Turn-On (Wake-on-LAN)</span>
+      </div>
+      <p style="font-size: 0.85rem; color: var(--text-muted); line-height: 1.4;">
+        When this PC goes to sleep, its CPU is suspended. To turn it back on from your phone over Wi-Fi, send a standard <strong>Wake-on-LAN Magic Packet</strong> using any free phone app (e.g. <em>Wake On Lan</em> on iOS/Android).
+      </p>
+      <div class="wol-box">
+        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px;">
+          <span style="font-size: 0.85rem; color: var(--text-muted);">PC LAN IP Address:</span>
+          <span class="code-pill" id="pc-ip">Loading...</span>
+        </div>
+        <div style="display: flex; justify-content: space-between; align-items: center;">
+          <span style="font-size: 0.85rem; color: var(--text-muted);">PC MAC Address:</span>
+          <span class="code-pill" id="pc-mac">Loading...</span>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div id="toast" class="toast">Command delivered</div>
+
+  <script>
+    let lastState = null;
+
+    function showToast(msg) {
+      const t = document.getElementById('toast');
+      t.innerText = msg;
+      t.classList.add('show');
+      setTimeout(() => t.classList.remove('show'), 2500);
+    }
+
+    async function apiAction(endpoint) {
+      try {
+        const res = await fetch(endpoint, { method: 'POST' });
+        const data = await res.json();
+        showToast(data.message || 'Action executed');
+        fetchStatus();
+      } catch (err) {
+        showToast('Error: ' + err.message);
+      }
+    }
+
+    function toggleGuard() {
+      apiAction('/api/toggle_guard');
+    }
+
+    function promptLease() {
+      const mins = prompt('Enter lease duration in minutes (e.g. 15, 30, 60):', '30');
+      if (mins) {
+        const reason = prompt('Reason for lease (e.g. AI Training, Compiling, Download):', 'Remote Task') || 'Remote Lease';
+        apiAction(`/api/lease?mins=${encodeURIComponent(mins)}&reason=${encodeURIComponent(reason)}`);
+      }
+    }
+
+    function clearEnergy() {
+      if (confirm('Clear all recorded energy savings history?')) {
+        apiAction('/api/energy/clear');
+      }
+    }
+
+    async function fetchStatus() {
+      try {
+        const res = await fetch('/api/status');
+        if (!res.ok) return;
+        const s = await res.json();
+        lastState = s;
+
+        // Countdown & Status Banner
+        const badge = document.getElementById('status-badge');
+        const count = document.getElementById('countdown');
+        const banner = document.getElementById('blocker-banner');
+
+        if (!s.guard_enabled) {
+          badge.className = 'status-pill status-paused';
+          badge.innerText = 'GUARD PAUSED';
+          count.innerText = 'PAUSED';
+          banner.innerText = 'Master Guard is switched OFF. Automatic sleep disabled.';
+          document.getElementById('guard-btn-text').innerText = '▶️ Resume Guard';
+        } else if (s.all_conditions_pass) {
+          badge.className = 'status-pill status-passing';
+          badge.innerText = 'ARMED (SLEEPING SOON)';
+          const mins = Math.floor(s.countdown_secs / 60);
+          const secs = s.countdown_secs % 60;
+          count.innerText = `${mins}:${secs.toString().padStart(2, '0')}`;
+          banner.innerText = `All conditions idle. Sleep triggers in ${s.countdown_secs}s`;
+          document.getElementById('guard-btn-text').innerText = '⏸️ Pause Guard';
+        } else {
+          badge.className = 'status-pill status-blocked';
+          badge.innerText = 'BLOCKED (WATCHING)';
+          const maxM = Math.floor(s.countdown_max / 60);
+          const maxS = s.countdown_max % 60;
+          count.innerText = `${maxM}:${maxS.toString().padStart(2, '0')}`;
+          banner.innerText = s.blocker_banner_text || 'Waiting for active tasks to finish...';
+          document.getElementById('guard-btn-text').innerText = '⏸️ Pause Guard';
+        }
+
+        // Active Lease Card
+        const leaseCard = document.getElementById('lease-card');
+        if (s.agent_lease_active) {
+          leaseCard.style.display = 'block';
+          document.getElementById('lease-detail').innerText = `Reason: "${s.agent_lease_reason}" (${s.agent_lease_remaining_secs}s remaining)`;
+        } else {
+          leaseCard.style.display = 'none';
+        }
+
+        // Condition rows
+        document.getElementById('cond-idle').innerText = `${s.live_idle_secs}s (${s.cond1_pass ? 'PASS' : 'BUSY'})`;
+        document.getElementById('cond-idle').className = 'metric-val ' + (s.cond1_pass ? 'tag-pass' : 'tag-block');
+
+        document.getElementById('cond-agent-cpu').innerText = `${s.live_agent_cpu.toFixed(1)}% (${s.live_agent_proc})`;
+        document.getElementById('cond-agent-cpu').className = 'metric-val ' + (s.cond2_pass ? 'tag-pass' : 'tag-block');
+
+        document.getElementById('cond-gpu').innerText = `${s.live_gpu.toFixed(1)}%`;
+        document.getElementById('cond-gpu').className = 'metric-val ' + (s.cond10_pass ? 'tag-pass' : 'tag-block');
+
+        document.getElementById('cond-down').innerText = `${s.live_download.toFixed(0)} KB/s`;
+        document.getElementById('cond-down').className = 'metric-val ' + (s.cond3_pass ? 'tag-pass' : 'tag-block');
+
+        document.getElementById('cond-mic-cam').innerText = s.live_mic_cam_active ? `Active (${s.live_mic_cam_app})` : 'Idle';
+        document.getElementById('cond-mic-cam').className = 'metric-val ' + (s.cond11_pass ? 'tag-pass' : 'tag-block');
+
+        document.getElementById('cond-pc-cpu').innerText = `${s.live_pc_cpu.toFixed(1)}%`;
+        document.getElementById('cond-pc-cpu').className = 'metric-val ' + (s.cond4_pass ? 'tag-pass' : 'tag-block');
+
+        document.getElementById('cond-pc-disk').innerText = `${s.live_pc_disk.toFixed(0)} KB/s`;
+        document.getElementById('cond-pc-disk').className = 'metric-val ' + (s.cond5_pass ? 'tag-pass' : 'tag-block');
+
+        document.getElementById('cond-pc-net').innerText = `${s.live_pc_net.toFixed(0)} KB/s`;
+        document.getElementById('cond-pc-net').className = 'metric-val ' + (s.cond6_pass ? 'tag-pass' : 'tag-block');
+
+        document.getElementById('cond-spike').innerText = `${s.spike_counter}s / ${s.spike_limit}s`;
+        document.getElementById('cond-power-req').innerText = s.power_request_active ? 'Active (Display/Audio)' : 'None';
+
+        // Energy Stats
+        if (s.energy) {
+          document.getElementById('stat-money').innerText = `$${s.energy.cost_saved.toFixed(2)}`;
+          document.getElementById('stat-kwh').innerText = `${s.energy.kwh_saved.toFixed(1)}`;
+          document.getElementById('stat-hours').innerText = `${(s.energy.duration_secs / 3600).toFixed(1)}h`;
+          document.getElementById('stat-co2').innerText = `${(s.energy.kwh_saved * 0.4).toFixed(1)} kg`;
+        }
+
+        // WoL Info
+        if (s.local_ip) document.getElementById('pc-ip').innerText = s.local_ip;
+        if (s.mac_address) document.getElementById('pc-mac').innerText = s.mac_address;
+
+      } catch (err) {
+        console.error('Fetch error:', err);
+      }
+    }
+
+    fetchStatus();
+    setInterval(fetchStatus, 1000);
+  </script>
+</body>
+</html>

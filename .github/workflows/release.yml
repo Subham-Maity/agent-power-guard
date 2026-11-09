@@ -153,13 +153,25 @@ jobs:
 
             ---
 
+            ### 🌟 What's New in This Release
+
+            - 🎮 **GPU Activity Monitoring (Condition 10):** Real-time GPU compute tracking (NVIDIA NVML dynamic load, Linux DRM, Apple Silicon) + 5th rolling history graph to protect active Ollama, PyTorch, and local LLM inference.
+            - 🎙️ **Microphone, Camera & Meeting Detection (Condition 11):** Senses active calls on Zoom, Microsoft Teams, Google Meet, Discord, Slack, and OBS to prevent sleep during meetings.
+            - ⏳ **Pre-Sleep Grace Period Notification:** Countdown banner when ≤ 30s before sleep with instant **[ ⏳ Postpone (+15m) ]** and **[ ⚡ Sleep Immediately ]** buttons.
+            - 🔌 **Agent Heartbeat REST API & CLI:** Lightweight HTTP API on port `49281` and CLI commands (`agent-power-guard lease 30 "Build"`, `release`, `status`, `sleep`, `postpone`) for autonomous coding agents (Cursor, Claude Code, Antigravity) to acquire sleep leases.
+            - 🌐 **Web & Mobile Remote Dashboard (over Wi-Fi):** Control your workstation from your smartphone or tablet at `http://<Local-IP>:49281` with Wake-on-LAN (WoL) primary MAC display.
+            - 💰 **Energy & Cost Savings Dashboard:** Interactive analytics tracking sleep sessions, monitor-off time, estimated kWh saved, money saved, and CO2 emissions avoided. Includes date filters, recording toggle, and `%APPDATA%\AgentPowerGuard\energy_history.json` storage.
+            - 📥 **System Tray & Memory Trimming:** Closing the window minimizes to tray while automatically trimming memory to under 5 MB RAM.
+
+            ---
+
             ### 📦 Download & Extension Guide (Which file should I download?)
 
             | Platform / Architecture | Recommended Download | Format / Extension | Description & Setup |
             |---|---|---|---|
             | **Windows 10 / 11 (64-bit)** | [`AgentPowerGuard-windows-x64.msi`](#) | `.msi` (Installer) | **Recommended for Windows.** Standard installer with Start Menu, Desktop shortcuts, and full Add/Remove Programs support. |
             | **Windows 10 / 11 (Portable)** | [`agent-power-guard-windows-x64.exe`](#) | `.exe` (Standalone) | Portable single-file binary. No installation required; run directly as Administrator. |
-            | **Linux (Ubuntu, Debian, Fedora, Arch)** | [`agent-power-guard-linux-x86_64.tar.gz`](#) | `.tar.gz` (Archive) | Standalone Linux x86_64 binary. Extracts into a portable executable. |
+            | **Linux (Ubuntu, Debian, Fedora, Arch)** | [`agent-power-guard-linux-x86_64.tar.gz`](#) | `.tar.gz` (Archive) | Standalone Linux x86_64 binary supporting X11 & Wayland compositors. |
             | **macOS (M1 / M2 / M3 / M4 Apple Silicon)** | [`agent-power-guard-macos-aarch64.tar.gz`](#) | `.tar.gz` (Archive) | Native ARM64 binary for modern Apple Silicon Macs. |
             | **macOS (Intel Core x86_64)** | [`agent-power-guard-macos-x86_64.tar.gz`](#) | `.tar.gz` (Archive) | Native x86_64 binary for Intel-based Macs. |
 
@@ -176,11 +188,12 @@ jobs:
 
             #### Linux
             ```bash
+            sudo apt update
+            sudo apt install -y pkg-config libx11-dev libxext-dev libxrandr-dev libxinerama-dev libxcursor-dev libxi-dev libgl1-mesa-dev libglu1-mesa-dev libxss-dev libxkbcommon-dev libwayland-dev xprintidle libgtk-3-dev libayatana-appindicator3-dev
             tar -xzvf agent-power-guard-linux-x86_64.tar.gz
             cd agent-power-guard
             ./agent-power-guard
             ```
-            *(Requires X11 / Wayland and OpenGL libraries: `sudo apt install libgl1-mesa-dev libx11-dev xprintidle`)*
 
             #### macOS
             ```bash
@@ -191,8 +204,8 @@ jobs:
             ---
 
             ### 💡 Staged Power-Saving Strategy
-            1. **Stage 1 (Monitor Off):** Turns off your display first (saves 50–100W immediately and protects screen/OLED) while leaving CPU/GPU active so background agents (Cursor, Claude, Antigravity) continue working.
-            2. **Stage 2 (Sleep Mode):** Once the monitor is off and all agents finish (CPU, disk, and net fall below thresholds), the entire workstation enters deep sleep.
+            1. **Stage 1 (Monitor Off):** Turns off your display first (saves 50–100W immediately and protects screen/OLED) while leaving CPU/GPU active so background agents continue working.
+            2. **Stage 2 (Sleep Mode):** Once the monitor is off and all 11 conditions pass, the entire workstation enters deep sleep (< 1W draw).
 
             ### ⏱️ Quick Presets Included
             - `15s Test`: Instant hands-off countdown test.
