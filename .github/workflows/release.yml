@@ -54,7 +54,7 @@ jobs:
           # Ready for SignPath GitHub Action or azure-sign-tool once maintainer configures secrets
 
       - name: Upload Windows Artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: windows-assets
           path: dist/*
@@ -88,7 +88,7 @@ jobs:
           rm -rf agent-power-guard
 
       - name: Upload Linux Artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: linux-assets
           path: dist/*
@@ -117,7 +117,7 @@ jobs:
           tar -czvf dist/agent-power-guard-macos-x86_64.tar.gz -C target/x86_64-apple-darwin/release agent-power-guard
 
       - name: Upload macOS Artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: macos-assets
           path: dist/*
