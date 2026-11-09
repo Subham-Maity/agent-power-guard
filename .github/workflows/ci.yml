@@ -3,8 +3,18 @@ name: CI - Multi-Platform Check & Build
 on:
   push:
     branches: [ main ]
+    paths-ignore:
+      - 'README.md'
+      - '*.md'
+      - 'LICENSE'
+      - '.gitignore'
   pull_request:
     branches: [ main ]
+    paths-ignore:
+      - 'README.md'
+      - '*.md'
+      - 'LICENSE'
+      - '.gitignore'
   workflow_dispatch:
 
 env:

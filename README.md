@@ -1,219 +1,196 @@
-# Agent Power Guard 🛡️⚡
+# Agent Power Guard
 
-> A lightweight, 100% native Windows desktop utility written in Rust (`egui` + `glow`) that automatically puts your PC to sleep **only when you AND your background AI coding agents are truly idle**.
+A small native utility that puts your PC to sleep only when **you and your background AI coding agents are both idle**.
+
+Written in Rust (`egui` + `glow`). Single executable, under 5 MB of RAM, no Electron, no WebView.
+
+[![Release](https://img.shields.io/github/v/release/Subham-Maity/agent-power-guard?label=release)](https://github.com/Subham-Maity/agent-power-guard/releases)
+[![CI](https://img.shields.io/github/actions/workflow/status/Subham-Maity/agent-power-guard/ci.yml?label=build)](https://github.com/Subham-Maity/agent-power-guard/actions)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+![Platforms](https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20%7C%20macOS-lightgrey)
+
+> **Installation:** download the latest installer or binary for your OS from the
+> **[Releases page](https://github.com/Subham-Maity/agent-power-guard/releases)**.
+> Setup instructions are [below](#installation).
 
 ---
 
-## ⚡ The Problem
+## Why
 
-Most Windows sleep settings fail developers running local AI agents, language servers, or builds:
-1. **Windows Standby Timers** either put the PC to sleep mid-prompt (killing long LLM reasoning, code generation, or multi-minute builds), or...
-2. **Audio/Browser Driver Locks** (like Discord, YouTube in Chrome/Edge, virtual audio cables, or IDM) prevent the PC from ever going to sleep, leaving high-power GPUs and workstations running hot overnight.
-3. **Legacy scripts** (batch / PowerShell) run blind in the background without real-time visibility or diagnostics when sleep triggers fail.
+Default OS sleep timers don't work well for developers running local agents, language servers, or long builds:
 
-**Agent Power Guard** replaces scripts and heavy Electron/Webview wrappers with a single, native executable running at **< 5 MB RAM** with real-time process and I/O threshold graphs.
+- A fixed standby timer can suspend the machine in the middle of an LLM run or a multi-minute build.
+- Audio drivers and browser media threads (Discord, a paused YouTube tab, virtual audio cables, IDM) often hold wake locks, so the machine never sleeps and a hot GPU runs all night.
+- Batch and PowerShell workarounds are blind. When sleep fails, there is no way to see why.
 
----
+Agent Power Guard watches what is actually happening on the machine (your input, agent processes, CPU, disk and network) and sleeps the PC only when all of it is quiet. It also shows live graphs and per-condition status, so you can see exactly what is blocking sleep.
 
-## 💡 The Staged Power-Saving Philosophy (Why Monitor Off First?)
+## How it works
 
-Instead of dropping the entire PC into sleep mode all at once, **Agent Power Guard** uses a **Two-Stage Power Strategy**:
+Sleep happens in two stages instead of one:
 
 ```
-[ User Steps Away ]
-       │
-       ▼ (Stage 1: After 2 mins)
-[ Turn Off Display / Monitor ] ──► Saves 50–100W immediately
-       │                          Protects OLED & prevents screen burn-in
-       │                          CPU, GPU & Network STAY ACTIVE
-       │                          Coding agents (Cursor, Claude, Antigravity) continue working!
-       ▼ (Stage 2: After 3 mins total idle)
-[ Check All 9 Guard Conditions ]
-       ├── If Agent is still generating code ──► Stays Awake (Monitor stays off)
-       └── If Human AND Agent are idle ────────► PC Enters S3 / Modern Standby (< 1W)
+User steps away
+   |
+   |  Stage 1 (default: 2 min idle)
+   v
+Display off ........ saves 50-100 W, avoids OLED burn-in
+                     CPU, GPU and network stay active, agents keep working
+   |
+   |  Stage 2 (default: 3 min idle)
+   v
+Check all guard conditions
+   |-- agent still busy ......... stay awake (display stays off)
+   '-- user and agent idle ...... suspend (S3 / Modern Standby, < 1 W)
 ```
 
-1. **Stage 1 (Monitor Turn-Off):** Turning off your display saves 50–100 Watts of electricity instantly and eliminates OLED burn-in, but keeps Windows, CPU, GPU, and network alive so long AI agent reasoning or cargo builds finish uninterrupted in the dark.
-2. **Stage 2 (Deep Sleep):** Once the monitor is off and your coding agent finishes its work (CPU/Disk/Net drop below threshold), the app safely elevates `SeShutdownPrivilege` and suspends the PC into true low-power sleep (< 1W).
+Turning the display off first means long agent runs and builds can finish in the dark, and the PC sleeps as soon as they are done.
 
----
+## Features
 
-## ⏱️ Quick Presets & Staged Timers Guide
+- Sleeps only when human input, watched processes, and whole-system load are all below your thresholds
+- Per-process watching for common dev tools (Cursor, Claude, Gemini, Antigravity, cargo, node, python, docker, and more). The keyword list is editable
+- Download-aware: an idle `IDMan.exe` in the tray does not block sleep, an active transfer does
+- Sustained spike filter, so one-second system blips don't reset the timer
+- Override for stuck audio and browser power requests
+- Live CPU, disk and network graphs
+- Every condition can be toggled and tuned from the UI. Settings are saved automatically
+- Light and dark themes
 
-Inside the application's Left Panel, you can click any of the **Quick Preset** buttons to configure both stages automatically:
+## Installation
 
-| Preset Button | Sleep Countdown | Monitor Turn-Off | Best For & Why This Setting |
-|---|---|---|---|
-| **`[ 15s Test ]`** | **15 seconds** | **1 min** | **Instant Testing:** Fast hands-off test mode. Lets you verify the automatic sleep countdown in 15 seconds without waiting. *(Tip: Uncheck Cond 5 Disk if compiling!)* |
-| **`[ 3m ★ ]`** *(Default)* | **3 minutes** (180s) | **2 minutes** | **Best All-Rounder (Recommended):** Perfect balance. Monitor turns off at 2 min to save power; if coding agents finish within that minute, PC sleeps at 3 min. |
-| **`[ 5m ]`** | **5 minutes** (300s) | **3 minutes** | **Light Coding & Browsing:** Gives you extra time to read docs or think between prompts without the screen turning off. |
-| **`[ 10m ]`** | **10 minutes** (600s) | **5 minutes** | **Medium Workloads:** Good when testing local Docker containers, medium Rust/C++ compiles, or longer LLM chains. |
-| **`[ 15m ]`** | **15 minutes** (900s) | **10 minutes** | **Office & Multitasking:** Display stays on for 10 min during phone calls or quick breaks. |
-| **`[ 30m ]`** | **30 minutes** (1800s) | **15 minutes** | **Long Batch Tasks:** For running medium dataset training, database migrations, or test suites. |
-| **`[ 45m ]`** | **45 minutes** (2700s) | **20 minutes** | **Extended Autonomous Agents:** For multi-step autonomous agent runs (e.g. multi-agent SWE benchmarks). |
-| **`[ 1h ]`** | **1 hour** (3600s) | **30 minutes** | **Heavy Local Builds:** For long compilation, packaging, or 4K video renders. |
-| **`[ 2h ]`** | **2 hours** (7200s) | **45 minutes** | **Overnight Training / Render:** Leaves PC awake for up to 2 hours of inactivity, then sleeps once done. |
-| **`[ 3h ]`** | **3 hours** (10800s) | **60 minutes** | **Maximum Standby Window:** For very long background tasks while ensuring the PC does not stay on all weekend. |
-| **Custom Slider** | **10s – 3 hours** | **1m – 3 hours** | **Fine-Tuning:** Drag the *Idle Timer* slider (10s to 10800s) and *Monitor Timeout* slider (1m to 180m) to any custom value you want. Settings auto-save. |
+Get the build for your platform from the [Releases page](https://github.com/Subham-Maity/agent-power-guard/releases).
 
----
-
-## 🧪 How to Test Immediately (Step-by-Step)
-
-### Method 1: Instant Sleep Test (1-Click)
-1. Click the **`[ ⚡ Test Sleep ]`** button in the top bar.
-2. Your PC will immediately enter sleep mode via the Win32 `SeShutdownPrivilege` + `SetSuspendState` call.
-3. Move your mouse or press a key on your keyboard to wake the PC up.
-4. When the PC wakes up, the app automatically detects the wall-clock time jump (> 5s) and restarts a fresh grace period.
-
-### Method 2: Full Automatic Sleep Trigger Test (15 Seconds)
-1. In your app, look at the condition badges on the left.
-2. If any condition shows red `[ BLOCKING SLEEP ]` (for example, Condition 5 Whole-PC Disk was high in your screenshot because files were being written):
-   - Simply uncheck **`[ ] 5. Whole-PC Disk I/O`** (or slide its threshold up to `80,000 KB/s`).
-3. Click the **`[ 15s Test ]`** preset button.
-4. **Take your hands off the mouse and keyboard.**
-5. Watch the top progress bar:
-   - Condition 1 (Human Idle) badge turns green: `[ PASS (Quiet) ]` after 10s of inactivity.
-   - The top progress bar counts down: `Time until sleep: 15s... 10s... 3s... 0s`.
-   - The bottom banner turns bright green: `ALL CONDITIONS PASS -> PC Sleeping in Xs`.
-6. At `0s`, the app puts the PC to sleep automatically!
-
----
-
-## 📖 What is What? (Clear & Concise Reference)
-
-### 1. Top Control Bar & Buttons
-
-| Control / Button | What It Is | When To Use / What Setting |
+| Platform | File | Notes |
 |---|---|---|
-| **`GUARD: [ ON / OFF ]`** | **Master Power Guard Switch.** When `ON`, the app actively monitors all 9 conditions and puts the PC to sleep when the countdown reaches 0. When `OFF`, automatic sleep is paused completely. | Keep **`ON`** for automatic sleep protection; click **`OFF`** if you want your PC to stay awake indefinitely. |
-| **`[ ⚡ Test Sleep ]`** | **Instant Hardware Sleep Verification.** Executes the native Win32 `SeShutdownPrivilege` token privilege elevation and calls `SetSuspendState(false, false, false)` directly. | Click once when first installing to verify your PC supports native S3/Modern Standby cleanly. |
-| **`[ ⏱ 15s Test ]`** | **Quick 15-Second Test Mode.** Instantly sets the idle countdown timer to 15 seconds. | Click whenever you want to test your active condition thresholds live. |
-| **`[ ⚙ Power Plan ]`** | **Optimal Windows Power Plan.** Runs hidden `powercfg` commands: CPU Min = 5%, CPU Max = 100%, PCIe ASPM power savings = Enabled, Wake Timers = Disabled, Windows Standby Timeout = 0 (disabled, so only Agent Power Guard controls sleep). | Click once after installing to configure Windows for low idle wattage. |
-| **`[ 🧹 Clean v3 ]`** | **Legacy Script Cleanup.** Unregisters the old `AgentPowerGuard` scheduled task and deletes `C:\ProgramData\AgentPowerGuard` from the earlier batch/PowerShell v3 script. | Click once to clean up old conflicting background tasks. |
-| **`[ ☀ Light / 🌙 Dark ]`** | **UI Theme Switch.** Toggles between egui Dark Mode and Light Mode instantly. | Set to your visual preference. |
+| Windows 10 / 11 (x64) | `AgentPowerGuard-windows-x64.msi` | Recommended. Installs to Program Files with Start Menu entry and Add/Remove Programs support |
+| Windows (portable) | `agent-power-guard-windows-x64.exe` | Standalone, no install needed |
+| Linux (x86_64) | `agent-power-guard-linux-x86_64.tar.gz` | X11 or Wayland, uses systemd for suspend |
+| macOS (Apple Silicon) | `agent-power-guard-macos-aarch64.tar.gz` | M1 and newer |
+| macOS (Intel) | `agent-power-guard-macos-x86_64.tar.gz` | |
 
----
+Each release includes a `SHA256SUMS.txt` file for verifying downloads.
 
-### 2. The 9 Interactive Guard Conditions
+### Windows
 
-Every condition has an **`[x] Enable`** checkbox. If a condition is blocking sleep and you want to bypass it temporarily, simply uncheck it!
+Run the `.msi` installer, or launch the portable `.exe` directly.
 
-#### 1. Human Input Idle
-- **What it is:** Measures how many seconds have elapsed since you last moved your mouse or pressed a key, using Win32 `GetLastInputInfo`.
-- **Why it blocks:** If you are actively using the PC (idle seconds < threshold), it displays `BLOCKING SLEEP` so your PC never sleeps while you are working.
-- **Recommended Setting:** `180s` (3 minutes). Set to `15s` during testing.
+On first run, it's worth clicking **Test Sleep** once to confirm your hardware suspends cleanly, then **Power Plan** to apply the recommended settings (see [Controls](#controls)).
 
-#### 2. Watched Agent CPU %
-- **What it is:** Normalized CPU usage across all logical CPU cores for monitored AI/developer processes. Click *"Edit Process Keywords"* to view or edit the list: `antigravity, language_server, cursor, claude, gemini, code, node, npm, pnpm, bun, tsc, esbuild, vite, next, nest, git, cargo, rustc, python, docker, wsl`.
-- **How it works:** If you have an 8-core CPU (800% max in Task Manager), a process taking 16% in Task Manager is normalized to `2.0%` of your whole system.
-- **Why it blocks:** Keeps the PC awake while Claude, Cursor, Antigravity, Gemini, or a Cargo/Vite compile is generating code or thinking.
-- **Recommended Setting:** `2.0%`.
+### Linux
 
-#### 3. Active Download / IDM
-- **What it is:** Specifically watches download managers (`IDMan.exe`, `aria2c`, `qbittorrent`, `fdm`) and measures their active disk I/O in KB/s.
-- **Why it matters:** `IDMan.exe` sitting idle in the Windows system tray uses 0 KB/s and will **NOT** block sleep. Only active, transferring downloads block sleep.
-- **Recommended Setting:** `100 KB/s`.
+Install the runtime dependencies (Debian / Ubuntu / Mint):
 
-#### 4. Whole-PC CPU %
-- **What it is:** Global system CPU load across all processes on your entire PC (`sys.global_cpu_usage()`).
-- **Why it blocks:** Fallback safety net. If an unmonitored tool (like 7-Zip compressing a huge archive or video rendering) is running, sleep is blocked.
-- **Recommended Setting:** `30.0%`.
-
-#### 5. Whole-PC Disk I/O
-- **What it is:** Sum of all disk read and write activity across all drives in KB/s.
-- **Why it blocks:** Prevents sleep during active file copy, disk indexing, database operations, or builds.
-- **Recommended Setting:** `5,000 KB/s` (5 MB/s). If background drives perform periodic indexing, increase to `10,000 KB/s`–`15,000 KB/s`.
-
-#### 6. Whole-PC Network
-- **What it is:** Sum of all network interface traffic (received + transmitted) across all adapters in KB/s.
-- **Why it blocks:** Prevents sleep while large uploads, downloads, or cloud backups are actively transferring.
-- **Recommended Setting:** `100 KB/s`.
-
-#### 7. Sustained Spike Filter
-- **What it is:** Consecutive seconds Whole-PC CPU, Disk, or Network must **remain continuously above threshold** before resetting the sleep countdown.
-- **Why it matters:** Windows constantly has 1-second blips (e.g., Microsoft Edge loading a tab, Windows Search indexing a small file, Wallpaper Engine cycling wallpapers). Without this filter, those 1-second blips would reset your sleep timer indefinitely.
-- **Recommended Setting:** `15s`.
-
-#### 8. Monitor Timeout
-- **What it is:** Syncs the Windows AC screen turn-off timeout with your sleep timer (`powercfg /change monitor-timeout-ac X`).
-- **Recommended Setting:** Set to turn off 1–2 minutes before sleep mode kicks in (e.g. `2 min` for a 3 min sleep timer).
-
-#### 9. Power Requests & Audio Override
-- **What it is:** Monitors `powercfg /requests` for active `DISPLAY:` locks (e.g., watching a fullscreen YouTube video or VLC movie).
-- **Audio/Browser Override:** The **`[ 🔇 Override Audio/Browser Locks ]`** button tells Windows to ignore driver locks from virtual audio cables (VB-Audio, FxSound) or idle browser media threads so they cannot keep your PC awake.
-- **Recommended Setting:** Checked `[x]` with `Respect DISPLAY Requests` enabled.
-
----
-
-## 📦 Multi-Platform Support & Downloads
-
-Agent Power Guard runs natively across **Windows**, **Linux**, and **macOS**:
-
-### Which File Should I Download? (Extension Guide)
-
-| Operating System | Recommended Download | Extension | Target Architecture | Description |
-|---|---|---|---|---|
-| **Windows 10 / 11** | `AgentPowerGuard-windows-x64.msi` | `.msi` | x86_64 (64-bit) | **Recommended for Windows.** Installs into Program Files with Start Menu, Desktop shortcuts, and Add/Remove Programs support. |
-| **Windows (Portable)** | `agent-power-guard-windows-x64.exe` | `.exe` | x86_64 (64-bit) | Portable standalone binary. Runs directly without installation. |
-| **Linux (Ubuntu / Debian / Fedora / Arch)** | `agent-power-guard-linux-x86_64.tar.gz` | `.tar.gz` | x86_64 (64-bit) | Standalone Linux executable using X11 / Wayland and systemd suspend. |
-| **macOS (Apple Silicon)** | `agent-power-guard-macos-aarch64.tar.gz` | `.tar.gz` | ARM64 (M1 / M2 / M3 / M4) | Native Apple Silicon binary. Uses `pmset` and `ioreg` for sleep and display control. |
-| **macOS (Intel)** | `agent-power-guard-macos-x86_64.tar.gz` | `.tar.gz` | x86_64 (Intel) | Native Intel Mac binary. |
-
----
-
-## 🐧 Linux Setup & Prerequisites
-
-On Linux, Agent Power Guard uses:
-- **Sleep Trigger:** `systemctl suspend` (or `loginctl suspend` / DBus)
-- **Human Inactivity Idle:** `xprintidle` (for X11 desktop sessions)
-- **Display Off:** `xset dpms` (X11) or DBus power manager
-- **Autostart:** `~/.config/autostart/agent-power-guard.desktop`
-
-### Prerequisites (Ubuntu / Debian / Mint):
 ```bash
 sudo apt update
 sudo apt install -y libgl1-mesa-dev libx11-dev libxext-dev libxcursor-dev libxinerama-dev libxi-dev xprintidle
 ```
 
-### Running on Linux:
+Extract and run:
+
 ```bash
 tar -xzvf agent-power-guard-linux-x86_64.tar.gz
 cd agent-power-guard
 ./agent-power-guard
 ```
 
----
+### macOS
 
-## 🍎 macOS Setup & Notes
-
-On macOS, Agent Power Guard uses:
-- **Sleep Trigger:** `pmset sleepnow`
-- **Human Inactivity Idle:** `ioreg -c IOHIDSystem` (reads `HIDIdleTime` in nanoseconds)
-- **Display Off:** `pmset -a displaysleep <minutes>`
-- **Autostart:** `~/Library/LaunchAgents/com.agentpowerguard.app.plist`
-
-### Running on macOS:
 ```bash
 tar -xzvf agent-power-guard-macos-aarch64.tar.gz
 ./agent-power-guard
 ```
-*(If prompted by macOS Gatekeeper on first run, go to System Settings -> Privacy & Security -> click "Open Anyway".)*
 
----
+If Gatekeeper blocks the first launch, go to **System Settings > Privacy & Security** and click **Open Anyway**.
 
-## 🤖 Automated GitHub Actions CI/CD Bot
+## Quick start
 
-This repository includes fully automated GitHub Actions workflows:
-- **`.github/workflows/ci.yml`:** Automatically tests and compiles every pull request and push across Windows, Linux (`ubuntu-latest`), and macOS (`macos-latest`).
-- **`.github/workflows/release.yml`:** When a tag like `v1.0.0` is pushed, GitHub Actions compiles:
-  1. Windows `.exe` and `.msi` (with WiX toolset)
-  2. Linux `.tar.gz`
-  3. macOS Apple Silicon & Intel `.tar.gz`
-  4. Computes `SHA256SUMS.txt` checksums
-  5. Publishes a complete GitHub Release page with release notes and the download extension guide!
+1. Launch the app and make sure **Guard** is `ON`.
+2. Pick a preset in the left panel. `3m` is a good default.
+3. Leave it running. When you and your agents go quiet, the display turns off, then the PC sleeps.
 
----
+### Verifying it works
 
-## 📄 License
-This project is licensed under the [MIT License](LICENSE).
+**Instant check:** click **Test Sleep**. The PC suspends immediately. Move the mouse to wake it. After wake-up the app detects the clock jump and starts a fresh grace period.
+
+**Full automatic check:**
+
+1. Click the **15s Test** preset.
+2. If any condition shows `BLOCKING SLEEP`, uncheck it or raise its threshold. For example, uncheck *Whole-PC Disk I/O* if files are being written.
+3. Take your hands off the mouse and keyboard.
+4. Watch the countdown. When every condition passes, the status banner turns green and the PC sleeps at `0s`.
+
+## Presets
+
+| Preset | Sleep after | Display off after | Suited for |
+|---|---|---|---|
+| 15s Test | 15 s | 1 min | Verifying setup |
+| **3m** (default) | 3 min | 2 min | General use |
+| 5m | 5 min | 3 min | Light coding, reading docs |
+| 10m | 10 min | 5 min | Docker, medium compiles, longer LLM chains |
+| 15m | 15 min | 10 min | Calls and short breaks |
+| 30m | 30 min | 15 min | Test suites, migrations, small training runs |
+| 45m | 45 min | 20 min | Multi-step autonomous agent runs |
+| 1h | 1 h | 30 min | Long builds, video renders |
+| 2h | 2 h | 45 min | Overnight training or rendering |
+| 3h | 3 h | 60 min | Longest standby window |
+
+The sliders allow custom values: idle timer from 10 s to 3 h, monitor timeout from 1 min to 3 h.
+
+## Guard conditions
+
+Sleep triggers only when every enabled condition passes. Each one has its own checkbox, so you can bypass a condition that is giving false positives.
+
+| # | Condition | What it measures | Default |
+|---|---|---|---|
+| 1 | Human input idle | Time since last mouse or keyboard input | 180 s |
+| 2 | Watched agent CPU | Normalized CPU use of monitored dev and AI processes | 2.0 % |
+| 3 | Active download | Disk I/O of download managers (`IDMan`, `aria2c`, `qbittorrent`, `fdm`) | 100 KB/s |
+| 4 | Whole-PC CPU | Total CPU load across all processes | 30 % |
+| 5 | Whole-PC disk I/O | Combined read and write across all drives | 5,000 KB/s |
+| 6 | Whole-PC network | Combined traffic across all adapters | 100 KB/s |
+| 7 | Sustained spike filter | How long CPU, disk or network must stay above threshold before the timer resets | 15 s |
+| 8 | Monitor timeout | Syncs the Windows screen-off timeout with the sleep timer | 2 min |
+| 9 | Power requests | Respects active `DISPLAY:` requests from `powercfg /requests` (fullscreen video, etc.) | On |
+
+**Notes**
+
+- **Condition 2** normalizes per-process CPU across all logical cores. On an 8-core machine, a process at 16% in Task Manager counts as 2.0% of the whole system. The default watch list is `antigravity, language_server, cursor, claude, gemini, code, node, npm, pnpm, bun, tsc, esbuild, vite, next, nest, git, cargo, rustc, python, docker, wsl`, and it can be edited from *Edit Process Keywords*.
+- **Condition 5:** if background indexing keeps tripping it, raise the threshold to 10,000-15,000 KB/s.
+- **Condition 7** exists because Windows produces constant one-second blips (a browser tab loading, Search indexing a file). Without the filter they would reset the countdown forever.
+- **Condition 9** includes an **Override Audio/Browser Locks** button that tells Windows to ignore wake locks from virtual audio drivers (VB-Audio, FxSound) and idle browser media threads.
+
+## Controls
+
+| Control | Description |
+|---|---|
+| **Guard ON / OFF** | Master switch. When off, automatic sleep is disabled and the PC stays awake |
+| **Test Sleep** | Elevates `SeShutdownPrivilege` and calls `SetSuspendState` to verify the PC can suspend |
+| **15s Test** | Sets the idle countdown to 15 seconds for testing thresholds |
+| **Power Plan** | Applies a low-idle-power Windows plan via `powercfg`: CPU min 5% / max 100%, PCIe ASPM on, wake timers off, Windows standby timeout disabled so only Agent Power Guard controls sleep |
+| **Clean v3** | Removes the legacy `AgentPowerGuard` scheduled task and `C:\ProgramData\AgentPowerGuard` left by the old batch / PowerShell version |
+| **Light / Dark** | Switches the UI theme |
+
+## Platform details
+
+| | Windows | Linux | macOS |
+|---|---|---|---|
+| Sleep | `SetSuspendState` | `systemctl suspend` (or `loginctl` / DBus) | `pmset sleepnow` |
+| Input idle | `GetLastInputInfo` | `xprintidle` (X11) | `ioreg -c IOHIDSystem` (`HIDIdleTime`) |
+| Display off | `powercfg` | `xset dpms` (X11) or DBus | `pmset -a displaysleep` |
+| Autostart | Installer / Task Scheduler | `~/.config/autostart/agent-power-guard.desktop` | `~/Library/LaunchAgents/com.agentpowerguard.app.plist` |
+
+## CI and releases
+
+GitHub Actions handles builds and releases:
+
+- `ci.yml` builds and tests every push and pull request on Windows, Ubuntu and macOS.
+- `release.yml` runs when a version tag such as `v1.0.0` is pushed. It builds the Windows `.exe` and `.msi` (WiX), the Linux `.tar.gz`, and both macOS `.tar.gz` archives, generates `SHA256SUMS.txt`, and publishes the GitHub Release.
+
+## Contributing
+
+Issues and pull requests are welcome. For larger changes, please open an issue first to discuss the approach.
+
+## License
+
+[MIT](LICENSE)
