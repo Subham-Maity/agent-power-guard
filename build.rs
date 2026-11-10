@@ -6,7 +6,7 @@ fn main() {
 
         embed_manifest(
             new_manifest("AgentPowerGuard.App")
-                .requested_execution_level(ExecutionLevel::RequireAdministrator),
+                .requested_execution_level(ExecutionLevel::AsInvoker),
         )
         .expect("unable to embed application manifest");
 

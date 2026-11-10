@@ -5,7 +5,7 @@
     <key>CFBundleExecutable</key>
     <string>agent-power-guard</string>
     <key>CFBundleIconFile</key>
-    <string>app.icns</string>
+    <string>app</string>
     <key>CFBundleIdentifier</key>
     <string>com.agentpowerguard.app</string>
     <key>CFBundleName</key>

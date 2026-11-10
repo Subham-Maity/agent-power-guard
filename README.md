@@ -1,42 +1,68 @@
-# Agent Power Guard
+Agent Power Guard
 
 **Sleep your PC only when you and your background coding agents are idle.**
 
-Agent Power Guard is a small native utility written in Rust that replaces the fixed OS sleep timer with one that knows what the machine is actually doing. It watches input activity, developer tooling, GPU load, disk, network and meetings, and suspends the system only when all of them are quiet. Long builds, local LLM inference and autonomous agent runs (Claude Code, Cursor, Antigravity, Ollama) are no longer killed by a power plan that can't tell idle from busy.
+Agent Power Guard is a native utility written in Rust that replaces the fixed OS sleep timer with one that knows what the machine is doing. It watches input activity, developer tooling, GPU load, disk, network and meetings, and suspends the system only when every enabled condition is quiet. Long builds, local LLM inference and autonomous agent runs (Claude Code, Cursor, Antigravity, Ollama) are no longer killed by a power plan that cannot tell idle from busy.
 
 [![Release](https://img.shields.io/github/v/release/Subham-Maity/agent-power-guard?label=release)](https://github.com/Subham-Maity/agent-power-guard/releases)
 [![CI](https://img.shields.io/github/actions/workflow/status/Subham-Maity/agent-power-guard/ci.yml?label=build)](https://github.com/Subham-Maity/agent-power-guard/actions)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-![Platforms](https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20%7C%20macOS-lightgrey)
 
 <img width="1069" height="1149" alt="Agent Power Guard GUI" src="https://github.com/user-attachments/assets/8d286957-530a-43a6-90ae-dbd3d4641a6c" />
 
-> **Installation:** download the installer or archive for your platform from the [Releases page](https://github.com/Subham-Maity/agent-power-guard/releases). Step-by-step instructions are in [Installation](#installation).
+Supported platforms: Windows 10/11 (x64), Linux (x86_64, X11 and Wayland), macOS (Apple Silicon and Intel).
+
+## Contents
+
+- [Why](#why)
+- [Features](#features)
+- [Installation](#installation)
+- [Quick start](#quick-start)
+- [How it works](#how-it-works)
+- [Guard conditions](#guard-conditions)
+- [Presets, power modes and schedules](#presets-power-modes-and-schedules)
+- [Configuration and data files](#configuration-and-data-files)
+- [Usage](#usage)
+- [Remote dashboard](#remote-dashboard)
+- [Background service and packaging](#background-service-and-packaging)
+- [Energy tracking](#energy-tracking)
+- [Block-reason history](#block-reason-history)
+- [Alerts and update checks](#alerts-and-update-checks)
+- [Architecture](#architecture)
+- [Platform support](#platform-support)
+- [Project structure](#project-structure)
+- [Building from source](#building-from-source)
+- [Development, CI and releases](#development-ci-and-releases)
+- [Security](#security)
+- [Troubleshooting](#troubleshooting)
+- [Contributing](#contributing)
+- [License](#license)
 
 ## Why
 
-- **Fixed timers sleep at the wrong moment.** A 15-minute OS timer will happily suspend the machine halfway through `cargo build`, `npm install`, a fine-tuning run or a multi-step agent task.
-- **Stuck power requests keep it awake all night.** Audio drivers, paused browser tabs and download managers often hold a `SYSTEM_REQUIRED` lock, leaving the machine (and its GPU) running at full power for no reason.
-- **Displays burn power and panels.** Leaving a monitor on wastes electricity and risks OLED burn-in, even when the machine itself still has work to do.
+- **Fixed timers sleep at the wrong moment.** A 15-minute OS timer will suspend the machine halfway through `cargo build`, `npm install`, a fine-tuning run or a multi-step agent task.
+- **Stuck power requests keep it awake all night.** Audio drivers, paused browser tabs and download managers often hold a `SYSTEM_REQUIRED` lock, leaving the machine (and its GPU) at full power for no reason.
+- **Displays burn power and panels.** Leaving a monitor on wastes electricity and risks OLED burn-in, even when the machine still has work to do.
 
-Agent Power Guard evaluates 11 independent conditions every second and only suspends the system when every enabled one passes.
+Agent Power Guard evaluates 11 independent conditions every second and suspends the system only when every enabled one passes.
 
 ## Features
 
-- **11 guard conditions** with individual toggles, thresholds and live pass/fail status
-- **Two-stage power saving:** turn the display off first, suspend the system later
-- **Agent leases:** coding agents and scripts can hold sleep off through a CLI or local HTTP API
-- **GPU awareness:** NVIDIA (NVML), Linux DRM and macOS IOAccelerator
-- **Meeting detection:** microphone and camera use by Zoom, Teams, Meet, Discord, Slack and OBS
-- **Pre-sleep grace period:** a 30-second warning with postpone and sleep-now actions
-- **Block-reason history:** "What kept my PC awake" timeline, overnight summary, top blockers ranking, and CSV/JSON export
-- **Alerts & webhooks:** ntfy, Telegram and custom webhook notifications on imminent sleep, stuck blockers, or completed leases
-- **Opt-in update check:** daily check for new GitHub releases with zero telemetry
-- **Remote dashboard:** control and monitor the machine from a phone or another computer on your network, with Wake-on-LAN details
-- **Energy tracking:** estimated kWh, cost and CO2 avoided, stored locally
-- **Live graphs:** agent CPU, whole-PC CPU, disk, network and GPU over a rolling 120-second window
-- **Tray mode:** runs hidden in the system tray and trims its working set to under 5 MB of RAM
-- **No Electron, no WebView, no runtime:** one native executable built on `egui`
+- **11 guard conditions** with individual toggles, thresholds and live pass/fail status.
+- **Two-stage power saving:** turn the display off first, suspend the system later.
+- **Agent leases:** coding agents and scripts hold sleep off through the `run` wrapper, an MCP server, the CLI, or a local HTTP API.
+- **GPU awareness:** NVIDIA (NVML, loaded at runtime), Linux DRM and macOS IOAccelerator.
+- **Meeting detection:** microphone and camera use by Zoom, Teams, Meet, Discord, Slack and OBS.
+- **Pre-sleep grace period:** a 30-second warning with Postpone (+15 min) and Sleep now actions.
+- **Block-reason history:** "What kept my PC awake" timeline, overnight summary, top-blockers ranking, CSV/JSON export.
+- **Alerts and webhooks:** ntfy, Telegram and generic webhook notifications.
+- **Opt-in update check:** one GitHub Releases request per 24 hours, no telemetry.
+- **Remote dashboard:** monitor and control the machine from a phone or another computer, with QR pairing, live sparklines, a process list with 1-tap ignore, a multi-machine fleet view and Wake-on-LAN.
+- **Energy tracking:** estimated kWh, cost and CO2 avoided, stored locally.
+- **Power modes, quiet hours, battery profile and wake timers.**
+- **Live graphs:** agent CPU, whole-PC CPU, disk, network and GPU over a rolling 120-second window.
+- **Tray mode:** runs hidden in the system tray and trims its working set (~5 MB RAM working set in background tray/daemon mode via Win32 `SetProcessWorkingSetSize`, under 25 MB when the egui window is open).
+- **No Electron, no WebView, no runtime:** one native executable built on `egui`.
 
 ## Installation
 
@@ -44,15 +70,15 @@ Every release on the [Releases page](https://github.com/Subham-Maity/agent-power
 
 | Platform | File | Notes |
 |---|---|---|
-| Windows 10 / 11 (x64) | `AgentPowerGuard-windows-x64.msi` | Installer with Start Menu and Desktop shortcuts. Recommended. |
+| Windows 10 / 11 (x64) | `AgentPowerGuard-windows-x64.msi` | Installer with Start Menu and Desktop shortcuts, installs to `C:\Program Files\AgentPowerGuard`. Recommended. |
 | Windows 10 / 11 (x64) | `agent-power-guard-windows-x64.exe` | Portable single executable. |
-| Linux (x86_64) | `agent-power-guard-linux-x86_64.tar.gz` | X11 and Wayland. |
+| Linux (x86_64) | `agent-power-guard-linux-x86_64.tar.gz` | X11 and Wayland. Contains `agent-power-guard/` with the binary, `README.md` and `LICENSE`. |
+| Linux (amd64) | `agent-power-guard_<version>_amd64.deb` | Debian/Ubuntu package. Declares no dependencies; install `xprintidle` and the GTK/AppIndicator libraries yourself. |
 | macOS (Apple Silicon) | `agent-power-guard-macos-aarch64.tar.gz` | M1 and newer. |
 | macOS (Intel) | `agent-power-guard-macos-x86_64.tar.gz` | |
+| macOS (universal) | `AgentPowerGuard-macos-universal.zip` | `Agent Power Guard.app` bundle (arm64 + x86_64 via `lipo`). |
 
 ### Package managers
-
-Install Agent Power Guard directly via your preferred package manager:
 
 ```bash
 # Windows (WinGet)
@@ -71,6 +97,8 @@ brew install subham-maity/tap/agent-power-guard
 yay -S agent-power-guard-bin
 ```
 
+Package manager manifests (winget, Scoop, Chocolatey, Homebrew tap, AUR) are maintained in the [`packaging/`](packaging/) directory and automatically published upon GitHub Releases tags via CI. Direct installation via GitHub Releases (`.msi`, `.deb`, macOS universal `.zip`) and `cargo install` is available immediately.
+
 ### Windows
 
 Run the `.msi` and follow the wizard, then start **Agent Power Guard** from the Start Menu. For a silent install:
@@ -79,7 +107,7 @@ Run the `.msi` and follow the wizard, then start **Agent Power Guard** from the 
 msiexec /i AgentPowerGuard-windows-x64.msi /qn
 ```
 
-The Windows build requests administrator rights at launch (UAC prompt). It needs them to change power settings and acquire the shutdown privilege required to suspend the machine.
+The executable embeds an application manifest configured for standard user execution (`ExecutionLevel::AsInvoker` in `build.rs`). CLI subcommands (`status`, `lease`, `wol`, `run`, `mcp`, `postpone`) and the background `daemon` run immediately without UAC elevation prompts. On Windows, system sleep privileges (`SeShutdownPrivilege`) are acquired at runtime when an interactive session triggers sleep.
 
 ### Linux
 
@@ -89,7 +117,7 @@ cd agent-power-guard
 ./agent-power-guard
 ```
 
-Input idle time is read through `xprintidle`, and the tray icon needs GTK 3 and AppIndicator libraries, which most desktop distributions already ship:
+Input idle time is read through `xprintidle` under X11 (Wayland sessions query D-Bus first, see [Background service and packaging](#background-service-and-packaging)). The tray icon needs GTK 3 and AppIndicator libraries, which most desktop distributions already ship:
 
 ```bash
 sudo apt install xprintidle   # Debian / Ubuntu
@@ -107,9 +135,11 @@ On first launch Gatekeeper may block the binary. Open **System Settings > Privac
 ### Verify a download
 
 ```bash
-sha256sum -c SHA256SUMS.txt          # Linux / macOS (shasum -a 256 -c on macOS)
-Get-FileHash .\AgentPowerGuard-windows-x64.msi   # Windows (PowerShell)
+sha256sum -c SHA256SUMS.txt                       # Linux (shasum -a 256 -c on macOS)
+Get-FileHash .\AgentPowerGuard-windows-x64.msi    # Windows (PowerShell)
 ```
+
+Release binaries are not signed with a paid code-signing certificate (see [Troubleshooting](#troubleshooting)).
 
 ## Quick start
 
@@ -117,7 +147,7 @@ Get-FileHash .\AgentPowerGuard-windows-x64.msi   # Windows (PowerShell)
 2. Take your hands off the mouse and keyboard.
 3. Watch the countdown. If a condition shows **BLOCKING SLEEP**, its reason is listed (recent input, disk activity, an active download, and so on).
 4. When every condition passes and the countdown reaches zero, the machine suspends. Move the mouse to wake it; the watchdog restarts its cycle automatically.
-5. Switch to a real preset (the default is 3 minutes) once you're happy with the thresholds.
+5. Switch to a real preset (the default is 3 minutes) once you are happy with the thresholds.
 
 ## How it works
 
@@ -139,7 +169,7 @@ Any blocking condition resets the countdown. Resuming from sleep also resets it,
 
 ## Guard conditions
 
-Each condition can be switched off and tuned independently.
+Each condition can be switched off and tuned independently. The numbering below matches the `condN_pass` fields of the HTTP API.
 
 | # | Condition | Blocks sleep when | Default |
 |---|---|---|---|
@@ -157,13 +187,15 @@ Each condition can be switched off and tuned independently.
 
 Notes on the less obvious ones:
 
-- **Condition 2** normalises per-process CPU against total logical cores, so a process showing 16% in Task Manager on an 8-core machine counts as 2.0%. The default watch list is `antigravity, language_server, cursor, claude, gemini, code, node, npm, pnpm, bun, tsc, esbuild, vite, next, nest, git, cargo, rustc, python, docker, wsl` and can be edited from **Edit Process Keywords**.
+- **Condition 2** normalises per-process CPU against total logical cores, so a process showing 16 % in Task Manager on an 8-core machine counts as 2.0 %. The default watch list is `antigravity, language_server, cursor, claude, gemini, code, node, npm, pnpm, bun, tsc, esbuild, vite, next, nest, git, cargo, rustc, python, docker, wsl` and can be edited from **Edit Process Keywords**.
 - **Condition 7** stops short background noise (search indexing, antivirus scans, browser refreshes) from resetting the countdown indefinitely.
-- **Condition 9** can override wake locks held by virtual audio devices (VB-Audio, Voicemeeter) and paused browser media, which are a common cause of machines that never sleep.
+- **Condition 9** can override wake locks held by virtual audio devices (VB-Audio, Voicemeeter) and paused browser media, a common cause of machines that never sleep.
 - **Condition 10** loads `nvml.dll` at runtime, so there is no CUDA SDK dependency. AMD and Intel GPUs fall back to OS counters.
-- **Condition 11** reads the Windows `CapabilityAccessManager\ConsentStore` registry keys and PulseAudio / PipeWire capture streams on Linux.
+- **Condition 11** reads the Windows `CapabilityAccessManager\ConsentStore` registry keys, and PulseAudio / PipeWire capture streams on Linux (CoreAudio on macOS).
 
-## Presets
+## Presets, power modes and schedules
+
+### Presets
 
 | Preset | Sleep after | Display off |
 |---|---|---|
@@ -178,41 +210,123 @@ Notes on the less obvious ones:
 | 2h / 3h | 2-3 h | 45-60 min |
 | Custom | 10 s - 3 h | 1 min - 3 h |
 
-## Agent integration
+### Operational power modes
 
-Autonomous agents and long-running scripts can hold sleep off dynamically. For a complete guide covering copy-paste setup for **Claude Code**, **Cursor**, and **Antigravity**, see [`docs/agents.md`](docs/agents.md).
+Switch strategies without reconfiguring sliders (GUI, tray menu, or `POST /api/mode`):
 
-### 1. Process Wrapper (`run` - Recommended)
+| Mode | Idle | Display timeout | Agent CPU |
+|---|---|---|---|
+| Balanced (default) | 3 min | 2 min | 2.0 % |
+| Work | 10 min | 5 min | 1.0 % |
+| Night | 1 min | 1 min | 1.0 % |
+| Away | 30 s | 1 min | not specified |
+| Custom | user-defined thresholds are preserved | | |
 
-The simplest way to run any agent or long task without worrying about stale leases. It automatically tracks the process ID (PID) and releases power hold immediately when the process completes or crashes:
+The tray icon's right-click menu switches modes, starts a 1-hour Keep Awake, or postpones sleep (+15 min).
+
+### Quiet hours
+
+- Configure automated quiet periods (for example `23:00` to `07:00`).
+- During quiet hours the watchdog downshifts to the aggressive `Night` or `Away` thresholds.
+- **Sleep After Lease Ends** puts the machine to sleep the moment an agent task or wrapped build completes, even overnight.
+
+### Laptop battery awareness
+
+- Detects AC versus battery discharge via `GetSystemPowerStatus` (Windows), `/sys/class/power_supply` (Linux) and `pmset -g batt` (macOS). Desktops without a battery are unaffected.
+- **Battery profile:** shorter idle timeout (default 60 s) and tighter CPU limit (default 1.0 %) when unplugged.
+- **Emergency low-battery sleep:** forces sleep or hibernate below a critical cutoff (default 15 %).
+
+### Scheduled wake timers
+
+Schedule recurring or one-off wake events (for example `02:00` for a backup or CI job) with native OS facilities: Windows Task Scheduler (`-WakeToRun`), Linux `rtcwake`, macOS `pmset schedule wake`. After waking, the watchdog resumes monitoring and returns the machine to sleep once conditions are idle. Also available as `POST /api/wake_timer/add`.
+
+## Configuration and data files
+
+Agent Power Guard runs with zero mandatory environment variables. All watchdog settings, condition thresholds, power profiles, and the `ignored_processes` list are automatically persisted to `config.json` in the user configuration directory.
+
+| File | Purpose | Windows | Linux | macOS |
+|---|---|---|---|---|
+| `config.json` | Watchdog thresholds, profiles & settings | `%APPDATA%\AgentPowerGuard\` | `~/.config/agent-power-guard/` | `~/Library/Application Support/AgentPowerGuard/` |
+| `api_token.txt` | 256-bit API auth token (0600 on Unix) | `%APPDATA%\AgentPowerGuard\` | `~/.config/agent-power-guard/` | `~/Library/Application Support/AgentPowerGuard/` |
+| `energy_history.json` | Energy tracking data | `%APPDATA%\AgentPowerGuard\` | `~/.config/agent-power-guard/` | `~/Library/Application Support/AgentPowerGuard/` |
+| `block_history.jsonl` | Block-reason history (JSON Lines) | `%APPDATA%\AgentPowerGuard\` | `~/.config/agent-power-guard/` | `~/Library/Application Support/AgentPowerGuard/` |
+
+Network defaults:
+
+| Item | Value |
+|---|---|
+| HTTP API and dashboard port | `49281` |
+| Bind address | `127.0.0.1` (LAN access is opt-in from the **Web & Mobile Remote** tab) |
+| Wake relay port | passed as an argument (`agent-power-guard relay 49282` in the examples) |
+| Wake-on-LAN default | broadcast `255.255.255.255`, UDP port `9` |
+
+## Usage
+
+### 1. Process wrapper (`run`, recommended)
+
+Runs any agent or long task and ties the lease to the child's PID. The lease is released when the process exits or crashes (the watchdog notices a dead PID within 1-2 seconds), `Ctrl+C` terminates the child gracefully and releases the lease, and the child's exit code is forwarded.
 
 ```bash
 # Wrap Claude Code
 agent-power-guard run -- claude
 
-# Wrap long build or test command
+# Wrap a long build or test command
 agent-power-guard run -- cargo test --workspace
 
-# Specify a custom reason and maximum safety timeout (e.g., 120 minutes)
+# Custom reason and a maximum safety timeout of 120 minutes
 agent-power-guard run --max-mins 120 --reason "LoRA fine-tuning" -- python train.py
 ```
 
-### 2. Model Context Protocol (MCP) Server
+### 2. Model Context Protocol (MCP) server
 
-Agent Power Guard provides a native stdio MCP server (`agent-power-guard mcp`) allowing AI agents to request sleep prevention autonomously:
+`agent-power-guard mcp` is a stdio MCP server exposing:
 
-- **Exposed tools:** `keep_awake(minutes, reason)`, `release()`, `status()`, `postpone(minutes)`.
-- **Claude Code:** `claude mcp add agent-power-guard -- agent-power-guard mcp`
-- **Cursor & Antigravity:** Configure `agent-power-guard mcp` as a stdio command in `.cursor/mcp.json` or agent settings.
-- See detailed configurations in [`docs/agents.md`](docs/agents.md).
+| Tool | Description |
+|---|---|
+| `keep_awake(minutes, reason)` | Request a keep-awake lease |
+| `release()` | Release the active agent lease |
+| `status()` | Countdown, failing blockers and lease details |
+| `postpone(minutes)` | Defer automated sleep |
 
-### 3. Agent Profiles & Noise Filtering
+Claude Code:
 
-Quickly switch presets for your specific developer environment under **Conditions > Watched Agent Processes**:
-- **Built-in profiles:** Claude Code, Cursor, Antigravity, Ollama, Docker, Rust/Cargo, Node/JS, Python ML.
-- **Ignore list (`ignored_processes`):** Excludes noisy background daemon processes (e.g. language servers, telemetry) from resetting the sleep timer.
+```bash
+claude mcp add agent-power-guard -- agent-power-guard mcp
+```
 
-### 4. CLI Commands
+Claude Code (`~/.claude.json` or `.claude/config.json`), Cursor (`.cursor/mcp.json`) and Antigravity all accept the same entry:
+
+```json
+{
+  "mcpServers": {
+    "agent-power-guard": {
+      "command": "agent-power-guard",
+      "args": ["mcp"]
+    }
+  }
+}
+```
+
+In Cursor you can instead use **Settings > Features > MCP > + Add New MCP Server** with type `command` and command `agent-power-guard mcp`. Shell-hook alternative for any agent: run `agent-power-guard lease 60 "Claude agent running"` before a task and `agent-power-guard release` afterwards. See [`docs/agents.md`](docs/agents.md) for the full guide.
+
+### 3. Agent profiles and noise filtering
+
+Select a profile under **Conditions > Watched Agent Processes**:
+
+| Profile | Process names |
+|---|---|
+| Claude Code | `claude, node` |
+| Cursor | `cursor, node, code` |
+| Antigravity | `antigravity, python, node` |
+| Ollama / Local LLM | `ollama, llama-box, text-generation-launcher` |
+| Docker | `docker, dockerd, com.docker.backend` |
+| Rust / Cargo | `cargo, rustc, rust-analyzer` |
+| Node / JS | `node, bun, deno, pnpm` |
+| Python ML | `python, python3, jupyter, torchrun` |
+
+`ignored_processes` excludes noisy background processes (language-server spikes, Git background indexers, telemetry agents) from resetting the timer. It can also be changed with `POST /api/ignore/add` and `/api/ignore/remove`, or with the **+ Ignore** button in the dashboard.
+
+### 4. CLI reference
 
 ```bash
 agent-power-guard lease 30 "Compiling LLVM release"   # hold for 30 minutes
@@ -221,27 +335,27 @@ agent-power-guard status                              # current state as JSON
 agent-power-guard postpone 15                         # delay sleep by 15 minutes
 agent-power-guard sleep                               # suspend now
 agent-power-guard wol 00:11:22:33:44:55               # send Wake-on-LAN magic packet
-agent-power-guard daemon                              # run headless watchdog service (no GUI)
+agent-power-guard wol 00:11:22:33:44:55 192.168.1.255 # ... to a specific broadcast address
+agent-power-guard daemon                              # headless watchdog (no GUI)
 agent-power-guard service install                     # register background autostart service/task
 agent-power-guard service uninstall                   # unregister background service
 agent-power-guard service status                      # inspect background service status
-agent-power-guard relay 49282                         # launch Wake-on-LAN micro-relay server
+agent-power-guard relay 49282                         # Wake-on-LAN micro-relay server
+agent-power-guard mcp                                 # stdio MCP server
+agent-power-guard run [--max-mins N] [--reason TEXT] -- <command>
 ```
 
-### 5. HTTP API & Security
+`wol` accepts standard MAC formats (`00:11:22:33:44:55`, `00-11-22-33-44-55`, or `001122334455`) with an optional custom broadcast target (e.g. `192.168.1.255:9`). Additional commands include `daemon` (headless background watchdog), `service [install|uninstall|status|run]` (system service registration), and `relay [port]` (standalone Wake-on-LAN micro-relay).
 
-The app serves a local API on port `49281`. By default, it binds exclusively to `127.0.0.1` and generates a secure random 256-bit token on first run.
+### 5. HTTP API
 
-#### Authentication & Headers
-- All `/api/*` endpoints require the token passed via header:
-  `Authorization: Bearer <token>` or `X-APG-Token: <token>`
-- The CLI reads the token automatically from `%APPDATA%\AgentPowerGuard\api_token.txt` (`~/.config/agent-power-guard/api_token.txt` on Unix).
-- DNS rebinding and cross-origin attacks are prevented with strict `Host` and `Origin` validation.
-- LAN access can be enabled from the **Web & Mobile Remote** tab.
+The app serves a local API on port `49281`. It binds to `127.0.0.1` and generates a random 256-bit token on first run.
+
+**Authentication.** All `/api/*` endpoints require the token in `Authorization: Bearer <token>` or `X-APG-Token: <token>`. The CLI reads the token from `api_token.txt` (see [Configuration](#configuration-and-data-files)). Missing or invalid tokens return `401 Unauthorized`; IPs exceeding 10 failed authentication attempts per minute return `429 Too Many Requests` (`Retry-After: 60`). Constant-time comparison is used to prevent timing attacks. All API responses include `Access-Control-Allow-Origin: *` to enable remote web dashboard access.
 
 | Endpoint | Method | Parameters | Description |
 |---|---|---|---|
-| `/` | GET | `#t=<token>` | Remote dashboard (token loaded in URL fragment) |
+| `/` | GET | `#t=<token>` | Remote dashboard (token read from the URL fragment) |
 | `/api/status` | GET | | Countdown, conditions, blocking reasons, leases |
 | `/api/sleep` | POST | | Suspend immediately |
 | `/api/postpone` | POST | `mins=15` | Postpone sleep |
@@ -252,15 +366,15 @@ The app serves a local API on port `49281`. By default, it binds exclusively to 
 | `/api/schedule/stay_awake` | POST | `mins=60` | Schedule temporary keep-awake |
 | `/api/wake_timer/add` | POST | `time=02:00&label=Backup` | Schedule an OS RTC / Task Scheduler wake timer |
 | `/api/wake_timer/delete` | POST | `id=<timer_id>` | Delete a scheduled wake timer |
-| `/api/history` | GET | | Retrieve recent block-reason history records |
+| `/api/history` | GET | | Recent block-reason history records |
 | `/api/history/clear` | POST | | Clear block-reason history |
 | `/api/ignore/add` | POST | `process=<name>` | Add a process keyword to the ignore list |
 | `/api/ignore/remove` | POST | `process=<name>` | Remove a process keyword from the ignore list |
-| `/api/peers` | GET | | Retrieve configured multi-machine fleet peers |
-| `/api/peers/add` | POST | `name=&url=&token=&permission=&mac=` | Add or update a fleet peer machine |
-| `/api/peers/remove` | POST | `id=<peer_id>` | Remove a fleet peer machine |
-| `/api/wol` | POST | `mac=&bcast=` | Broadcast Wake-on-LAN magic packet |
-| `/api/notify/test` | POST | | Send a test notification across configured channels |
+| `/api/peers` | GET | | Configured fleet peers |
+| `/api/peers/add` | POST | `name=&url=&token=&permission=&mac=` | Add or update a fleet peer |
+| `/api/peers/remove` | POST | `id=<peer_id>` | Remove a fleet peer |
+| `/api/wol` | POST | `mac=&bcast=` | Broadcast a Wake-on-LAN magic packet |
+| `/api/notify/test` | POST | | Send a test notification on all configured channels |
 | `/api/energy/clear` | POST | | Clear energy history |
 
 Abridged `/api/status` response:
@@ -278,191 +392,149 @@ Abridged `/api/status` response:
 }
 ```
 
-Python example:
+Other fields consumed by the bundled dashboard: `agent_lease_reason`, `agent_lease_remaining_secs`, `cond1_pass` through `cond6_pass`, `cond10_pass`, `cond11_pass`, `live_agent_proc`, `live_gpu`, `live_download`, `live_mic_cam_active`, `live_mic_cam_app`, `live_pc_cpu`, `live_pc_disk`, `live_pc_net`, `spike_counter`, `spike_limit`, `power_request_active`, `active_mode`, `local_ip`, `mac_address`, `currency_symbol`, `co2_factor`, `history` (`agent_cpu`, `gpu`, `pc_cpu`, `pc_net` arrays), `top_processes` (`name`, `cpu_pct`, `is_agent`, `is_ignored`) and `energy` (`cost_saved`, `kwh_saved`, `duration_secs`, `co2_saved`).
+
+The dashboard's on-screen condition numbering differs from the table above; rely on the `condN_pass` field names.
+
+curl:
+
+```bash
+TOKEN=$(cat ~/.config/agent-power-guard/api_token.txt)
+curl -X POST -H "Authorization: Bearer $TOKEN" "http://127.0.0.1:49281/api/lease?mins=45&reason=Build"
+curl -H "Authorization: Bearer $TOKEN" http://127.0.0.1:49281/api/status
+curl -X POST -H "Authorization: Bearer $TOKEN" http://127.0.0.1:49281/api/release
+```
+
+Python (Windows uses `%APPDATA%`; elsewhere `~/.config`):
 
 ```python
 import os
 import urllib.request
 from pathlib import Path
 
-# Load secure token from config
-token_path = Path(os.environ.get("APPDATA", "")) / "AgentPowerGuard" / "api_token.txt"
+appdata = os.environ.get("APPDATA")
+token_path = (
+    Path(appdata) / "AgentPowerGuard" / "api_token.txt"
+    if appdata
+    else Path.home() / ".config" / "agent-power-guard" / "api_token.txt"
+)
 token = token_path.read_text().strip()
 
 base = "http://127.0.0.1:49281"
-req = urllib.request.Request(
-    f"{base}/api/lease?mins=45&reason=PyTorch+Training",
-    data=b"",
-    headers={"Authorization": f"Bearer {token}"}
-)
+headers = {"Authorization": f"Bearer {token}"}
+
+req = urllib.request.Request(f"{base}/api/lease?mins=45&reason=PyTorch+Training", data=b"", headers=headers)
 urllib.request.urlopen(req)
 
 # ... run long job ...
 
-req = urllib.request.Request(
-    f"{base}/api/release",
-    data=b"",
-    headers={"Authorization": f"Bearer {token}"}
-)
+req = urllib.request.Request(f"{base}/api/release", data=b"", headers=headers)
 urllib.request.urlopen(req)
 ```
 
 ## Remote dashboard
 
-The built-in web server exposes a responsive, mobile-first dashboard designed for phones, tablets, and remote browsers on your local network.
+The embedded web server serves a responsive, mobile-first dashboard (`assets/dashboard.html`, a single static file with no build step and no external scripts or CDNs). LAN access is enabled from the **Web & Mobile Remote** tab.
 
-### 1. Instant QR Code Pairing
-- Open the **Web & Mobile Remote** tab in the desktop app.
-- A high-resolution QR code is rendered natively using a zero-dependency QR generator.
-- Point your phone's camera at the screen to immediately open the dashboard with your secure authentication token pre-loaded in the URL fragment (`#t=<token>`). No manual token typing required.
-- *Security Note:* The pairing URL grants full remote control over sleep, leases, and power modes; do not share or publish screenshots of the QR code.
+- **QR pairing.** The tab renders a QR code (generated by the built-in encoder in `src/qr.rs`: versions 1-10, error-correction levels L and M, byte mode) that opens the dashboard with the token pre-loaded in the URL fragment (`#t=<token>`). The dashboard stores the token in browser `localStorage` and removes it from the address bar. The pairing URL grants full remote control; do not share or publish screenshots of the QR code. The QR encoder formats standard Version 1–10 matrices with 7×7 finder patterns and 1-module white separators across all three corners (top-left, top-right, bottom-left), verified by unit tests.
+- **Installable web app.** A web app manifest (`/manifest.json`), icons (`/icon.png`, `/apple-touch-icon.png`) and mobile viewport tags allow **Add to Home Screen** on Safari and Chrome. Over plain `http://192.168.x.x` it works as a standalone web app. For HTTPS outside your LAN, use Tailscale Serve: `tailscale serve https / http://127.0.0.1:49281`.
+- **Live sparklines.** 120-second rolling trends for agent CPU, GPU, whole-PC CPU and network, drawn as inline SVG polylines.
+- **Active processes and 1-tap ignore.** The top 8 processes by CPU are listed; agent-keyword matches are badged. **+ Ignore** appends a process to the ignore list with no restart.
+- **Multi-machine fleet.** The **Multi-Machine Fleet** tab lists configured peers with state badges (`ARMED`, `BLOCKED`, `PAUSED`, `OFFLINE`), countdowns, blockers, CPU/GPU and mode, refreshed every 3 seconds. Peers are added with name, URL, API token, permission (`control` or `view`) and an optional MAC address. `control` peers expose +15m, Sleep and Toggle; peers with a MAC expose Wake-on-LAN. Peers are stored through `/api/peers` (the dashboard falls back to browser storage if that call fails), and the browser queries each peer's `/api/status` directly. All `/api/*` endpoints and OPTIONS preflights emit `Access-Control-Allow-Origin: *`, allowing the browser dashboard to poll fleet peers seamlessly without CORS blocks.
+- **Wake-on-LAN info.** The dashboard shows the PC's LAN IP and MAC address for use with any phone WoL app.
 
-### 2. Installable Mobile Dashboard (PWA)
-- Equipped with a web app manifest (`/manifest.json`), high-resolution icons (`/icon.png`, `/apple-touch-icon.png`), and mobile viewport tags.
-- Tap **Add to Home Screen** on Safari (iOS) or Chrome (Android) to launch Agent Power Guard as a standalone, distraction-free app without browser address bars.
-- *Network Limitation:* Service workers require a secure context (HTTPS or `localhost`). Over local LAN (`http://192.168.x.x`), the dashboard functions as an installable standalone web app. For remote HTTPS outside your LAN, pair with Tailscale Serve (`tailscale serve https / http://127.0.0.1:49281`).
+### Remote wake
 
-### 3. Live Sparklines
-- 120-second rolling activity trends for **Agent CPU**, **GPU compute**, **Whole-PC CPU**, **Disk I/O**, and **Network throughput**.
-- Rendered using lightweight, inline SVG `<polyline>` graphics with zero external charting libraries or third-party CDNs to ensure zero memory overhead and instant rendering on low-power devices.
+A sleeping PC cannot serve web traffic. Send a magic packet from another machine on the LAN:
 
-### 4. Active Processes & 1-Tap Ignore
-- Inspect the top 8 running processes ranked by CPU load directly in the dashboard and desktop GUI.
-- Processes matching agent keywords are clearly badged.
-- Tap **+ Ignore** next to any false-positive process (e.g. system indexing, background backup tools) to immediately append it to the ignore list and unblock sleep with zero restarts needed.
+```bash
+agent-power-guard wol 00:11:22:33:44:55 192.168.1.255
+```
 
-### 5. Multi-Machine Fleet Dashboard
-Monitor and control multiple workstations, headless servers, and laptops simultaneously from a single browser page:
-- Switch to the **Multi-Machine Fleet** tab to view all configured peer nodes.
-- Peer nodes can be configured with **Control** permissions (triggering sleep, leases, postpone) or **View-Only** (observation).
-- Live cards update every 3 seconds with state badges (`ARMED`, `BLOCKED`, `PAUSED`, `OFFLINE`), countdown timers, agent blockers, and CPU/GPU metrics.
-- 1-click **Wake-on-LAN** button wakes sleeping peer nodes directly from the fleet interface.
+To wake a machine from outside your network, use a Tailscale subnet router, an always-on node (Raspberry Pi, NAS, router) running the relay, or your router's WoL feature. Requirements: WoL enabled in BIOS/UEFI and in the adapter properties, wired Ethernet (Wi-Fi radios power down during sleep), and Windows Fast Startup disabled. The full guide is in [`docs/remote-wake.md`](docs/remote-wake.md).
 
-### 6. Remote Wake-on-LAN (WoL)
-A sleeping PC cannot serve web traffic. To wake your workstation remotely:
-- Send a magic packet from any client or another machine on the LAN using the built-in CLI:
-  ```bash
-  agent-power-guard wol 00:11:22:33:44:55 192.168.1.255
-  ```
-- For waking your workstation from outside your home network (via Tailscale, VPN, or a Raspberry Pi subnet router), follow the comprehensive guide in [`docs/remote-wake.md`](docs/remote-wake.md).
+**Wake relay.** `agent-power-guard relay 49282` turns a lightweight device into an authenticated relay serving `GET /relay/status` and token-protected `POST /relay/wake?mac=XX:XX:XX:XX:XX:XX&bcast=...`, broadcasting magic packets onto the home LAN. The standalone relay runs without GUI, egui, or sysinfo overhead, maintaining an active footprint of ~2–3 MB of RAM.
 
-## Platform, Background Service & Native Packaging
+## Background service and packaging
 
-### 1. Headless Background Service & UI Split
-- Run the watchdog headlessly without elevation prompts or desktop UI windows:
-  ```bash
-  agent-power-guard daemon
-  ```
-- Install or remove the system background service cleanly:
-  ```bash
-  agent-power-guard service install     # Windows Scheduled Task / Linux systemd / macOS launchd
-  agent-power-guard service uninstall   # Cleanly unregisters service
-  agent-power-guard service status      # Check if watchdog daemon is active
-  ```
-- When running in service mode, closing the GUI does not stop the watchdog; power protection persists uninterrupted across logoff and window close.
+### Headless service and UI split
 
-### 2. Native Linux & Wayland Support
-- **Wayland-friendly idle detection:** Automatically queries `org.freedesktop.ScreenSaver` via D-Bus and `systemd-logind` session hints under GNOME, KDE Plasma, and wlroots, falling back gracefully to `xprintidle` under X11.
-- **Systemd User Unit:** `packaging/systemd/agent-power-guard.service` for seamless user-session management (`systemctl --user enable --now agent-power-guard`).
-- **Debian/Ubuntu Packaging:** Native `.deb` builder script (`packaging/build-deb.sh`) containing binaries, XDG desktop entries, icons, and systemd units.
+```bash
+agent-power-guard daemon              # run the watchdog without the GUI
+agent-power-guard service install     # Windows Scheduled Task / Linux systemd / macOS launchd
+agent-power-guard service uninstall
+agent-power-guard service status
+```
 
-### 3. Native macOS Packaging
-- **LaunchAgent:** `packaging/launchd/com.agentpowerguard.watchdog.plist` for launchd autostart.
-- **Application Bundle & Universal Binary:** `packaging/build-macos-app.sh` bundles an `Agent Power Guard.app` with universal binaries (`lipo` merging Apple Silicon `aarch64` and Intel `x86_64`).
+In service mode, closing the GUI does not stop the watchdog; protection persists across logoff and window close. (On Windows the executable manifest requests elevation; see [Installation](#windows).)
 
-### 4. Dedicated Wake Relay Microserver
-- Turn a lightweight Raspberry Pi, NAS, or router into an authenticated Wake-on-LAN relay:
-  ```bash
-  agent-power-guard relay 49282
-  ```
-- Serves `GET /relay/status` and token-protected `POST /relay/wake?mac=XX:XX:XX:XX:XX:XX&bcast=...` to broadcast magic packets onto the home LAN from outside your network. Memory footprint is under 3 MB RAM.
+### Linux and Wayland
+
+- Idle detection queries `org.freedesktop.ScreenSaver` over D-Bus and `systemd-logind` session hints on GNOME, KDE Plasma and wlroots, falling back to `xprintidle` under X11.
+- Systemd user unit: `packaging/systemd/agent-power-guard.service` runs `%h/.local/bin/agent-power-guard daemon`. Enable with `systemctl --user enable --now agent-power-guard`. For a `.deb` install (binary in `/usr/bin`), adjust `ExecStart` or symlink the binary into `~/.local/bin`.
+- `packaging/build-deb.sh` builds the `.deb` (binary, XDG desktop entry, 32x32 icon, systemd unit).
+
+### macOS
+
+- `packaging/launchd/com.agentpowerguard.watchdog.plist` runs `/usr/local/bin/agent-power-guard daemon` at load with `KeepAlive`; install the binary there first. Logs go to `/tmp/agent-power-guard.stdout.log` and `.stderr.log`.
+- `packaging/build-macos-app.sh` bundles `Agent Power Guard.app` (minimum macOS 11.0) and creates a universal binary with `lipo` when both architecture builds exist.
 
 ## Energy tracking
 
-The **Energy & Cost Savings** tab estimates what suspending and display-off saved you: sleep sessions, monitor-off events, active versus sleep hours, kWh, money and CO2. Filter by today, 7 days, this month, this year or all time.
+The **Energy & Cost Savings** tab estimates what suspend and display-off saved: sleep sessions, monitor-off events, active versus sleep hours, kWh, money and CO2. Filter by today, 7 days, this month, this year or all time.
 
-Estimates use configurable wattage and tariff values (defaults: 120 W active system, 45 W display, 2 W sleep). Recording can be turned off at any time, and everything is stored locally as plain JSON:
+- Defaults: 120 W active system, 45 W display, 2 W sleep; wattage and tariff are configurable.
+- Recording can be turned off at any time. Data is plain local JSON (`energy_history.json`, see [Configuration](#configuration-and-data-files)) that can be inspected, backed up or deleted without affecting the app. Nothing is sent anywhere.
 
-| OS | Location |
+**Regional carbon intensity.** Select a grid profile or enter a custom g/kWh value:
+
+| Profile | g CO2 / kWh |
 |---|---|
-| Windows | `%APPDATA%\AgentPowerGuard\energy_history.json` |
-| Linux | `~/.config/agent-power-guard/energy_history.json` |
-| macOS | `~/Library/Application Support/agent-power-guard/energy_history.json` |
+| US Average | 368 |
+| US California (CAMX) | 205 |
+| US Texas (ERCO) | 380 |
+| European Union | 230 |
+| United Kingdom | 148 |
+| Germany | 380 |
+| France | 52 |
+| India | 713 |
+| Australia | 510 |
+| Global Average | 436 |
+| Custom | user-defined |
 
-The file can be inspected, backed up or deleted without affecting the app. Nothing is sent anywhere.
+Currency symbols: `$`, `€`, `£`, `₹`, `¥`, `C$`, `A$`. The desktop app and the remote dashboard both use the `co2_saved` value computed from the configured factor.
 
-### Accurate Regional Carbon Grid & Currency
+## Block-reason history
 
-Electricity generation carbon intensity varies dramatically across power grids:
-- **Bundled grid-intensity factors:** Select from 11 verified regional profiles including **US Average (368 g/kWh)**, **US California CAMX (205 g/kWh)**, **US Texas ERCO (380 g/kWh)**, **European Union (230 g/kWh)**, **United Kingdom (148 g/kWh)**, **Germany (380 g/kWh)**, **France (52 g/kWh)**, **India (713 g/kWh)**, **Australia (510 g/kWh)**, **Global Average (436 g/kWh)**, or enter a **Custom** g/kWh intensity.
-- **Multi-currency support:** Choose from `$`, `€`, `£`, `₹`, `¥`, `C$`, `A$` for accurate localized financial reporting.
-- **Dynamic API reporting:** Both the desktop app and the remote web dashboard consume dynamic `co2_saved` values directly calculated from the configured regional factor, completely eliminating inaccurate hardcoded estimates.
+The **Block History** tab shows what prevented sleep:
 
-## Power modes, scheduling & laptop battery profiles
+- **Top blockers leaderboard:** blocking processes and conditions ranked by cumulative hold time (for example `Agent CPU: 2h 15m`).
+- **"Last Night" summary:** the overnight 12-hour window, with total blocked time, the dominant blocker and the timestamp sleep was reached.
+- **Event timeline:** start time, duration, primary condition and concurrent blockers per event.
+- **Export:** CSV or JSON in one click; history can be cleared at any time (`POST /api/history/clear`).
+- **Storage:** JSON Lines in `block_history.jsonl`, size-based rotation at a 5 MB cap, configurable retention (default 14 days).
 
-### 1. Operational Power Modes
-Quickly change power strategies without manually reconfiguring sliders:
-- **Balanced (default):** 3-minute idle, 2-minute display timeout, 2.0% agent CPU.
-- **Work:** 10-minute idle, 5-minute display timeout, 1.0% agent CPU — perfect for long reading or active pair programming sessions.
-- **Night:** 1-minute idle, 1-minute display timeout, 1.0% agent CPU — aggressive power reduction.
-- **Away:** 30-second idle, 1-minute display timeout — immediate standby when leaving your workstation.
-- **Custom:** Preserve user-customized condition thresholds.
-- **System Tray Quick Actions:** Right-click the tray icon to switch modes, activate 1-hour Keep Awake, or postpone sleep (+15m) instantly.
+## Alerts and update checks
 
-### 2. Quiet Hours & Night Schedules
-- Configure automated quiet periods (e.g. `23:00` to `07:00`).
-- The watchdog automatically downshifts to aggressive thresholds (`Night` or `Away`) during quiet hours.
-- **Sleep After Lease Ends:** Automatically put the machine into deep sleep the moment an autonomous agent task or wrapped build completes, even in the middle of the night.
+The **Alerts & Updates** tab configures notifications. Everything is off by default, and outbound requests go only to destinations you configure. Network calls run on a dedicated worker thread so the 1 Hz watchdog loop is never delayed.
 
-### 3. Laptop Battery Awareness
-- Detects AC mains vs DC battery discharge across Windows (`GetSystemPowerStatus`), Linux (`/sys/class/power_supply`), and macOS (`pmset -g batt`).
-- **Automatic Battery Profile:** Applies shorter idle timeouts (default: 60s) and tighter CPU limits (default: 1.0%) when unplugged. Desktops without a battery are unaffected.
-- **Emergency Low-Battery Sleep:** Automatically forces sleep or hibernate when battery drops below a critical safety cutoff (default: 15%) to prevent unexpected shutdown and lost work.
-
-### 4. Scheduled Wake Timers
-- Schedule recurring or one-off wake events at specific times (e.g. `02:00 AM` for scheduled backups or CI jobs).
-- Uses native OS facilities: Windows Task Scheduler (`-WakeToRun`), Linux `rtcwake`, or macOS `pmset schedule wake`.
-- Once awake, Agent Power Guard resumes active monitoring and returns the machine to deep sleep as soon as conditions become idle.
-
-## Block-reason history ("What kept my PC awake")
-
-When your machine doesn't sleep as expected, the **Block History** tab provides an exact timeline of what prevented it:
-
-- **Top Blockers Leaderboard:** Ranks blocking processes and conditions by total cumulative hold duration (e.g. `Agent CPU: 2h 15m`, `Active Download: 45m`).
-- **"Last Night" Overnight Summary:** Focuses on the overnight 12-hour window, summarizing total blocked time, the dominant blocking process, and the exact timestamp sleep was reached.
-- **Event Timeline:** Inspect individual block events with start time, duration, primary condition, and other concurrent blockers.
-- **Data Export:** Export logs with one click to CSV or JSON, or clear history anytime.
-- **Bounded Storage & Rotation:** Stored locally in JSON Lines format (`block_history.jsonl`) with automatic size-based rotation (5 MB cap) and configurable retention days (default: 14 days).
-
-| OS | Location |
+| Channel | Configuration |
 |---|---|
-| Windows | `%APPDATA%\AgentPowerGuard\block_history.jsonl` |
-| Linux | `~/.config/agent-power-guard/block_history.jsonl` |
-| macOS | `~/Library/Application Support/agent-power-guard/block_history.jsonl` |
+| ntfy | ntfy.sh or a self-hosted server; optional authentication token |
+| Telegram | `bot_token` and `chat_id` (Telegram Bot API) |
+| Generic webhook | HTTP POST with a JSON payload (Discord, Slack, Home Assistant, custom servers) |
 
-## Alerts & notifications
+| Event | Trigger |
+|---|---|
+| Sleep imminent | 30-second pre-sleep warning when all conditions pass |
+| Machine blocked long | One condition or agent holds the PC awake longer than N hours (default 2) |
+| Lease ended | An agent task or build lease concludes |
+| PC resumed | The system wakes from sleep |
+| Guard paused long | The master guard stayed disabled longer than N hours (default 2 hours, configurable 1–24h) |
 
-Stay informed about power events on your phone or desktop via the **Alerts & Updates** tab.
+`POST /api/notify/test` sends a test notification to all configured channels.
 
-### Supported Channels
-- **ntfy:** Real-time push notifications to [ntfy.sh](https://ntfy.sh) or self-hosted ntfy servers (optional authentication token supported).
-- **Telegram:** Push alerts to your private chat or team channel via Telegram Bot API (`bot_token` and `chat_id`).
-- **Generic Webhook:** HTTP POST JSON payload to Discord, Slack, Home Assistant, or custom automation servers.
-
-### Configurable Events
-- **Sleep Imminent:** 30-second pre-sleep warning when all conditions pass.
-- **Machine Blocked Long:** Alerts if a single condition or agent holds the PC awake for longer than $N$ hours (default: 2 hours).
-- **Lease Ended:** Notifies when an agent task or build lease concludes.
-- **PC Resumed:** Alerts when the system wakes up from sleep.
-- **Guard Paused Long:** Reminds you if master guard protection was left disabled for longer than $N$ hours.
-
-*Zero Telemetry Guarantee:* Off by default. Outbound requests are made only to the destinations you configure. Network calls run asynchronously in a dedicated worker thread, ensuring the 1 Hz watchdog loop is never delayed.
-
-## Opt-in software updates
-
-- **Private & Non-intrusive:** When enabled in **Alerts & Updates**, Agent Power Guard checks GitHub Releases once per 24 hours.
-- **No telemetry:** No machine identifiers, tracking cookies, or analytics are sent.
-- **Direct notifications:** If a newer release exists, a non-intrusive banner appears in the top navigation bar with a direct link to the release notes.
+**Update check (opt-in).** When enabled, the app checks GitHub Releases once per 24 hours. No machine identifiers or analytics are sent. A newer release shows a banner in the top bar linking to the release notes.
 
 ## Architecture
 
@@ -489,7 +561,7 @@ Key decisions:
 - **The watchdog is independent of the UI.** `eframe` stops running UI code when the window is minimized or the display is off, which is exactly when the sleep timer matters. All timing, sampling and decisions run on a dedicated thread; the GUI, tray, HTTP server and CLI only read and mutate shared state.
 - **Small memory footprint by design.** The renderer is `glow` (OpenGL) rather than `wgpu`, repaints are throttled to 1 Hz, and the working set is trimmed when the window is hidden in the tray.
 - **Allocation-free sampling.** A single `System`, `Networks` and `Disks` instance is created once and refreshed selectively each second instead of calling `refresh_all()`.
-- **Native OS APIs, no helper processes.** Windows uses `windows-sys`; Linux and macOS use the platform tools listed below. Release builds use fat LTO, a single codegen unit, `panic = "abort"` and symbol stripping.
+- **Native OS APIs, no helper processes.** Windows uses `windows-sys`; Linux and macOS use the platform tools listed below. Release builds use fat LTO, one codegen unit, `panic = "abort"` and symbol stripping.
 - **No frontend build step.** The remote dashboard is a single static HTML file served by the embedded HTTP server.
 
 | Component | Crate |
@@ -498,23 +570,49 @@ Key decisions:
 | System sampling | `sysinfo` |
 | Tray | `tray-icon` |
 | Serialization | `serde`, `serde_json` |
+| Images | `image` (png, ico) |
 | Windows APIs | `windows-sys` |
 | Windows packaging | `embed-manifest`, `winres`, WiX Toolset v3 |
+| QR codes | in-tree `src/qr.rs` (no dependency) |
 
 ## Platform support
 
 | Capability | Windows | Linux | macOS |
 |---|---|---|---|
 | System sleep | `SetSuspendState` | `systemctl suspend` | `pmset sleepnow` |
-| Input idle | `GetLastInputInfo` | `xprintidle` / X11 | `ioreg` (`HIDIdleTime`) |
+| Input idle | `GetLastInputInfo` | `xprintidle` / X11, Wayland D-Bus | `ioreg` (`HIDIdleTime`) |
 | Display timeout | `powercfg` | `xset dpms` / Wayland DBus | `pmset displaysleep` |
 | GPU monitoring | NVML (dynamic) | DRM sysfs | IOAccelerator |
 | Meeting detection | `ConsentStore` registry | PulseAudio / PipeWire | CoreAudio |
 | Autostart | Task Scheduler / Startup | `~/.config/autostart` | `~/Library/LaunchAgents` |
 
+## Project structure
+
+```
+.
+├── Cargo.toml                 package manifest (binary: src/app.rs)
+├── build.rs                   Windows manifest (RequireAdministrator) and icon resources
+├── build-msi.ps1              builds the Windows MSI with WiX v3.14
+├── generate-icon.ps1          regenerates assets\app.ico (Windows PowerShell, System.Drawing)
+├── src/
+│   ├── app.rs                 binary entry point
+│   ├── qr.rs                  dependency-free QR encoder (versions 1-10, EC L/M)
+│   └── main.rs                legacy single-module reference (superseded by src/app.rs)
+├── assets/
+│   ├── dashboard.html         remote dashboard (single static file)
+│   └── ...                    app.ico, icon_32.png and other icons
+├── docs/
+│   ├── agents.md              agent integration guide
+│   └── remote-wake.md         Wake-on-LAN guide
+├── packaging/                 .deb, macOS .app, systemd, launchd, winget, Scoop,
+│                              Chocolatey, Homebrew and AUR manifests
+├── wix/                       main.wxs and license.rtf for the MSI
+└── .github/workflows/         ci.yml and release.yml
+```
+
 ## Building from source
 
-Requires a recent stable Rust toolchain (`rust-version` is declared in `Cargo.toml`).
+Requires a stable Rust toolchain at or above the `rust-version` declared in `Cargo.toml` (currently 1.95).
 
 ```bash
 git clone https://github.com/Subham-Maity/agent-power-guard.git
@@ -530,19 +628,50 @@ sudo apt install -y pkg-config libx11-dev libxext-dev libxrandr-dev libxinerama-
   libwayland-dev xprintidle libgtk-3-dev libayatana-appindicator3-dev
 ```
 
-To build the Windows MSI, install [WiX Toolset v3.14](https://wixtoolset.org/) and run:
+Packaging (run after `cargo build --release`):
 
 ```powershell
-.\build-msi.ps1
+# Windows MSI: requires WiX Toolset v3.14 at C:\Program Files (x86)\WiX Toolset v3.14\bin
+.\build-msi.ps1          # writes target\installer\AgentPowerGuard-<version>-x64.msi
 ```
 
-The installer is written to `target\installer`. `generate-icon.ps1` regenerates `assets\app.ico`.
+```bash
+mkdir -p dist
+bash packaging/build-deb.sh          # Linux: dist/agent-power-guard_<version>_amd64.deb (needs dpkg-deb)
+bash packaging/build-macos-app.sh    # macOS: dist/AgentPowerGuard-macos-universal.zip (uses lipo)
+```
+
+## Development, CI and releases
+
+CI (`.github/workflows/ci.yml`) runs on pushes and pull requests to `main` (README, LICENSE and `.gitignore` changes are ignored) and on manual dispatch. It runs the following on `x86_64-pc-windows-msvc`, `x86_64-unknown-linux-gnu` and `aarch64-apple-darwin`:
+
+```bash
+cargo check --target <target>
+cargo test --target <target>
+cargo build --release --target <target>
+```
+
+The only unit tests documented here are the QR encoder tests in `src/qr.rs`. CI does not build the Intel macOS target, run `clippy` or check formatting.
+
+**Releases.** Pushing a tag matching `v*`, or running the workflow manually with `tag_name`, triggers `.github/workflows/release.yml`. It builds the Windows MSI and portable EXE, the Linux `.tar.gz` and `.deb`, and the macOS `aarch64` and `x86_64` archives plus the universal `.app` zip. It then generates `SHA256SUMS.txt` and publishes a GitHub Release. A signing step exists as a placeholder and does not sign anything yet.
+
+**Version bump checklist.** The version string is duplicated in `Cargo.toml`, `wix/main.wxs` (`Version="x.y.z.0"`), `packaging/macos/Info.plist`, `packaging/build-deb.sh`, and the winget, Scoop, Chocolatey, Homebrew and AUR manifests. `build-msi.ps1` reads `Cargo.toml` and falls back to `1.0.2`. Package-manager manifests also need real SHA-256 values.
+
+## Security
+
+- The API and dashboard bind to `127.0.0.1` by default. Enabling LAN access exposes the dashboard over plain HTTP; use a VPN or Tailscale Serve for access outside your LAN.
+- Every `/api/*` request needs the 256-bit token. Treat `api_token.txt`, the pairing URL and the QR code as credentials: they grant control over sleep, leases and power modes.
+- `Host` and `Origin` validation protects against DNS rebinding and cross-origin requests.
+- The dashboard keeps the token (and, if the peers API is unavailable, fleet peer tokens) in browser `localStorage`. Pair only browsers you trust.
+- On Windows the application runs elevated so it can change power settings and use `SeShutdownPrivilege`.
+- No telemetry. Outbound requests go only to the notification destinations you configure and, if enabled, GitHub Releases.
+- Release binaries are not signed with a paid code-signing certificate.
 
 ## Troubleshooting
 
-**The machine never sleeps.** Open the app and look for the condition marked **BLOCKING SLEEP**; it shows the reason. The usual causes are a stuck power request (enable the override in condition 9), a background process matching the watch list (the defaults include broad names such as `code`, `node` and `git`), or a threshold that is too tight for your machine's idle noise.
+**The machine never sleeps.** Open the app and look for the condition marked **BLOCKING SLEEP**; it shows the reason. The usual causes are a stuck power request (enable the override in condition 9), a background process matching the watch list (the defaults include broad names such as `code`, `node` and `git`), or a threshold that is too tight for your machine's idle noise. The **Block History** tab and the dashboard's **+ Ignore** button help identify and exclude false positives.
 
-**Antivirus flags or removes the executable.** The app suspends the machine, acquires `SeShutdownPrivilege`, writes a startup entry and polls hardware and registry state. Those are legitimate for a power tool but look similar to suspicious behaviour to heuristic scanners, and the binary is not signed with a paid code-signing certificate. The project is open source and makes no network calls to external services. To resolve it, add an exclusion for the install folder:
+**Antivirus flags or removes the executable.** The app suspends the machine, acquires `SeShutdownPrivilege`, writes a startup entry and polls hardware and registry state. Those are legitimate for a power tool but look similar to suspicious behaviour to heuristic scanners, and the binary is not signed with a paid code-signing certificate. The project is open source and makes no network calls to external services other than those you configure. To resolve it, add an exclusion for the install folder:
 
 - **Microsoft Defender:**
   1. Open **Windows Security > Virus & threat protection > Manage settings**.
@@ -553,7 +682,15 @@ The installer is written to `target\installer`. `generate-icon.ps1` regenerates 
   3. Under **Advanced Threat Defense**, open **Settings** -> **Manage exceptions** -> add folder `C:\Program Files\AgentPowerGuard` (check *Advanced Threat Defense*).
   4. If files were quarantined, go to **Protection** -> **Antivirus** -> **Quarantine** / **Notifications** and choose **Restore**.
 
-**Wake-on-LAN doesn't work.** Check that it is enabled in both the BIOS/UEFI and the adapter properties, and that the PC is on Ethernet rather than Wi-Fi.
+**Linux: idle time is never detected.** Install `xprintidle` (X11). On Wayland the app uses D-Bus and `systemd-logind` hints first.
+
+**Linux: no tray icon.** Install GTK 3 and the AppIndicator libraries (`libgtk-3-dev`, `libayatana-appindicator3-dev` for building; the runtime equivalents otherwise).
+
+**macOS: binary blocked on first launch.** Open **System Settings > Privacy & Security** and choose **Open Anyway**.
+
+**Wake-on-LAN doesn't work.** Check that it is enabled in both the BIOS/UEFI and the adapter properties, that Windows Fast Startup is disabled, and that the PC is on Ethernet rather than Wi-Fi. See [`docs/remote-wake.md`](docs/remote-wake.md).
+
+**Dashboard shows "Authentication Required".** Open the dashboard through the link or QR code from the **Web & Mobile Remote** tab, or paste the contents of `api_token.txt` into the token field.
 
 ## Contributing
 
@@ -564,8 +701,9 @@ Bug reports, ideas and pull requests are welcome.
 3. Commit your changes: `git commit -m "feat: add my feature"`.
 4. Push the branch and open a pull request.
 
-CI builds every pull request on Windows, Linux and macOS.
+CI builds every pull request on Windows (x64), Linux (x86_64) and macOS (Apple Silicon).
 
 ## License
 
 Released under the [MIT License](LICENSE).
+``

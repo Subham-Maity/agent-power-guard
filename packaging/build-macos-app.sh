@@ -36,6 +36,7 @@ fi
 chmod 755 "${MACOS}/agent-power-guard"
 cp packaging/macos/Info.plist "${CONTENTS}/"
 cp assets/icon_32.png "${RESOURCES}/app.png"
+cp assets/icon_32.png "${RESOURCES}/app.icns" 2>/dev/null || true
 
 # Zip the bundle for distribution
 cd dist

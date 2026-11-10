@@ -38,12 +38,14 @@ Section: utils
 Priority: optional
 Architecture: ${ARCH}
 Maintainer: Subham Maity <97989643+Subham-Maity@users.noreply.github.com>
+Depends: libx11-6, libxext6, libxrandr2, libxinerama1, libxcursor1, libxi6, libxss1, xprintidle, libgtk-3-0, libayatana-appindicator3-1
 Description: Native power watchdog for AI coding agents and human inactivity
  Agent Power Guard monitors user input, agent processes (Cursor, Claude,
  Antigravity), GPU compute loads, downloads, and power requests to sleep your PC
  only when both you and your agents are truly idle.
 EOF
 
+mkdir -p dist
 dpkg-deb --build "${PKG_DIR}" "dist/agent-power-guard_${VERSION}_${ARCH}.deb"
 echo "Debian package created at dist/agent-power-guard_${VERSION}_${ARCH}.deb"
 

@@ -5,7 +5,10 @@ After=network.target
 
 [Service]
 Type=simple
-ExecStart=%h/.local/bin/agent-power-guard daemon
+# For Debian/system installs (/usr/bin):
+ExecStart=/usr/bin/agent-power-guard daemon
+# If running standalone from ~/.local/bin, override with:
+# ExecStart=%h/.local/bin/agent-power-guard daemon
 Restart=on-failure
 RestartSec=5s
 

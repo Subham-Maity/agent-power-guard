@@ -192,38 +192,42 @@
             <span class="metric-val" id="cond-agent-cpu">0.0%</span>
           </div>
           <div class="metric-row">
-            <span class="metric-name">3. Watched GPU (AI)</span>
-            <span class="metric-val" id="cond-gpu">0.0%</span>
-          </div>
-          <div class="metric-row">
-            <span class="metric-name">4. Active Downloads</span>
+            <span class="metric-name">3. Active Downloads</span>
             <span class="metric-val" id="cond-down">0 KB/s</span>
           </div>
           <div class="metric-row">
-            <span class="metric-name">5. Mic & Cam (Calls)</span>
-            <span class="metric-val" id="cond-mic-cam">None</span>
+            <span class="metric-name">4. Whole-PC CPU</span>
+            <span class="metric-val" id="cond-pc-cpu">0.0%</span>
+          </div>
+          <div class="metric-row">
+            <span class="metric-name">5. Whole-PC Disk</span>
+            <span class="metric-val" id="cond-pc-disk">0 KB/s</span>
+          </div>
+          <div class="metric-row">
+            <span class="metric-name">6. Whole-PC Network</span>
+            <span class="metric-val" id="cond-pc-net">0 KB/s</span>
           </div>
         </div>
         <div>
           <div class="metric-row">
-            <span class="metric-name">6. Whole-PC CPU</span>
-            <span class="metric-val" id="cond-pc-cpu">0.0%</span>
-          </div>
-          <div class="metric-row">
-            <span class="metric-name">7. Whole-PC Disk</span>
-            <span class="metric-val" id="cond-pc-disk">0 KB/s</span>
-          </div>
-          <div class="metric-row">
-            <span class="metric-name">8. Whole-PC Network</span>
-            <span class="metric-val" id="cond-pc-net">0 KB/s</span>
-          </div>
-          <div class="metric-row">
-            <span class="metric-name">9. Spike Debounce</span>
+            <span class="metric-name">7. Spike Debounce</span>
             <span class="metric-val" id="cond-spike">0s / 15s</span>
           </div>
           <div class="metric-row">
-            <span class="metric-name">10. Power Requests</span>
+            <span class="metric-name">8. Monitor Standby</span>
+            <span class="metric-val" id="cond-monitor">Sync</span>
+          </div>
+          <div class="metric-row">
+            <span class="metric-name">9. Power Requests</span>
             <span class="metric-val" id="cond-power-req">None</span>
+          </div>
+          <div class="metric-row">
+            <span class="metric-name">10. Watched GPU (AI)</span>
+            <span class="metric-val" id="cond-gpu">0.0%</span>
+          </div>
+          <div class="metric-row">
+            <span class="metric-name">11. Mic & Cam (Calls)</span>
+            <span class="metric-val" id="cond-mic-cam">None</span>
           </div>
         </div>
       </div>
@@ -459,6 +463,16 @@
       apiAction('/api/toggle_guard');
     }
 
+    function escapeHtml(str) {
+      if (!str) return '';
+      return String(str)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#039;');
+    }
+
     function promptLease() {
       const mins = prompt('Enter lease duration in minutes (e.g. 15, 30, 60):', '30');
       if (mins) {
@@ -563,14 +577,8 @@
         document.getElementById('cond-agent-cpu').innerText = `${s.live_agent_cpu.toFixed(1)}% (${s.live_agent_proc})`;
         document.getElementById('cond-agent-cpu').className = 'metric-val ' + (s.cond2_pass ? 'tag-pass' : 'tag-block');
 
-        document.getElementById('cond-gpu').innerText = `${s.live_gpu.toFixed(1)}%`;
-        document.getElementById('cond-gpu').className = 'metric-val ' + (s.cond10_pass ? 'tag-pass' : 'tag-block');
-
         document.getElementById('cond-down').innerText = `${s.live_download.toFixed(0)} KB/s`;
         document.getElementById('cond-down').className = 'metric-val ' + (s.cond3_pass ? 'tag-pass' : 'tag-block');
-
-        document.getElementById('cond-mic-cam').innerText = s.live_mic_cam_active ? `Active (${s.live_mic_cam_app})` : 'Idle';
-        document.getElementById('cond-mic-cam').className = 'metric-val ' + (s.cond11_pass ? 'tag-pass' : 'tag-block');
 
         document.getElementById('cond-pc-cpu').innerText = `${s.live_pc_cpu.toFixed(1)}%`;
         document.getElementById('cond-pc-cpu').className = 'metric-val ' + (s.cond4_pass ? 'tag-pass' : 'tag-block');
@@ -582,7 +590,22 @@
         document.getElementById('cond-pc-net').className = 'metric-val ' + (s.cond6_pass ? 'tag-pass' : 'tag-block');
 
         document.getElementById('cond-spike').innerText = `${s.spike_counter}s / ${s.spike_limit}s`;
+        document.getElementById('cond-spike').className = 'metric-val ' + (s.cond7_pass ? 'tag-pass' : 'tag-block');
+
+        const monitorEl = document.getElementById('cond-monitor');
+        if (monitorEl) {
+          monitorEl.innerText = s.cond8_pass ? 'Active' : 'Standby';
+          monitorEl.className = 'metric-val ' + (s.cond8_pass ? 'tag-pass' : 'tag-block');
+        }
+
         document.getElementById('cond-power-req').innerText = s.power_request_active ? 'Active (Display/Audio)' : 'None';
+        document.getElementById('cond-power-req').className = 'metric-val ' + (s.cond9_pass ? 'tag-pass' : 'tag-block');
+
+        document.getElementById('cond-gpu').innerText = `${s.live_gpu.toFixed(1)}%`;
+        document.getElementById('cond-gpu').className = 'metric-val ' + (s.cond10_pass ? 'tag-pass' : 'tag-block');
+
+        document.getElementById('cond-mic-cam').innerText = s.live_mic_cam_active ? `Active (${s.live_mic_cam_app})` : 'Idle';
+        document.getElementById('cond-mic-cam').className = 'metric-val ' + (s.cond11_pass ? 'tag-pass' : 'tag-block');
 
         // Live Sparklines (Phase 4.3)
         if (s.history) {
@@ -601,12 +624,14 @@
         if (s.top_processes && s.top_processes.length > 0) {
           let html = '';
           for (const p of s.top_processes) {
+            const safeName = escapeHtml(p.name);
+            const encodedName = encodeURIComponent(p.name);
             const badge = p.is_agent ? '<span class="badge-agent">AGENT</span>' : (p.is_ignored ? '<span class="badge-ignored">IGNORED</span>' : '');
-            const actionBtn = p.is_ignored ? '<span style="color:var(--text-muted);font-size:0.75rem;">Ignored</span>' : `<button class="btn-sm" onclick="ignoreProcess('${p.name}')">+ Ignore</button>`;
+            const actionBtn = p.is_ignored ? '<span style="color:var(--text-muted);font-size:0.75rem;">Ignored</span>' : `<button class="btn-sm" onclick="ignoreProcess(decodeURIComponent('${encodedName}'))">+ Ignore</button>`;
             html += `
               <div class="proc-row">
                 <div class="proc-info">
-                  <span class="proc-name" title="${p.name}">${p.name}</span>
+                  <span class="proc-name" title="${safeName}">${safeName}</span>
                   ${badge}
                 </div>
                 <div style="display:flex; align-items:center; gap:10px;">
@@ -779,36 +804,42 @@
       let html = '';
       for (const peer of fleetPeers) {
         const isControl = peer.permission === 'control';
+        const safeName = escapeHtml(peer.name);
+        const safeUrl = escapeHtml(peer.url);
+        const safeId = escapeHtml(peer.id);
+        const encUrl = encodeURIComponent(peer.url);
+        const encToken = encodeURIComponent(peer.token || '');
+        const encMac = encodeURIComponent(peer.mac || '');
         html += `
-          <div class="card" id="peer-card-${peer.id}" style="margin-bottom: 12px;">
+          <div class="card" id="peer-card-${safeId}" style="margin-bottom: 12px;">
             <div style="display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 8px;">
               <div>
-                <div style="font-weight: 700; font-size: 1.05rem; color: #fff;">${peer.name}</div>
-                <div style="font-size: 0.8rem; color: var(--text-muted); font-family: monospace;">${peer.url}</div>
+                <div style="font-weight: 700; font-size: 1.05rem; color: #fff;">${safeName}</div>
+                <div style="font-size: 0.8rem; color: var(--text-muted); font-family: monospace;">${safeUrl}</div>
               </div>
               <div style="display: flex; align-items: center; gap: 8px;">
                 <span class="badge-agent" style="${isControl ? 'background:rgba(16,185,129,0.15);color:#34d399;border-color:#10b981;' : 'background:rgba(148,163,184,0.15);color:#94a3b8;border-color:#64748b;'}">
                   ${isControl ? 'CONTROL' : 'VIEW-ONLY'}
                 </span>
-                <span id="peer-badge-${peer.id}" class="status-pill status-paused" style="font-size: 0.75rem; padding: 2px 8px;">
+                <span id="peer-badge-${safeId}" class="status-pill status-paused" style="font-size: 0.75rem; padding: 2px 8px;">
                   POLLING...
                 </span>
-                <button class="btn-sm" onclick="deletePeerMachine('${peer.id}')" title="Remove machine" style="color:#f87171; border-color:#ef4444;">✕</button>
+                <button class="btn-sm" onclick="deletePeerMachine(decodeURIComponent('${encodeURIComponent(peer.id)}'))" title="Remove machine" style="color:#f87171; border-color:#ef4444;">✕</button>
               </div>
             </div>
 
-            <div id="peer-details-${peer.id}" style="font-size: 0.85rem; color: var(--text-muted); margin-bottom: 10px;">
+            <div id="peer-details-${safeId}" style="font-size: 0.85rem; color: var(--text-muted); margin-bottom: 10px;">
               Connecting to peer...
             </div>
 
-            <div id="peer-actions-${peer.id}" style="display: flex; gap: 8px; flex-wrap: wrap;">
+            <div id="peer-actions-${safeId}" style="display: flex; gap: 8px; flex-wrap: wrap;">
               ${isControl ? `
-                <button class="btn btn-outline" style="padding: 6px 10px; font-size: 0.8rem;" onclick="peerAction('${peer.url}', '${peer.token}', '/api/postpone?mins=15')">⏳ +15m</button>
-                <button class="btn btn-danger" style="padding: 6px 10px; font-size: 0.8rem;" onclick="peerAction('${peer.url}', '${peer.token}', '/api/sleep')">⚡ Sleep</button>
-                <button class="btn btn-outline" style="padding: 6px 10px; font-size: 0.8rem;" onclick="peerAction('${peer.url}', '${peer.token}', '/api/toggle_guard')">🛡️ Toggle</button>
+                <button class="btn btn-outline" style="padding: 6px 10px; font-size: 0.8rem;" onclick="peerAction(decodeURIComponent('${encUrl}'), decodeURIComponent('${encToken}'), '/api/postpone?mins=15')">⏳ +15m</button>
+                <button class="btn btn-danger" style="padding: 6px 10px; font-size: 0.8rem;" onclick="peerAction(decodeURIComponent('${encUrl}'), decodeURIComponent('${encToken}'), '/api/sleep')">⚡ Sleep</button>
+                <button class="btn btn-outline" style="padding: 6px 10px; font-size: 0.8rem;" onclick="peerAction(decodeURIComponent('${encUrl}'), decodeURIComponent('${encToken}'), '/api/toggle_guard')">🛡️ Toggle</button>
               ` : ''}
               ${peer.mac ? `
-                <button class="btn btn-primary" style="padding: 6px 10px; font-size: 0.8rem;" onclick="wakePeer('${peer.mac}')">⚡ Wake-on-LAN</button>
+                <button class="btn btn-primary" style="padding: 6px 10px; font-size: 0.8rem;" onclick="wakePeer(decodeURIComponent('${encMac}'))">⚡ Wake-on-LAN</button>
               ` : ''}
             </div>
           </div>

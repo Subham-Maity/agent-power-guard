@@ -406,23 +406,26 @@ fn place_finder_pattern(
     top_x: usize,
     top_y: usize,
 ) {
-    for r in 0..=7 {
-        for c in 0..=7 {
-            let px = top_x as isize + c as isize - (if top_x > 0 { 1 } else { 0 });
-            let py = top_y as isize + r as isize - (if top_y > 0 { 1 } else { 0 });
-            if px >= 0 && px < size as isize && py >= 0 && py < size as isize {
-                let ux = px as usize;
-                let uy = py as usize;
-                let is_finder = (0..7).contains(&c) && (0..7).contains(&r);
-                if is_finder {
-                    let is_black = r == 0
-                        || r == 6
-                        || c == 0
-                        || c == 6
-                        || (r >= 2 && r <= 4 && c >= 2 && c <= 4);
-                    set_module(matrix, reserved, size, top_x + c, top_y + r, is_black);
-                } else {
-                    set_module(matrix, reserved, size, ux, uy, false);
+    // 1. Draw 7x7 finder pattern
+    for r in 0..7 {
+        for c in 0..7 {
+            let is_black = r == 0
+                || r == 6
+                || c == 0
+                || c == 6
+                || ((2..=4).contains(&r) && (2..=4).contains(&c));
+            set_module(matrix, reserved, size, top_x + c, top_y + r, is_black);
+        }
+    }
+
+    // 2. Draw 1-module white separator border around finder pattern
+    for r in -1..=7 {
+        for c in -1..=7 {
+            if r == -1 || r == 7 || c == -1 || c == 7 {
+                let px = top_x as isize + c;
+                let py = top_y as isize + r;
+                if px >= 0 && px < size as isize && py >= 0 && py < size as isize {
+                    set_module(matrix, reserved, size, px as usize, py as usize, false);
                 }
             }
         }
@@ -569,11 +572,33 @@ mod tests {
         let url = "http://192.168.1.15:49281/#t=0123456789abcdef";
         let qr = QrCode::encode_text(url, QrEcLevel::L).expect("QR encoding should succeed");
         assert!(qr.size >= 21);
-        // Finder pattern top-left must be black at (0,0)
+        let s = qr.size;
+
+        // Top-left finder pattern
         assert!(qr.get_module(0, 0));
         assert!(qr.get_module(0, 6));
         assert!(qr.get_module(6, 0));
-        assert!(!qr.get_module(1, 1)); // White ring around center
+        assert!(qr.get_module(6, 6));
+        assert!(qr.get_module(3, 3));
+        assert!(!qr.get_module(1, 1));
+        assert!(!qr.get_module(7, 0)); // separator
+        assert!(!qr.get_module(0, 7)); // separator
+
+        // Top-right finder pattern (at size - 7, 0)
+        assert!(qr.get_module(s - 7, 0));
+        assert!(qr.get_module(s - 1, 0));
+        assert!(qr.get_module(s - 7, 6));
+        assert!(qr.get_module(s - 1, 6));
+        assert!(!qr.get_module(s - 8, 0)); // separator
+        assert!(!qr.get_module(s - 7, 7)); // separator
+
+        // Bottom-left finder pattern (at 0, size - 7)
+        assert!(qr.get_module(0, s - 7));
+        assert!(qr.get_module(6, s - 7));
+        assert!(qr.get_module(0, s - 1));
+        assert!(qr.get_module(6, s - 1));
+        assert!(!qr.get_module(0, s - 8)); // separator
+        assert!(!qr.get_module(7, s - 7)); // separator
     }
 
     #[test]

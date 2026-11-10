@@ -149,8 +149,10 @@ import os
 import requests
 from pathlib import Path
 
-# Load auth token automatically from config
+# Load auth token automatically across Windows, macOS, and Linux
 token_path = Path(os.environ.get("APPDATA", "")) / "AgentPowerGuard" / "api_token.txt"
+if not token_path.exists():
+    token_path = Path.home() / "Library" / "Application Support" / "AgentPowerGuard" / "api_token.txt"
 if not token_path.exists():
     token_path = Path.home() / ".config" / "agent-power-guard" / "api_token.txt"
 
