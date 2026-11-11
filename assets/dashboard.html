@@ -109,9 +109,12 @@
         <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#10b981" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"></path></svg>
         Agent Power <span>Guard</span>
       </div>
-      <div class="pulse-badge">
-        <div class="pulse-dot"></div>
-        LIVE REMOTE
+      <div style="display: flex; align-items: center; gap: 8px;">
+        <button class="btn btn-outline" style="padding: 4px 10px; font-size: 0.78rem;" onclick="openGuideModal()">ℹ Guide</button>
+        <div class="pulse-badge">
+          <div class="pulse-dot"></div>
+          LIVE REMOTE
+        </div>
       </div>
     </header>
 
@@ -144,9 +147,20 @@
 
     <!-- Main Status Card -->
     <div class="card hero">
-      <div id="status-badge" class="status-pill status-passing">EVALUATING</div>
+      <div style="display: flex; justify-content: center; gap: 8px; flex-wrap: wrap; margin-bottom: 10px;">
+        <span id="status-badge" class="status-pill status-passing">EVALUATING</span>
+        <span id="intent-badge" class="status-pill status-paused" style="background: rgba(56, 189, 248, 0.14); color: #7dd3fc;">Intent: Detecting...</span>
+      </div>
       <div class="countdown-ring" id="countdown">--:--</div>
       <div class="blocker-msg" id="blocker-banner">Connecting to local agent watchdog...</div>
+      <div id="mode-status-note" style="font-size: 0.78rem; color: var(--text-muted); margin-bottom: 12px;">Active: watchdog manages display-off and sleep.</div>
+
+      <!-- 3 Operational Modes -->
+      <div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin-bottom: 12px;">
+        <button id="opmode-smart_guard" class="btn btn-accent" style="padding: 8px 6px; font-size: 0.8rem;" onclick="setOperationalMode('smart_guard')">🛡 Smart Guard</button>
+        <button id="opmode-guard_off" class="btn btn-outline" style="padding: 8px 6px; font-size: 0.8rem;" onclick="setOperationalMode('guard_off')">⏸ Guard Off</button>
+        <button id="opmode-best_performance" class="btn btn-outline" style="padding: 8px 6px; font-size: 0.8rem;" onclick="setOperationalMode('best_performance')">⚡ Best Perf</button>
+      </div>
       
       <div class="actions-grid">
         <button class="btn btn-danger" onclick="apiAction('/api/sleep')">
@@ -164,6 +178,17 @@
       </div>
     </div>
 
+    <!-- Passive Media Prompt Card -->
+    <div class="card" id="media-prompt-card" style="display: none; background: rgba(59, 130, 246, 0.15); border-color: #3b82f6;">
+      <div style="font-weight: 700; color: #93c5fd; margin-bottom: 4px;" id="media-prompt-heading">🎬 Idle Media Playback Detected</div>
+      <div id="media-prompt-sub" style="font-size: 0.84rem; color: #cbd5e1; margin-bottom: 10px;">Keep PC awake for this playback session?</div>
+      <div style="display: flex; gap: 8px; flex-wrap: wrap;">
+        <button class="btn btn-accent" style="padding: 6px 12px; font-size: 0.82rem;" onclick="apiAction('/api/media_prompt?action=keep')">✅ Keep Awake</button>
+        <button class="btn btn-danger" style="padding: 6px 12px; font-size: 0.82rem;" onclick="apiAction('/api/media_prompt?action=sleep')">💤 Sleep Now</button>
+        <button class="btn btn-outline" style="padding: 6px 12px; font-size: 0.82rem;" onclick="apiAction('/api/media_prompt?action=hide')">🙈 Hide</button>
+      </div>
+    </div>
+
     <!-- Active Agent Lease Banner (if any) -->
     <div class="card" id="lease-card" style="display: none; background: rgba(59, 130, 246, 0.12); border-color: rgba(59, 130, 246, 0.4);">
       <div style="display: flex; justify-content: space-between; align-items: center;">
@@ -173,6 +198,14 @@
         </div>
         <button class="btn btn-outline" style="padding: 6px 12px; font-size: 0.85rem;" onclick="apiAction('/api/release')">Release</button>
       </div>
+    </div>
+
+    <!-- Structured Blocker Transparency Card -->
+    <div class="card" id="structured-blockers-card" style="display: none;">
+      <div class="section-title">
+        <span>🔍 Active Blockers (Who / Value / Since)</span>
+      </div>
+      <div id="structured-blockers-list"></div>
     </div>
 
     <!-- Live Conditions -->
@@ -385,6 +418,15 @@
       </div>
     </div>
   </div> <!-- /view-fleet -->
+
+  <!-- Info Guide Modal -->
+  <div id="guide-modal" class="card" style="display:none; position: fixed; inset: 20px; max-width: 680px; margin: auto; z-index: 200; overflow-y: auto; max-height: 85vh; border-color: #38bdf8; box-shadow: 0 20px 60px rgba(0,0,0,0.65);">
+    <div class="section-title">
+      <span>ℹ Agent Power Guard — Guide</span>
+      <button class="btn btn-outline" style="padding: 4px 10px; font-size: 0.8rem;" onclick="closeGuideModal()">Close</button>
+    </div>
+    <div id="guide-sections" style="font-size: 0.88rem; line-height: 1.5; color: #cbd5e1;">Loading guide...</div>
+  </div>
   </div>
 
   <div id="toast" class="toast">Command delivered</div>
@@ -463,6 +505,39 @@
       apiAction('/api/toggle_guard');
     }
 
+    function setOperationalMode(mode) {
+      apiAction('/api/operational_mode?mode=' + encodeURIComponent(mode));
+    }
+
+    async function ignoreTarget(kind, target) {
+      await apiAction('/api/ignore/add?kind=' + encodeURIComponent(kind || 'process') + '&process=' + encodeURIComponent(target));
+    }
+
+    async function openGuideModal() {
+      const modal = document.getElementById('guide-modal');
+      const body = document.getElementById('guide-sections');
+      modal.style.display = 'block';
+      try {
+        const res = await fetch('/api/guide', { headers: getAuthHeaders() });
+        if (res.ok) {
+          const data = await res.json();
+          let html = '';
+          for (const sec of (data.sections || [])) {
+            html += `<div style="margin-bottom: 14px;"><div style="font-weight: 700; color: #f8fafc; margin-bottom: 4px;">${escapeHtml(sec.title)}</div><div style="color: #94a3b8;">${escapeHtml(sec.body)}</div></div>`;
+          }
+          body.innerHTML = html || 'Guide loaded.';
+        } else {
+          body.innerText = 'Unable to load guide (check auth token).';
+        }
+      } catch (e) {
+        body.innerText = 'Error loading guide: ' + e.message;
+      }
+    }
+
+    function closeGuideModal() {
+      document.getElementById('guide-modal').style.display = 'none';
+    }
+
     function escapeHtml(str) {
       if (!str) return '';
       return String(str)
@@ -534,15 +609,35 @@
 
         // Countdown & Status Banner
         const badge = document.getElementById('status-badge');
+        const intentBadge = document.getElementById('intent-badge');
+        const modeNote = document.getElementById('mode-status-note');
         const count = document.getElementById('countdown');
         const banner = document.getElementById('blocker-banner');
 
-        if (!s.guard_enabled) {
+        const opMode = s.operational_mode || (s.guard_enabled ? 'smart_guard' : 'guard_off');
+        ['smart_guard', 'guard_off', 'best_performance'].forEach(m => {
+          const b = document.getElementById('opmode-' + m);
+          if (b) b.className = (m === opMode) ? 'btn btn-accent' : 'btn btn-outline';
+        });
+        if (modeNote && s.operational_mode_note) {
+          modeNote.innerText = s.operational_mode_note;
+        }
+        if (intentBadge && s.intent_label) {
+          intentBadge.innerText = `Intent: ${s.intent_label}`;
+        }
+
+        if (opMode === 'guard_off') {
           badge.className = 'status-pill status-paused';
-          badge.innerText = 'GUARD PAUSED';
-          count.innerText = 'PAUSED';
-          banner.innerText = 'Master Guard is switched OFF. Automatic sleep disabled.';
-          document.getElementById('guard-btn-text').innerText = '▶️ Resume Guard';
+          badge.innerText = 'GUARD OFF';
+          count.innerText = 'OS PLAN';
+          banner.innerText = 'Guard Off: OS normal power plan applies.';
+          document.getElementById('guard-btn-text').innerText = '▶️ Enable Smart Guard';
+        } else if (opMode === 'best_performance') {
+          badge.className = 'status-pill status-paused';
+          badge.innerText = 'BEST PERFORMANCE';
+          count.innerText = 'LOCKED';
+          banner.innerText = 'Best Performance: Display and PC locked awake.';
+          document.getElementById('guard-btn-text').innerText = '🛡️ Smart Guard';
         } else if (s.all_conditions_pass) {
           badge.className = 'status-pill status-passing';
           badge.innerText = 'ARMED (SLEEPING SOON)';
@@ -559,6 +654,41 @@
           count.innerText = `${maxM}:${maxS.toString().padStart(2, '0')}`;
           banner.innerText = s.blocker_banner_text || 'Waiting for active tasks to finish...';
           document.getElementById('guard-btn-text').innerText = '⏸️ Pause Guard';
+        }
+
+        // Passive Media Prompt Card
+        const mediaCard = document.getElementById('media-prompt-card');
+        if (mediaCard && s.media && s.media.prompt_active) {
+          mediaCard.style.display = 'block';
+          document.getElementById('media-prompt-heading').innerText = `🎬 Idle playback detected in ${s.media.app || 'Media Player'}`;
+          document.getElementById('media-prompt-sub').innerText = s.media.title ? `Playing "${s.media.title}" — keep PC awake for this session?` : 'Keep PC awake for this playback session?';
+        } else if (mediaCard) {
+          mediaCard.style.display = 'none';
+        }
+
+        // Structured Blockers Transparency Card
+        const blkCard = document.getElementById('structured-blockers-card');
+        const blkList = document.getElementById('structured-blockers-list');
+        if (blkCard && blkList && s.structured_blockers && s.structured_blockers.length > 0) {
+          blkCard.style.display = 'block';
+          let bhtml = '';
+          for (const b of s.structured_blockers) {
+            const ignoreBtn = b.ignore_target
+              ? `<button class="btn-sm" onclick="ignoreTarget(decodeURIComponent('${encodeURIComponent(b.ignore_kind || 'process')}'), decodeURIComponent('${encodeURIComponent(b.ignore_target)}'))">+ Ignore</button>`
+              : '';
+            bhtml += `
+              <div class="proc-row">
+                <div class="proc-info">
+                  <span style="font-weight:700; color:#fbbf24;">#${Number(b.condition)} ${escapeHtml(b.name)}</span>
+                  <span style="color:#e2e8f0; margin-left:6px;">${escapeHtml(b.who)}</span>
+                  <span style="color:var(--text-muted); margin-left:6px; font-size:0.78rem;">(${escapeHtml(b.value)} • ${Number(b.since_secs)}s)</span>
+                </div>
+                <div class="proc-stats">${ignoreBtn}</div>
+              </div>`;
+          }
+          blkList.innerHTML = bhtml;
+        } else if (blkCard) {
+          blkCard.style.display = 'none';
         }
 
         // Active Lease Card
@@ -583,28 +713,46 @@
         document.getElementById('cond-pc-cpu').innerText = `${s.live_pc_cpu.toFixed(1)}%`;
         document.getElementById('cond-pc-cpu').className = 'metric-val ' + (s.cond4_pass ? 'tag-pass' : 'tag-block');
 
-        document.getElementById('cond-pc-disk').innerText = `${s.live_pc_disk.toFixed(0)} KB/s`;
+        const diskWho = s.top_disk_proc && s.top_disk_proc !== 'None' ? ` (${s.top_disk_proc})` : '';
+        document.getElementById('cond-pc-disk').innerText = `${s.live_pc_disk.toFixed(0)} KB/s${diskWho}`;
         document.getElementById('cond-pc-disk').className = 'metric-val ' + (s.cond5_pass ? 'tag-pass' : 'tag-block');
 
         document.getElementById('cond-pc-net').innerText = `${s.live_pc_net.toFixed(0)} KB/s`;
         document.getElementById('cond-pc-net').className = 'metric-val ' + (s.cond6_pass ? 'tag-pass' : 'tag-block');
 
-        document.getElementById('cond-spike').innerText = `${s.spike_counter}s / ${s.spike_limit}s`;
+        document.getElementById('cond-spike').innerText = s.cond7_text || `${s.spike_counter}s / ${s.spike_limit}s`;
         document.getElementById('cond-spike').className = 'metric-val ' + (s.cond7_pass ? 'tag-pass' : 'tag-block');
 
         const monitorEl = document.getElementById('cond-monitor');
         if (monitorEl) {
-          monitorEl.innerText = s.cond8_pass ? 'Active' : 'Standby';
+          monitorEl.innerText = s.defer_display_off_for_monitor_audio ? 'Monitor Audio Hold' : (s.cond8_pass ? 'Active' : 'Standby');
           monitorEl.className = 'metric-val ' + (s.cond8_pass ? 'tag-pass' : 'tag-block');
         }
 
-        document.getElementById('cond-power-req').innerText = s.power_request_active ? 'Active (Display/Audio)' : 'None';
-        document.getElementById('cond-power-req').className = 'metric-val ' + (s.cond9_pass ? 'tag-pass' : 'tag-block');
+        const prEl = document.getElementById('cond-power-req');
+        if (s.power_requests && s.power_requests.unavailable) {
+          prEl.innerText = 'Probe Unavailable';
+          prEl.className = 'metric-val tag-block';
+        } else if (s.power_requests && s.power_requests.suppressed_browser) {
+          prEl.innerText = `Ignored stale (${s.power_requests.suppressed_browser})`;
+          prEl.className = 'metric-val tag-pass';
+        } else {
+          prEl.innerText = (s.cond9_detail) ? s.cond9_detail : (s.power_request_active ? 'Active' : 'None');
+          prEl.className = 'metric-val ' + (s.cond9_pass ? 'tag-pass' : 'tag-block');
+        }
 
-        document.getElementById('cond-gpu').innerText = `${s.live_gpu.toFixed(1)}%`;
-        document.getElementById('cond-gpu').className = 'metric-val ' + (s.cond10_pass ? 'tag-pass' : 'tag-block');
+        const gpuEl = document.getElementById('cond-gpu');
+        if (s.gpu && s.gpu.unavailable) {
+          gpuEl.innerText = 'Probe Unavailable';
+          gpuEl.className = 'metric-val tag-pass';
+        } else {
+          const pwr = (s.gpu && s.gpu.power_mw) ? ` • ${(s.gpu.power_mw / 1000).toFixed(0)}W` : '';
+          gpuEl.innerText = `${s.live_gpu.toFixed(1)}%${pwr}`;
+          gpuEl.className = 'metric-val ' + (s.cond10_pass ? 'tag-pass' : 'tag-block');
+        }
 
-        document.getElementById('cond-mic-cam').innerText = s.live_mic_cam_active ? `Active (${s.live_mic_cam_app})` : 'Idle';
+        const sig = (s.mic_cam && s.mic_cam.signal_state) ? ` [${s.mic_cam.signal_state}]` : '';
+        document.getElementById('cond-mic-cam').innerText = s.cond11_detail || (s.live_mic_cam_active ? `${s.live_mic_cam_app}${sig}` : 'Idle');
         document.getElementById('cond-mic-cam').className = 'metric-val ' + (s.cond11_pass ? 'tag-pass' : 'tag-block');
 
         // Live Sparklines (Phase 4.3)
@@ -879,11 +1027,12 @@
 
             const cpu = s.live_agent_cpu !== undefined ? `${s.live_agent_cpu.toFixed(1)}%` : '--';
             const gpu = s.live_gpu !== undefined ? `${s.live_gpu.toFixed(1)}%` : '--';
-            const lease = s.agent_lease_active ? ` • Lease: "${s.agent_lease_reason}"` : '';
-            const banner = s.blocker_banner_text || 'Active';
+            const lease = s.agent_lease_active ? ` • Lease: "${escapeHtml(s.agent_lease_reason)}"` : '';
+            const banner = escapeHtml(s.blocker_banner_text || 'Active');
+            const pmode = escapeHtml(s.power_mode || s.active_mode || 'Balanced');
             details.innerHTML = `
               <div style="color: #cbd5e1; font-weight: 500;">${banner}${lease}</div>
-              <div style="font-size: 0.8rem; margin-top: 4px;">Agent CPU: ${cpu} | GPU: ${gpu} | Mode: <strong>${s.active_mode || 'Balanced'}</strong></div>
+              <div style="font-size: 0.8rem; margin-top: 4px;">Agent CPU: ${cpu} | GPU: ${gpu} | Mode: <strong>${pmode}</strong></div>
             `;
           } else if (res.status === 401) {
             badge.className = 'status-pill status-blocked';

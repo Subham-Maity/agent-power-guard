@@ -48,20 +48,16 @@ Agent Power Guard evaluates 11 independent conditions every second and suspends 
 
 ## Features
 
-- **11 guard conditions** with individual toggles, thresholds and live pass/fail status.
-- **Two-stage power saving:** turn the display off first, suspend the system later.
-- **Agent leases:** coding agents and scripts hold sleep off through the `run` wrapper, an MCP server, the CLI, or a local HTTP API.
-- **GPU awareness:** NVIDIA (NVML, loaded at runtime), Linux DRM and macOS IOAccelerator.
-- **Meeting detection:** microphone and camera use by Zoom, Teams, Meet, Discord, Slack and OBS.
-- **Pre-sleep grace period:** a 30-second warning with Postpone (+15 min) and Sleep now actions.
-- **Block-reason history:** "What kept my PC awake" timeline, overnight summary, top-blockers ranking, CSV/JSON export.
-- **Alerts and webhooks:** ntfy, Telegram and generic webhook notifications.
-- **Opt-in update check:** one GitHub Releases request per 24 hours, no telemetry.
-- **Remote dashboard:** monitor and control the machine from a phone or another computer, with QR pairing, live sparklines, a process list with 1-tap ignore, a multi-machine fleet view and Wake-on-LAN.
-- **Energy tracking:** estimated kWh, cost and CO2 avoided, stored locally.
-- **Power modes, quiet hours, battery profile and wake timers.**
-- **Live graphs:** agent CPU, whole-PC CPU, disk, network and GPU over a rolling 120-second window.
-- **Tray mode:** runs hidden in the system tray and trims its working set (~5 MB RAM working set in background tray/daemon mode via Win32 `SetProcessWorkingSetSize`, under 25 MB when the egui window is open).
+- **Intent-aware sleep engine & signal conditioning:** 11 conditions filtered through a rolling-window duty-cycle & hysteresis layer so 1-second background spikes never reset the sleep timer.
+- **Three clear top-level modes:** **Smart Guard** (watchdog manages display-off & sleep), **Guard Off** (watchdog off, normal OS power plan), and **Best Performance** (explicit OS wake lock via dedicated thread keeping display & PC awake, with optional `1h / 2h / ∞` timers).
+- **Two-stage power saving:** turns the display off first (with HDMI/monitor speaker audio protection), suspends the system later.
+- **Passive media detection & prompt:** CoreAudio render + WinRT SMTC detection surfaces a non-focus-stealing prompt (`Keep Awake / Sleep Now / Hide`) locked to the playback session identity and auto-cleared after pause grace.
+- **Process-tree & noise attribution:** separates idle IDE hosts (`code.exe`, `cursor.exe`) from active worker children; attributes Disk I/O per process minus background noise (`MsMpEng`, `SearchIndexer`); filters Network traffic to default-route interfaces (ignoring WSL/Docker/loopback).
+- **Adaptive GPU baseline & NVML power:** learns idle desktop compositor baseline (`floor + margin`) across all NVML adapters and board power draw, without triggering on static VRAM allocation.
+- **Meeting & creative app intelligence:** combines OS mic/camera hooks with live CoreAudio capture signal-presence (`Dead / Ambient / Active`) — protects muted Zoom/Teams/Meet calls while ignoring silent DAW/Premiere standby.
+- **Zombie lease & wake classification:** detects idle PID-bound leases (~0% subtree CPU/disk), alerts before optional expiry, and classifies resumes (`User Input`, `Scheduled Timer`, `Unattended`) with a short `120s` unattended return-to-sleep timer.
+- **Transparent blocker table & built-in `(i)` guide:** shows exact condition, offending process/owner, live metric, hold duration, and 1-tap `+ Ignore` in both the desktop UI and web dashboard.
+- **Agent leases, alerts & remote fleet:** `run` wrapper, stdio MCP server, ntfy/Telegram/webhook notifications, block history timeline, QR-paired web dashboard, Wake-on-LAN relay, energy/CO2 accounting, quiet hours, battery profiles, and system tray memory trimming (~5 MB working set hidden).
 - **No Electron, no WebView, no runtime:** one native executable built on `egui`.
 
 ## Installation
@@ -174,28 +170,37 @@ Each condition can be switched off and tuned independently. The numbering below 
 | # | Condition | Blocks sleep when | Default |
 |---|---|---|---|
 | 1 | Human input idle | Last mouse or keyboard input is more recent than the threshold | 180 s |
-| 2 | Watched agent CPU | Processes matching the watch list use more than the threshold | 2.0 % |
-| 3 | Active downloads | Download managers (`idman`, `aria2c`, `qbittorrent`, `fdm`) are doing disk I/O | 100 KB/s |
-| 4 | Whole-PC CPU | Total CPU utilisation exceeds the threshold | 30 % |
-| 5 | Whole-PC disk I/O | Combined read and write throughput exceeds the threshold | 5,000 KB/s |
-| 6 | Whole-PC network | Combined send and receive throughput exceeds the threshold | 100 KB/s |
-| 7 | Sustained-spike filter | Activity from 4-6 persists longer than this window | 15 s |
-| 8 | Monitor timeout | Keeps the OS display timeout in sync with Stage 1 | 2 min |
-| 9 | Power requests | A `DISPLAY` power request is active (for example fullscreen video) | on |
-| 10 | GPU activity | GPU compute load exceeds the threshold (inference, CUDA, local LLMs) | 5 % |
-| 11 | Mic and camera | A meeting app is actively recording | on |
+| 2 | Watched agent CPU | Process-tree worker children matching watch list exceed threshold (sustained) | 2.0 % |
+| 3 | Active downloads | Download managers (`idman`, `aria2c`, `qbittorrent`, `fdm`) exceed threshold | 100 KB/s |
+| 4 | Whole-PC CPU | Total CPU minus Agent Power Guard self-CPU exceeds threshold (sustained) | 30 % |
+| 5 | Attributed disk I/O | Per-process disk I/O minus background noise (`MsMpEng`, `SearchIndexer`, etc.) exceeds threshold | 10,000 KB/s |
+| 6 | Default-route network | Default-route (`0.0.0.0/0`, `::/0`) throughput exceeds threshold (ignores WSL/Docker/loopback) | 200 KB/s |
+| 7 | Signal-conditioning filter | Rolling-window duty cycle + hysteresis across analog checks (`Busy` >= 8/15s, clears <= 2/15s) | 15 s (8/2) |
+| 8 | Monitor timeout & speaker protection | Syncs OS display timeout with Stage 1; skips display-off if HDMI/monitor speakers play audio | 2 min |
+| 9 | Power requests | Active `DISPLAY` locks (suppresses paused silent browsers >60s; degrades cleanly if unprivileged) | on |
+| 10 | Adaptive GPU activity | GPU utilization exceeds `max(threshold, idle_floor + margin)` across NVML adapters + power draw | 5 % (+12 % floor margin) |
+| 11 | Mic & cam + signal presence | Strict on calls (`Zoom`/`Teams`/`Meet`/`Discord`); creative tools (`Premiere`/`OBS`) require active capture signal | on |
 
-Notes on the less obvious ones:
+How the intent engine works:
 
-- **Condition 2** normalises per-process CPU against total logical cores, so a process showing 16 % in Task Manager on an 8-core machine counts as 2.0 %. The default watch list is `antigravity, language_server, cursor, claude, gemini, code, node, npm, pnpm, bun, tsc, esbuild, vite, next, nest, git, cargo, rustc, python, docker, wsl` and can be edited from **Edit Process Keywords**.
-- **Condition 7** stops short background noise (search indexing, antivirus scans, browser refreshes) from resetting the countdown indefinitely.
-- **Condition 9** can override wake locks held by virtual audio devices (VB-Audio, Voicemeeter) and paused browser media, a common cause of machines that never sleep.
-- **Condition 10** loads `nvml.dll` at runtime, so there is no CUDA SDK dependency. AMD and Intel GPUs fall back to OS counters.
-- **Condition 11** reads the Windows `CapabilityAccessManager\ConsentStore` registry keys, and PulseAudio / PipeWire capture streams on Linux (CoreAudio on macOS).
+- **Signal-conditioning layer:** Transient 1-second spikes enter `Pending` without resetting the sleep countdown or blocking Stage 1 display-off. Only sustained `Busy` duty cycles block sleep, and hysteresis clears smoothly when quiet.
+- **Condition 2** traverses parent-child process trees so idle IDE windows (`code.exe`, `cursor.exe`) don't block sleep by themselves while active spawned workers/compilers (`cargo`, `node`, `rustc`) do.
+- **Conditions 5 & 6** isolate real user/build traffic from antivirus/indexing noise and virtual adapters (WSL vEthernet, Hyper-V, Docker, loopback), showing raw vs filtered metrics and blaming the specific offending disk process.
+- **Condition 8 & Passive Media:** Audio-only playback allows Stage 1 display-off while keeping the machine awake (unless playing through monitor/HDMI speakers). Fullscreen/windowed media idle triggers a non-focus-stealing topmost prompt (**Keep Awake / Sleep Now / Hide**) locked to session identity (`app + session`) until pause grace expires.
+- **Condition 9 & 10 Probe Health:** When standard-user privileges (`AsInvoker`) block `powercfg /requests` or `nvml.dll` is absent, Agent Power Guard surfaces an explicit **Probe Unavailable** badge instead of silently misreporting idle.
+- **Condition 11** pairs OS mic/camera checks (`CapabilityAccessManager` / PulseAudio) with live CoreAudio peak capture classification (`Dead / Ambient / Active`) so DAWs in standby don't block sleep while muted calls still stay protected.
 
 ## Presets, power modes and schedules
 
-### Presets
+### Top-level operational modes
+
+Choose directly from the top segmented control, system tray, or `POST /api/operational_mode`:
+
+- **Smart Guard (`smart_guard`):** Active intent-aware watchdog managing Stage 1 display-off and Stage 2 sleep.
+- **Guard Off (`guard_off`):** Pauses the watchdog so your normal operating system power plan governs sleep and display timeout.
+- **Best Performance (`best_performance`):** Explicitly locks display and system awake on a dedicated OS wake-lock thread (`SetThreadExecutionState` on Windows, `systemd-inhibit` on Linux, `caffeinate` on macOS) with optional `1h`, `2h`, or `∞` timers.
+
+### Timeout presets
 
 | Preset | Sleep after | Display off |
 |---|---|---|
@@ -210,9 +215,9 @@ Notes on the less obvious ones:
 | 2h / 3h | 2-3 h | 45-60 min |
 | Custom | 10 s - 3 h | 1 min - 3 h |
 
-### Operational power modes
+### Timeout profiles
 
-Switch strategies without reconfiguring sliders (GUI, tray menu, or `POST /api/mode`):
+Switch timeout profiles without reconfiguring sliders (`POST /api/mode`):
 
 | Mode | Idle | Display timeout | Agent CPU |
 |---|---|---|---|
@@ -351,24 +356,27 @@ agent-power-guard run [--max-mins N] [--reason TEXT] -- <command>
 
 The app serves a local API on port `49281`. It binds to `127.0.0.1` and generates a random 256-bit token on first run.
 
-**Authentication.** All `/api/*` endpoints require the token in `Authorization: Bearer <token>` or `X-APG-Token: <token>`. The CLI reads the token from `api_token.txt` (see [Configuration](#configuration-and-data-files)). Missing or invalid tokens return `401 Unauthorized`; IPs exceeding 10 failed authentication attempts per minute return `429 Too Many Requests` (`Retry-After: 60`). Constant-time comparison is used to prevent timing attacks. All API responses include `Access-Control-Allow-Origin: *` to enable remote web dashboard access.
+**Authentication.** All `/api/*` endpoints require the token in `Authorization: Bearer <token>` or `X-APG-Token: <token>`. The CLI reads the token from `api_token.txt` (see [Configuration](#configuration-and-data-files)). Missing or invalid tokens return `401 Unauthorized`; IPs exceeding 10 failed authentication attempts per minute return `429 Too Many Requests` (`Retry-After: 60`). Constant-time comparison is used to prevent timing attacks. When LAN access is enabled, `/api/*` endpoints and `OPTIONS` preflights emit `Access-Control-Allow-Origin: *` for multi-machine Fleet View polling; otherwise cross-origin browser requests are rejected with `403`.
 
 | Endpoint | Method | Parameters | Description |
 |---|---|---|---|
 | `/` | GET | `#t=<token>` | Remote dashboard (token read from the URL fragment) |
-| `/api/status` | GET | | Countdown, conditions, blocking reasons, leases |
+| `/api/status` | GET | | Countdown, operational mode, intent, structured blockers, media/mic/GPU/power-request telemetry, leases |
+| `/api/operational_mode` | POST | `mode=smart_guard\|guard_off\|best_performance&hours=N` | Switch top-level operational mode (with optional expiry hours for Best Performance) |
+| `/api/media_prompt` | POST | `action=keep\|sleep\|hide` | Respond to an active passive media playback prompt |
+| `/api/guide` | GET | | Built-in `(i)` Guide sections explaining modes, intent, and signal conditioning |
 | `/api/sleep` | POST | | Suspend immediately |
 | `/api/postpone` | POST | `mins=15` | Postpone sleep |
-| `/api/toggle_guard` | POST | | Turn the master guard on or off |
-| `/api/lease` | POST | `mins=30&reason=Build&pid=1234` | Grant a sleep lease (optionally PID-bound) |
+| `/api/toggle_guard` | POST | | Toggle between `Smart Guard` and `Guard Off` |
+| `/api/lease` | POST | `mins=30&reason=Build&pid=1234` | Grant a sleep lease (optionally PID-bound with zombie detection) |
 | `/api/release` | POST | | Clear all leases |
-| `/api/mode` | POST | `mode=balanced\|work\|night\|away` | Switch operational power mode |
+| `/api/mode` | POST | `name=balanced\|work\|night\|away` | Switch timeout preset profile |
 | `/api/schedule/stay_awake` | POST | `mins=60` | Schedule temporary keep-awake |
 | `/api/wake_timer/add` | POST | `time=02:00&label=Backup` | Schedule an OS RTC / Task Scheduler wake timer |
 | `/api/wake_timer/delete` | POST | `id=<timer_id>` | Delete a scheduled wake timer |
-| `/api/history` | GET | | Recent block-reason history records |
+| `/api/history` | GET | | Recent block-reason history and wakeup records |
 | `/api/history/clear` | POST | | Clear block-reason history |
-| `/api/ignore/add` | POST | `process=<name>` | Add a process keyword to the ignore list |
+| `/api/ignore/add` | POST | `process=<name>&kind=process\|disk_noise\|power_owner` | Add target to process ignore, disk noise, or power-request ignore list |
 | `/api/ignore/remove` | POST | `process=<name>` | Remove a process keyword from the ignore list |
 | `/api/peers` | GET | | Configured fleet peers |
 | `/api/peers/add` | POST | `name=&url=&token=&permission=&mac=` | Add or update a fleet peer |
@@ -382,19 +390,23 @@ Abridged `/api/status` response:
 ```json
 {
   "guard_enabled": true,
+  "operational_mode": "smart_guard",
+  "intent": "ActiveWork",
+  "intent_label": "Active Work (cargo.exe)",
   "all_conditions_pass": false,
   "countdown_secs": 180,
   "countdown_max": 180,
-  "blocker_banner_text": "Blocked by agent CPU (node 4.8%)",
+  "blocker_banner_text": "Blocked by Attributed Disk I/O (cargo.exe)",
+  "structured_blockers": [
+    { "condition": 5, "name": "Disk I/O", "who": "cargo.exe", "value": "14.2 MB/s", "since_secs": 18, "ignore_target": "cargo.exe", "ignore_kind": "disk_noise" }
+  ],
   "live_idle_secs": 42,
   "live_agent_cpu": 4.8,
   "agent_lease_active": false
 }
 ```
 
-Other fields consumed by the bundled dashboard: `agent_lease_reason`, `agent_lease_remaining_secs`, `cond1_pass` through `cond6_pass`, `cond10_pass`, `cond11_pass`, `live_agent_proc`, `live_gpu`, `live_download`, `live_mic_cam_active`, `live_mic_cam_app`, `live_pc_cpu`, `live_pc_disk`, `live_pc_net`, `spike_counter`, `spike_limit`, `power_request_active`, `active_mode`, `local_ip`, `mac_address`, `currency_symbol`, `co2_factor`, `history` (`agent_cpu`, `gpu`, `pc_cpu`, `pc_net` arrays), `top_processes` (`name`, `cpu_pct`, `is_agent`, `is_ignored`) and `energy` (`cost_saved`, `kwh_saved`, `duration_secs`, `co2_saved`).
-
-The dashboard's on-screen condition numbering differs from the table above; rely on the `condN_pass` field names.
+Other fields consumed by the bundled dashboard: `operational_mode_note`, `stage1_display_off_allowed`, `defer_display_off_for_monitor_audio`, `media` (`prompt_active`, `app`, `title`, `lock_active`, `lock_app`), `mic_cam` (`mic_active`, `cam_active`, `app`, `signal_state`, `capture_peak`), `power_requests` (`display_active`, `suppressed_browser`, `unavailable`, `owners`), `gpu` (`util_pct`, `floor_pct`, `effective_threshold_pct`, `power_mw`, `unavailable`), `raw_pc_disk`, `raw_pc_net`, `top_disk_proc`, `top_disk_kbps`, `suggested_thresholds`, `agent_lease_reason`, `agent_lease_remaining_secs`, `cond1_pass` through `cond11_pass`, `live_agent_proc`, `live_gpu`, `live_download`, `live_mic_cam_active`, `live_mic_cam_app`, `live_pc_cpu`, `live_pc_disk`, `live_pc_net`, `cond7_text`, `spike_counter`, `spike_limit`, `power_request_active`, `power_mode`, `local_ip`, `mac_address`, `currency_symbol`, `co2_factor`, `history` (`agent_cpu`, `gpu`, `pc_cpu`, `pc_disk`, `pc_net` arrays), `top_processes` and `energy` (`cost_saved`, `kwh_saved`, `duration_secs`, `co2_saved`).
 
 curl:
 
@@ -571,7 +583,7 @@ Key decisions:
 | Tray | `tray-icon` |
 | Serialization | `serde`, `serde_json` |
 | Images | `image` (png, ico) |
-| Windows APIs | `windows-sys` |
+| Windows APIs | `windows-sys`, `windows` (CoreAudio & WinRT SMTC) |
 | Windows packaging | `embed-manifest`, `winres`, WiX Toolset v3 |
 | QR codes | in-tree `src/qr.rs` (no dependency) |
 
@@ -579,11 +591,14 @@ Key decisions:
 
 | Capability | Windows | Linux | macOS |
 |---|---|---|---|
-| System sleep | `SetSuspendState` | `systemctl suspend` | `pmset sleepnow` |
+| System sleep | `SetSuspendState` (never disables wake events) | `systemctl suspend` | `pmset sleepnow` |
+| Wake locks (`Best Performance`) | Dedicated thread `SetThreadExecutionState` | `systemd-inhibit` | `caffeinate -d -i` |
 | Input idle | `GetLastInputInfo` | `xprintidle` / X11, Wayland D-Bus | `ioreg` (`HIDIdleTime`) |
-| Display timeout | `powercfg` | `xset dpms` / Wayland DBus | `pmset displaysleep` |
-| GPU monitoring | NVML (dynamic) | DRM sysfs | IOAccelerator |
-| Meeting detection | `ConsentStore` registry | PulseAudio / PipeWire | CoreAudio |
+| Wake classification | `PowerRegisterSuspendResumeNotification` | Resume wall-clock jump + idle heuristic | Resume wall-clock jump + idle heuristic |
+| Display timeout | `powercfg` + HDMI speaker form-factor check | `xset dpms` / Wayland DBus | `pmset displaysleep` |
+| GPU monitoring | Multi-adapter NVML (`nvml.dll` + board power) | DRM sysfs | IOAccelerator |
+| Audio / media / meeting | CoreAudio render & capture RMS, WinRT SMTC, `ConsentStore` | PulseAudio / PipeWire | CoreAudio |
+| Network filtering | `GetIpForwardTable2` + `GetAdaptersAddresses` (default route) | `sysinfo` filtered NICs | `sysinfo` filtered NICs |
 | Autostart | Task Scheduler / Startup | `~/.config/autostart` | `~/Library/LaunchAgents` |
 
 ## Project structure
@@ -591,11 +606,15 @@ Key decisions:
 ```
 .
 ├── Cargo.toml                 package manifest (binary: src/app.rs)
-├── build.rs                   Windows manifest (RequireAdministrator) and icon resources
+├── build.rs                   Windows manifest (AsInvoker) and icon resources
 ├── build-msi.ps1              builds the Windows MSI with WiX v3.14
 ├── generate-icon.ps1          regenerates assets\app.ico (Windows PowerShell, System.Drawing)
 ├── src/
-│   ├── app.rs                 binary entry point
+│   ├── app.rs                 binary entry point, UI, tray, web server, watchdog orchestrator
+│   ├── signal.rs              rolling-window signal conditioning, hysteresis, GPU baseline & mic signal classifier
+│   ├── intent.rs              operational modes, UserIntent state machine, blocker transparency & (i) Guide content
+│   ├── evaluator.rs           pure intent-aware decision evaluator and 15 scenario replay tests (T1-T15)
+│   ├── probes.rs              OS probes (CoreAudio/SMTC worker, wake-lock thread, wake classifier, NVML, NICs, tree sampler)
 │   ├── qr.rs                  dependency-free QR encoder (versions 1-10, EC L/M)
 │   └── main.rs                legacy single-module reference (superseded by src/app.rs)
 ├── assets/
@@ -651,19 +670,19 @@ cargo test --target <target>
 cargo build --release --target <target>
 ```
 
-The only unit tests documented here are the QR encoder tests in `src/qr.rs`. CI does not build the Intel macOS target, run `clippy` or check formatting.
+Unit tests cover the pure signal-conditioning filters (`src/signal.rs`), intent classification (`src/intent.rs`), T1-T15 scenario replay tests & evaluator edge cases (`src/evaluator.rs`, `src/app.rs`), OS request/NIC parsers (`src/probes.rs`), and QR encoding (`src/qr.rs`). CI does not build the Intel macOS target, run `clippy` or check formatting.
 
 **Releases.** Pushing a tag matching `v*`, or running the workflow manually with `tag_name`, triggers `.github/workflows/release.yml`. It builds the Windows MSI and portable EXE, the Linux `.tar.gz` and `.deb`, and the macOS `aarch64` and `x86_64` archives plus the universal `.app` zip. It then generates `SHA256SUMS.txt` and publishes a GitHub Release. A signing step exists as a placeholder and does not sign anything yet.
 
-**Version bump checklist.** The version string is duplicated in `Cargo.toml`, `wix/main.wxs` (`Version="x.y.z.0"`), `packaging/macos/Info.plist`, `packaging/build-deb.sh`, and the winget, Scoop, Chocolatey, Homebrew and AUR manifests. `build-msi.ps1` reads `Cargo.toml` and falls back to `1.1.0`. Package-manager manifests also need real SHA-256 values.
+**Version bump checklist.** The version string is duplicated in `Cargo.toml`, `wix/main.wxs` (`Version="x.y.z.0"`), `packaging/macos/Info.plist`, `packaging/build-deb.sh`, and the winget, Scoop, Chocolatey, Homebrew and AUR manifests. `build-msi.ps1` reads `Cargo.toml` and falls back to `1.2.0`. Package-manager manifests also need real SHA-256 values after release checksums are published.
 
 ## Security
 
 - The API and dashboard bind to `127.0.0.1` by default. Enabling LAN access exposes the dashboard over plain HTTP; use a VPN or Tailscale Serve for access outside your LAN.
 - Every `/api/*` request needs the 256-bit token. Treat `api_token.txt`, the pairing URL and the QR code as credentials: they grant control over sleep, leases and power modes.
-- `Host` and `Origin` validation protects against DNS rebinding and cross-origin requests.
+- `Host` validation protects against DNS rebinding, and cross-origin browser requests are rejected with `403` when LAN access is off (LAN mode permits authenticated fleet polling via CORS).
 - The dashboard keeps the token (and, if the peers API is unavailable, fleet peer tokens) in browser `localStorage`. Pair only browsers you trust.
-- On Windows the application runs elevated so it can change power settings and use `SeShutdownPrivilege`.
+- On Windows the application embeds an `AsInvoker` manifest so GUI, CLI commands, and background daemons launch without UAC elevation prompts. Suspend (`SetSuspendState`) requests `SeShutdownPrivilege` cleanly as a standard user when allowed by local policy; `powercfg /requests` probing degrades transparently to a **Probe Unavailable** badge when unprivileged rather than hiding errors.
 - No telemetry. Outbound requests go only to the notification destinations you configure and, if enabled, GitHub Releases.
 - Release binaries are not signed with a paid code-signing certificate.
 
