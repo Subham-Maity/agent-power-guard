@@ -2,7 +2,9 @@ use std::collections::{HashMap, HashSet};
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
+#[cfg(windows)]
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use sysinfo::{Networks, System};
 
@@ -578,7 +580,7 @@ pub fn compute_filtered_net_kbps(
     for (name, net) in nets {
         let bytes = net.received().saturating_add(net.transmitted());
         raw_total = raw_total.saturating_add(bytes);
-        let lower = name.to_lowercase();
+        let lower = name.to_string_lossy().to_lowercase();
 
         let include = if !manual.is_empty() {
             manual.iter().any(|m| lower.contains(m))
@@ -795,8 +797,8 @@ pub fn start_audio_media_worker() -> Arc<Mutex<AudioMediaReading>> {
                 PropVariantClear, PropVariantToUInt32,
             };
             use windows::Win32::System::Com::{
-                CoCreateInstance, CoInitializeEx, CoTaskMemFree, CoUninitialize, CLSCTX_ALL,
-                COINIT_MULTITHREADED, STGM_READ,
+                CoCreateInstance, CoInitializeEx, CoTaskMemFree, CLSCTX_ALL, COINIT_MULTITHREADED,
+                STGM_READ,
             };
 
             const PKEY_AUDIO_ENDPOINT_FORM_FACTOR: PROPERTYKEY = PROPERTYKEY {
@@ -813,8 +815,7 @@ pub fn start_audio_media_worker() -> Arc<Mutex<AudioMediaReading>> {
                 s
             }
 
-            let com_hr = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) };
-            let should_uninit = com_hr.is_ok();
+            let _com_hr = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) };
             let mut smtc_mgr: Option<GlobalSystemMediaTransportControlsSessionManager> = None;
 
             loop {
@@ -1014,11 +1015,6 @@ pub fn start_audio_media_worker() -> Arc<Mutex<AudioMediaReading>> {
                 }
 
                 std::thread::sleep(Duration::from_secs(1));
-            }
-
-            #[allow(unreachable_code)]
-            if should_uninit {
-                unsafe { CoUninitialize() };
             }
         }
 

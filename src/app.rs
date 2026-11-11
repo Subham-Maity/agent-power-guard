@@ -17,15 +17,12 @@ use std::process::Command;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use crate::evaluator::{evaluate, ConditionStatus, Decision, EvalConfig, EvaluationState, Metrics};
+#[cfg(test)]
+use crate::evaluator::Decision;
+use crate::evaluator::{evaluate, ConditionStatus, EvalConfig, EvaluationState, Metrics};
 use crate::intent::{
-    get_info_guide_sections, BlockerInfo, MediaPromptAction, MediaSessionSnapshot, MicCamSnapshot,
-    OperationalMode, PowerRequestOwner, PowerRequestSnapshot, UserIntent,
-};
-use crate::probes::{
-    compute_filtered_net_kbps, query_default_route_nic_names, sample_gpu_probe,
-    sample_processes_enriched, start_audio_media_worker, start_power_request_worker,
-    WakeEventTracker, WakeLockController,
+    get_info_guide_sections, BlockerInfo, MediaPromptAction, MicCamSnapshot, OperationalMode,
+    PowerRequestOwner, UserIntent,
 };
 
 #[cfg(windows)]
@@ -1259,6 +1256,7 @@ pub fn schedule_os_wake(timer: &WakeTimer) {
 }
 
 pub fn remove_os_wake(timer_id: &str) {
+    let _ = timer_id;
     #[cfg(windows)]
     {
         let task_name = format!("AgentPowerGuard_Wake_{}", timer_id);
@@ -2036,6 +2034,7 @@ pub fn turn_off_monitors_now() {
 }
 
 pub fn apply_monitor_timeout(mins: u32) {
+    let _ = mins;
     #[cfg(windows)]
     {
         let _ = Command::new("powercfg")
@@ -2050,6 +2049,7 @@ pub fn apply_monitor_timeout(mins: u32) {
 }
 
 pub fn apply_optimal_power_plan(monitor_timeout_mins: u32) {
+    let _ = monitor_timeout_mins;
     #[cfg(windows)]
     {
         let _ = Command::new("powercfg")
@@ -2124,6 +2124,7 @@ pub fn check_power_requests() -> (bool, bool) {
 }
 
 pub fn set_startup_task(enable: bool) {
+    let _ = enable;
     #[cfg(windows)]
     {
         let subkey: Vec<u16> = "Software\\Microsoft\\Windows\\CurrentVersion\\Run\0"
