@@ -171,28 +171,28 @@ jobs:
 
             ---
 
-            ### 🌟 What's New & Fixed in v1.2.0
+            ### 🌟 What's New & Fixed in v1.2.1 (Full Upgrade Since v1.0.3)
 
-            - 🧠 **Intent-Aware Sleep Engine & Unified Signal-Conditioning Filter:**
-              - **Signal-Conditioning Layer:** Every analog metric (Agent CPU, Downloads, PC CPU, Attributed Disk, Default-Route Network, GPU) now goes through a rolling-window duty-cycle filter with hysteresis (`Pending` -> `Busy` -> `Quiet`). Transient 1-second spikes and `Pending` windows never reset the countdown or kill Stage 1 display-off.
-              - **Explicit Intent Classification:** Unified top-level intent hierarchy (`BestPerformance` -> `GuardOff` -> `ExplicitHold` -> `MeetingLive` -> `PassiveMedia` -> `ActiveWork` -> `HumanActive` -> `IdleReady`) controlling Stage 1 display-off and Stage 2 sleep independently.
-            - 🎛️ **3 Clear Operational Modes & Dedicated OS Wake Lock:**
-              - **Smart Guard** (watchdog actively manages display-off & sleep), **Guard Off** (watchdog pauses so normal OS power settings apply), and **Best Performance** (explicitly disables sleep & display-off via a dedicated OS wake-lock thread using `SetThreadExecutionState` / `systemd-inhibit` / `caffeinate`, with optional `1h / 2h / ∞` timers).
-              - **Live Blocker Transparency & Built-in `(i)` Guide:** Every active blocker shows exact `#`, condition, offending owner/process, live value, hold duration, and inline `+ Ignore` controls across desktop GUI, tray tooltip, and web dashboard.
-            - 🔍 **Precision Telemetry & Noise Elimination:**
-              - **Adaptive Baseline GPU + NVML Power:** Learns your idle desktop compositor baseline over quiet windows (`floor + margin`), polls all NVML devices including board power draw, never triggers on VRAM allocation alone, and surfaces a `Probe Unavailable` badge when NVML is absent.
-              - **Per-Process Disk Attribution & Default-Route NIC Filtering:** Subtracts background noise (`MsMpEng`, `SearchIndexer`, `TiWorker`, cloud sync clients) and reports the actual culprit (`cargo.exe 14.2 MB/s`); filters network traffic to default-route interfaces (`0.0.0.0/0`, `::/0`) ignoring loopback, WSL vEthernet, Hyper-V, and Docker virtual adapters; subtracts self-CPU overhead.
-              - **Process-Tree Agent CPU Attribution:** Separates idle IDE shells (`code.exe`, `cursor.exe`) from active compiler/agent worker child processes.
-            - 🎬 **Passive Media Detection & Audio Intelligence:**
-              - Detects fullscreen/windowed video and media playback via CoreAudio render sessions and WinRT SMTC (`GlobalSystemMediaTransportControls`), raising a non-focus-stealing topmost prompt (`Keep Awake / Sleep Now / Hide`) bound strictly to session identity (`app + session`) rather than track title, and clearing automatically after pause grace (default 60s). Stage 1 display-off still saves screen power during audio-only playback.
-              - **Monitor Speaker Protection:** Detects audio routed through monitor/HDMI/DisplayPort endpoints (`DigitalAudioDisplayDevice`) and defers display sleep so HDMI audio doesn't drop.
-              - **Mic/Cam Signal Presence & App Categories:** Measures real CoreAudio capture peak energy (`Dead / Ambient / Active`) alongside ConsentStore/webcam checks — strict protection for calls (`Zoom`, `Teams`, `Meet`, `Discord`) even when muted, while creative tools (`Premiere`, `Resolve`, `Audacity`, `OBS`) only block on active acoustic/camera capture.
-            - ⚡ **Reliability, Wakeup & Power Request Fixes:**
-              - **Cond 9 Power Requests Visibility & Safe Degradation:** Surfaces active `powercfg /requests` lock owners with 1-tap ignore, suppresses stale silent browser `DISPLAY` locks (>60s paused), and clearly displays `Probe Unavailable` under standard-user (`AsInvoker`) execution rather than failing silently.
-              - **Zombie Agent Lease Watchdog:** Detects PID-bound leases stuck at ~0% subtree CPU & disk over extended periods (`lease_idle_mins`), sends alerts first, and offers opt-in auto-expiry.
-              - **Wake Source Classification & Short Return Path:** Registers `PowerRegisterSuspendResumeNotification` cleanly (working in both GUI and headless daemon mode) to classify user wakes vs unattended network/maintenance wakes (using a fast `120s` unattended return-to-sleep timer) without disabling wake events.
-              - **Adaptive Idle Baseline Suggestions:** Learns quiet idle CPU/GPU/Disk baselines and offers 1-click threshold tuning in the UI.
-            - 📦 **Previous v1.1.0 Capabilities Included:** 256-bit API token auth with CORS support for LAN fleet polling, `run` CLI wrapper, built-in `mcp` server, ntfy/Telegram/webhook notifications, block history JSONL/CSV audit log, QR pairing & PWA mobile dashboard, Wake-on-LAN relay & `.deb`/macOS `.app`/Windows MSI packaging.
+            #### 🧠 Intent-Aware Sleep Engine & Signal Conditioning (v1.2.x)
+            - **Signal-Conditioning Layer:** Every analog metric (Agent CPU, Downloads, PC CPU, Attributed Disk, Default-Route Network, GPU) passes through a rolling-window duty-cycle filter with hysteresis (`Pending` -> `Busy` -> `Quiet`). Single 1-second spikes and `Pending` windows never reset the countdown or kill Stage 1 display-off.
+            - **Explicit Intent Classification:** Unified top-level intent hierarchy (`BestPerformance` -> `GuardOff` -> `ExplicitHold` -> `MeetingLive` -> `PassiveMedia` -> `ActiveWork` -> `HumanActive` -> `IdleReady`) controlling Stage 1 display-off and Stage 2 sleep independently.
+            - **3 Top-Level Operational Modes & Dedicated OS Wake Lock:** Switch between **Smart Guard** (watchdog actively manages display-off & sleep), **Guard Off** (watchdog pauses so normal OS power settings apply), and **Best Performance** (explicitly disables sleep & display-off via a dedicated OS wake-lock thread using `SetThreadExecutionState` / `systemd-inhibit` / `caffeinate`, with optional `1h / 2h / ∞` timers).
+            - **Live Blocker Transparency & Built-in `(i)` Guide:** Every active blocker shows `#`, condition, offending owner/process, live value, hold duration, and inline `+ Ignore` across desktop GUI, tray tooltip, and web dashboard.
+            - **Adaptive GPU Baseline + Multi-Adapter NVML Power Draw:** Learns your idle desktop compositor floor (`floor + margin`), polls all NVML devices including board power draw, never triggers on VRAM allocation alone, and surfaces a `Probe Unavailable` badge when NVML is absent.
+            - **Per-Process Disk Attribution & Default-Route NIC Filtering:** Subtracts background noise (`MsMpEng`, `SearchIndexer`, `TiWorker`, cloud sync clients) and reports the exact culprit (`cargo.exe 14.2 MB/s`); filters network traffic to default-route interfaces (`0.0.0.0/0`, `::/0`) ignoring loopback, WSL vEthernet, Hyper-V, and Docker virtual adapters; subtracts self-CPU overhead.
+            - **Process-Tree Agent CPU Attribution:** Separates idle IDE shells (`code.exe`, `cursor.exe`) from active compiler/agent worker child processes.
+            - **Passive Media Detection & Monitor Audio Protection:** CoreAudio render sessions + WinRT SMTC (`GlobalSystemMediaTransportControls`) detect playback and raise a non-focus-stealing topmost prompt (`Keep Awake / Sleep Now / Hide`) bound strictly to session identity (`app + session`) rather than track title, clearing automatically after pause grace (default 60s). Stage 1 display-off stays allowed for audio-only playback unless audio plays through monitor/HDMI speakers (`DigitalAudioDisplayDevice`).
+            - **Mic/Cam Signal Presence & App Categories:** Measures real CoreAudio capture peak energy (`Dead / Ambient / Active`) alongside ConsentStore/webcam checks — strict protection for calls (`Zoom`, `Teams`, `Meet`, `Discord`) even when muted, while creative tools (`Premiere`, `Resolve`, `Audacity`, `OBS`) block only on active acoustic/camera capture.
+            - **Cond 9 Power Requests Visibility & Safe Degradation:** Surfaces active `powercfg /requests` lock owners with 1-tap ignore, suppresses stale silent browser `DISPLAY` locks (>60s paused), and clearly displays `Probe Unavailable` under standard-user (`AsInvoker`) execution rather than failing silently.
+            - **Zombie Agent Lease Watchdog & Wake Classification:** Detects PID-bound leases stuck at ~0% subtree CPU & disk (`lease_idle_mins`), alerts before optional expiry, registers `PowerRegisterSuspendResumeNotification` (GUI & headless daemon) to classify user wakes vs unattended wakes (`120s` fast return timer) without disabling wake events, and suggests adaptive idle baseline floors.
+            - **Packaging & Release Fixes:** Fixed GitHub Actions `secrets` conditional syntax blocking release publishing, resolved `sysinfo` interface name `&OsString` handling, updated QR encoder corner separators and security audit fixes, and eliminated cross-platform compiler warnings.
+
+            #### 🚀 Previous Upgrades Now Included in This Release (v1.1.0 Milestones)
+            - 🔒 **Secure Local API & Pure Evaluator:** 256-bit API token auth (`0600` on Unix, `%APPDATA%` on Windows), constant-time verification, 10-fail/min IP rate limiting, DNS-rebinding protection + CORS support for fleet polling, and `AsInvoker` manifest so CLI commands run without UAC prompts.
+            - 🤖 **AI Coding Agent Integration:** `agent-power-guard run [--max-mins N] -- <cmd>` PID-bound wrapper, built-in `mcp` stdio server for Claude Code / Cursor / Antigravity, and 8 agent profiles.
+            - 📊 **Block History, Notifications & Update Check:** Local JSONL timeline answering *"what kept my PC awake?"* with CSV/JSON export, ntfy / Telegram / webhook alerts, and opt-in daily GitHub Releases check.
+            - ⏱️ **Power Modes, Quiet Hours, Battery Profiles & Wake Timers:** Balanced / Work / Night / Away presets, quiet-hours downshift, "Sleep After Lease Ends", OS RTC wake timers (`rtcwake`, Task Scheduler, `pmset`), laptop AC vs battery thresholds + low-battery emergency suspend, and carbon grid / currency accounting.
+            - 📱 **Mobile PWA Dashboard, Fleet View & Wake-on-LAN:** QR code pairing, live SVG sparklines, 1-tap `+ Ignore`, multi-machine Fleet View tab, `agent-power-guard daemon` headless mode, `agent-power-guard relay` Wake-on-LAN server, and native `.deb`, universal macOS `.app`, and Windows MSI installers.
 
             ---
 
@@ -202,7 +202,7 @@ jobs:
             |---|---|---|
             | **Windows 10 / 11 (Installer)** | [`AgentPowerGuard-windows-x64.msi`](#) | **Recommended for Windows.** Start Menu, desktop shortcuts, Add/Remove Programs. |
             | **Windows 10 / 11 (Portable)** | [`agent-power-guard-windows-x64.exe`](#) | Portable single-file binary. Runs as standard user (`AsInvoker`) without UAC prompts. |
-            | **Debian / Ubuntu Linux** | [`agent-power-guard_1.2.0_amd64.deb`](#) | Native `.deb` package with desktop integration and systemd user unit. |
+            | **Debian / Ubuntu Linux** | [`agent-power-guard_1.2.1_amd64.deb`](#) | Native `.deb` package with desktop integration and systemd user unit. |
             | **Linux (Generic tarball)** | [`agent-power-guard-linux-x86_64.tar.gz`](#) | Standalone Linux x86_64 binary supporting X11 & Wayland. |
             | **macOS (Universal Bundle)** | [`AgentPowerGuard-macos-universal.zip`](#) | Universal `.app` bundle for both Apple Silicon (M1–M4) and Intel Macs. |
             | **macOS (Apple Silicon)** | [`agent-power-guard-macos-aarch64.tar.gz`](#) | Raw standalone ARM64 binary. |

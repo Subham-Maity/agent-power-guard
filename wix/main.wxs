@@ -3,7 +3,7 @@
     <Product Id="*"
              Name="Agent Power Guard"
              Language="1033"
-             Version="1.2.0.0"
+             Version="1.2.1.0"
              Manufacturer="Agent Power Guard"
              UpgradeCode="B5F375DF-8692-4217-A8C5-D206898F6E4D">
         

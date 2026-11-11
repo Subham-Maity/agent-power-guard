@@ -674,7 +674,7 @@ Unit tests cover the pure signal-conditioning filters (`src/signal.rs`), intent 
 
 **Releases.** Pushing a tag matching `v*`, or running the workflow manually with `tag_name`, triggers `.github/workflows/release.yml`. It builds the Windows MSI and portable EXE, the Linux `.tar.gz` and `.deb`, and the macOS `aarch64` and `x86_64` archives plus the universal `.app` zip. It then generates `SHA256SUMS.txt` and publishes a GitHub Release. A signing step exists as a placeholder and does not sign anything yet.
 
-**Version bump checklist.** The version string is duplicated in `Cargo.toml`, `wix/main.wxs` (`Version="x.y.z.0"`), `packaging/macos/Info.plist`, `packaging/build-deb.sh`, and the winget, Scoop, Chocolatey, Homebrew and AUR manifests. `build-msi.ps1` reads `Cargo.toml` and falls back to `1.2.0`. Package-manager manifests also need real SHA-256 values after release checksums are published.
+**Version bump checklist.** The version string is duplicated in `Cargo.toml`, `wix/main.wxs` (`Version="x.y.z.0"`), `packaging/macos/Info.plist`, `packaging/build-deb.sh`, and the winget, Scoop, Chocolatey, Homebrew and AUR manifests. `build-msi.ps1` reads `Cargo.toml` and falls back to `1.2.1`. Package-manager manifests also need real SHA-256 values after release checksums are published.
 
 ## Security
 
