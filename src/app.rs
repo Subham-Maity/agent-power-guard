@@ -7279,13 +7279,20 @@ mod tests {
         assert!(!d.cond7_spike_filter.is_passing);
         assert!(!d.all_conditions_pass);
 
-        // Once quiet over full 15s window (<=2 busy samples), hysteresis clears cleanly
+        // Once quiet over rolling window down to <= quiet_count (2), hysteresis clears cleanly
         metrics.whole_pc_cpu = 5.0;
-        for i in 0..14 {
+        let mut cleared = false;
+        for i in 0..15 {
             metrics.now_epoch_secs = 1008 + i;
             let d = eval_app(&cfg, &metrics, &mut state);
-            assert!(d.cond7_spike_filter.is_passing);
+            if i == 14 {
+                cleared = d.cond7_spike_filter.is_passing;
+            }
         }
+        assert!(
+            cleared,
+            "Hysteresis should clear after quiet samples drain busy window"
+        );
     }
 
     #[test]
@@ -7306,7 +7313,7 @@ mod tests {
 
     #[test]
     fn test_cond10_gpu_boundary() {
-        let cfg = make_test_config();
+        let cfg = make_test_config(); // gpu_threshold_pct = 5.0, gpu_baseline_margin_pct = 5.0
         let mut metrics = make_passing_metrics();
         let mut state = EvaluationState {
             countdown_secs: 180,
@@ -7314,11 +7321,13 @@ mod tests {
             ..Default::default()
         };
 
+        // 4.9% passive idle sample trains baseline floor to 4.9% -> passes
         metrics.gpu_util = 4.9;
         let d = eval_app(&cfg, &metrics, &mut state);
         assert!(d.cond10_gpu.is_passing);
 
-        metrics.gpu_util = 5.1;
+        // 12.0% > effective cutoff (4.9% floor + 5.0% margin = 9.9%) -> blocks!
+        metrics.gpu_util = 12.0;
         let d = eval_app(&cfg, &metrics, &mut state);
         assert!(!d.cond10_gpu.is_passing);
         assert!(!d.all_conditions_pass);
@@ -7413,8 +7422,10 @@ mod tests {
 
         let d = eval_app(&cfg, &metrics, &mut state);
         assert!(!d.all_conditions_pass);
+        assert_eq!(d.operational_mode, OperationalMode::GuardOff);
+        assert_eq!(d.intent.code(), "GuardOff");
         assert_eq!(state.countdown_secs, cfg.idle_threshold_secs);
-        assert!(d.blocker_banner_text.contains("GUARD OFF"));
+        assert!(d.blocker_banner_text.contains("watchdog is off"));
     }
 
     #[test]
