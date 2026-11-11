@@ -144,6 +144,7 @@ jobs:
       - name: Generate SHA-256 Checksums
         run: |
           cd release-assets
+          find . -maxdepth 1 -type d ! -name '.' -exec rm -rf {} +
           sha256sum * > SHA256SUMS.txt
           cat SHA256SUMS.txt
 
@@ -171,7 +172,7 @@ jobs:
 
             ---
 
-            ### 🌟 What's New & Fixed in v1.2.1 (Full Upgrade Since v1.0.3)
+            ### 🌟 What's New & Fixed in v1.2.2 (Full Upgrade Since v1.0.3)
 
             #### 🧠 Intent-Aware Sleep Engine & Signal Conditioning (v1.2.x)
             - **Signal-Conditioning Layer:** Every analog metric (Agent CPU, Downloads, PC CPU, Attributed Disk, Default-Route Network, GPU) passes through a rolling-window duty-cycle filter with hysteresis (`Pending` -> `Busy` -> `Quiet`). Single 1-second spikes and `Pending` windows never reset the countdown or kill Stage 1 display-off.
@@ -202,7 +203,7 @@ jobs:
             |---|---|---|
             | **Windows 10 / 11 (Installer)** | [`AgentPowerGuard-windows-x64.msi`](#) | **Recommended for Windows.** Start Menu, desktop shortcuts, Add/Remove Programs. |
             | **Windows 10 / 11 (Portable)** | [`agent-power-guard-windows-x64.exe`](#) | Portable single-file binary. Runs as standard user (`AsInvoker`) without UAC prompts. |
-            | **Debian / Ubuntu Linux** | [`agent-power-guard_1.2.1_amd64.deb`](#) | Native `.deb` package with desktop integration and systemd user unit. |
+            | **Debian / Ubuntu Linux** | [`agent-power-guard_1.2.2_amd64.deb`](#) | Native `.deb` package with desktop integration and systemd user unit. |
             | **Linux (Generic tarball)** | [`agent-power-guard-linux-x86_64.tar.gz`](#) | Standalone Linux x86_64 binary supporting X11 & Wayland. |
             | **macOS (Universal Bundle)** | [`AgentPowerGuard-macos-universal.zip`](#) | Universal `.app` bundle for both Apple Silicon (M1–M4) and Intel Macs. |
             | **macOS (Apple Silicon)** | [`agent-power-guard-macos-aarch64.tar.gz`](#) | Raw standalone ARM64 binary. |

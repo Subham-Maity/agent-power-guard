@@ -1,6 +1,6 @@
 [package]
 name = "agent-power-guard"
-version = "1.2.1"
+version = "1.2.2"
 edition = "2021"
 rust-version = "1.95"
 description = "Native Windows, Linux & macOS watchdog that sleeps the PC only when you AND your coding agents are idle"

@@ -38,8 +38,9 @@ cp packaging/macos/Info.plist "${CONTENTS}/"
 cp assets/icon_32.png "${RESOURCES}/app.png"
 cp assets/icon_32.png "${RESOURCES}/app.icns" 2>/dev/null || true
 
-# Zip the bundle for distribution
+# Zip the bundle for distribution and remove raw directory so CI artifact upload/checksum only ships files
 cd dist
 zip -r "AgentPowerGuard-macos-universal.zip" "${APP_NAME}"
+rm -rf "${APP_NAME}"
 echo "macOS Application Bundle created at dist/AgentPowerGuard-macos-universal.zip"
 
