@@ -6870,9 +6870,43 @@ fn spec_bubble_colors(
     }
 }
 
+fn measure_text_px(ui: &egui::Ui, text: &str, size: f32) -> f32 {
+    ui.painter()
+        .layout_no_wrap(
+            text.to_string(),
+            egui::FontId::proportional(size),
+            egui::Color32::WHITE,
+        )
+        .size()
+        .x
+}
+
+fn pack_pill_rows(widths: &[f32], max_row_w: f32, gap: f32) -> Vec<Vec<usize>> {
+    let mut rows: Vec<Vec<usize>> = Vec::new();
+    let mut cur_row: Vec<usize> = Vec::new();
+    let mut cur_w = 0.0f32;
+    for (idx, &w) in widths.iter().enumerate() {
+        let needed = if cur_row.is_empty() { w } else { gap + w };
+        if !cur_row.is_empty() && cur_w + needed > max_row_w {
+            rows.push(cur_row);
+            cur_row = vec![idx];
+            cur_w = w;
+        } else {
+            cur_w += needed;
+            cur_row.push(idx);
+        }
+    }
+    if !cur_row.is_empty() {
+        rows.push(cur_row);
+    }
+    rows
+}
+
+#[allow(clippy::too_many_arguments)]
 fn render_core_spec_pill(
     ui: &mut egui::Ui,
     dark: bool,
+    max_row_w: f32,
     cat_key: &str,
     prefix: &str,
     accent: egui::Color32,
@@ -6885,6 +6919,13 @@ fn render_core_spec_pill(
     let is_editing = edit_target
         .as_ref()
         .is_some_and(|(k, i)| k == cat_key && *i == 0);
+    let shown = if value.trim().is_empty() {
+        "Unknown (click to edit)".to_string()
+    } else {
+        value.clone()
+    };
+    let text_w = measure_text_px(ui, &format!("{}: {}", prefix, shown), 11.5);
+    let too_wide = text_w + 30.0 > max_row_w;
 
     egui::Frame::new()
         .fill(fill)
@@ -6892,6 +6933,9 @@ fn render_core_spec_pill(
         .corner_radius(11.0)
         .inner_margin(egui::Margin::symmetric(9, 4))
         .show(ui, |ui| {
+            if too_wide {
+                ui.set_max_width((max_row_w - 22.0).max(180.0));
+            }
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = 5.0;
                 ui.label(
@@ -6903,7 +6947,7 @@ fn render_core_spec_pill(
                 if is_editing {
                     let te = ui.add(
                         egui::TextEdit::singleline(edit_buf)
-                            .desired_width(210.0)
+                            .desired_width((max_row_w - 170.0).clamp(140.0, 260.0))
                             .hint_text("Enter value..."),
                     );
                     let enter = te.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
@@ -6919,20 +6963,15 @@ fn render_core_spec_pill(
                         *edit_target = None;
                     }
                 } else {
-                    let shown = if value.trim().is_empty() {
-                        "Unknown (click to edit)".to_string()
+                    let lbl =
+                        egui::Label::new(egui::RichText::new(shown).size(11.5).color(text_col))
+                            .sense(egui::Sense::click());
+                    let resp = if too_wide {
+                        ui.add(lbl.wrap())
                     } else {
-                        value.clone()
+                        ui.add(lbl.extend())
                     };
-                    if ui
-                        .add(
-                            egui::Label::new(egui::RichText::new(shown).size(11.5).color(text_col))
-                                .wrap()
-                                .sense(egui::Sense::click()),
-                        )
-                        .on_hover_text("Click to edit")
-                        .clicked()
-                    {
+                    if resp.on_hover_text("Click to edit").clicked() {
                         *edit_target = Some((cat_key.to_string(), 0));
                         *edit_buf = value.clone();
                     }
@@ -6962,8 +7001,9 @@ fn render_spec_bubble_category(
     } else {
         egui::Color32::from_rgb(185, 28, 28)
     };
+    let max_row_w = (ui.available_width() - 6.0).max(220.0);
 
-    ui.horizontal_wrapped(|ui| {
+    ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 6.0;
         ui.label(
             egui::RichText::new(format!("{} ({})", title, items.len()))
@@ -6974,137 +7014,172 @@ fn render_spec_bubble_category(
         if items.is_empty() && !edit_target.as_ref().is_some_and(|(k, _)| k == cat_key) {
             ui.label(egui::RichText::new(empty_hint).weak().size(11.5));
         }
-
-        let mut remove_idx: Option<usize> = None;
-        for idx in 0..items.len() {
-            let is_editing = edit_target
-                .as_ref()
-                .is_some_and(|(k, i)| k == cat_key && *i == idx);
-            egui::Frame::new()
-                .fill(fill)
-                .stroke(egui::Stroke::new(1.0, stroke))
-                .corner_radius(11.0)
-                .inner_margin(egui::Margin::symmetric(8, 3))
-                .show(ui, |ui| {
-                    ui.horizontal(|ui| {
-                        ui.spacing_mut().item_spacing.x = 4.0;
-                        if is_editing {
-                            let te = ui.add(
-                                egui::TextEdit::singleline(edit_buf)
-                                    .desired_width(180.0)
-                                    .hint_text("Edit item..."),
-                            );
-                            let enter =
-                                te.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
-                            if ui.small_button("OK").clicked() || enter {
-                                let cleaned = edit_buf.trim().to_string();
-                                if cleaned.is_empty() {
-                                    remove_idx = Some(idx);
-                                } else if items[idx] != cleaned {
-                                    items[idx] = cleaned;
-                                    changed = true;
-                                }
-                                *edit_target = None;
-                            }
-                            if ui.small_button("Cancel").clicked() {
-                                *edit_target = None;
-                            }
-                        } else {
-                            if ui
-                                .add(
-                                    egui::Label::new(
-                                        egui::RichText::new(&items[idx]).size(11.5).color(text_col),
-                                    )
-                                    .wrap()
-                                    .sense(egui::Sense::click()),
-                                )
-                                .on_hover_text("Click to edit item")
-                                .clicked()
-                            {
-                                *edit_target = Some((cat_key.to_string(), idx));
-                                *edit_buf = items[idx].clone();
-                            }
-                            if ui
-                                .add(
-                                    egui::Button::new(
-                                        egui::RichText::new("x")
-                                            .strong()
-                                            .size(11.0)
-                                            .color(remove_col),
-                                    )
-                                    .frame(false),
-                                )
-                                .on_hover_text("Remove from list")
-                                .clicked()
-                            {
-                                remove_idx = Some(idx);
-                            }
-                        }
-                    });
-                });
-        }
-        if let Some(idx) = remove_idx {
-            if idx < items.len() {
-                items.remove(idx);
-                changed = true;
-            }
-        }
-
-        let is_adding = edit_target
-            .as_ref()
-            .is_some_and(|(k, i)| k == cat_key && *i == usize::MAX);
-        if is_adding {
-            egui::Frame::new()
-                .fill(fill)
-                .stroke(egui::Stroke::new(1.0, stroke))
-                .corner_radius(11.0)
-                .inner_margin(egui::Margin::symmetric(8, 3))
-                .show(ui, |ui| {
-                    ui.horizontal(|ui| {
-                        ui.spacing_mut().item_spacing.x = 4.0;
-                        let te = ui.add(
-                            egui::TextEdit::singleline(edit_buf)
-                                .desired_width(175.0)
-                                .hint_text(add_hint),
-                        );
-                        let enter =
-                            te.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
-                        if ui.small_button("Add").clicked() || enter {
-                            let cleaned = edit_buf.trim().to_string();
-                            if !cleaned.is_empty()
-                                && !items.iter().any(|x| x.eq_ignore_ascii_case(&cleaned))
-                            {
-                                items.push(cleaned);
-                                changed = true;
-                            }
-                            edit_buf.clear();
-                            *edit_target = None;
-                        }
-                        if ui.small_button("Cancel").clicked() {
-                            edit_buf.clear();
-                            *edit_target = None;
-                        }
-                    });
-                });
-        } else if ui
-            .add(
-                egui::Button::new(
-                    egui::RichText::new("+ Add")
-                        .size(11.0)
-                        .strong()
-                        .color(accent),
-                )
-                .fill(fill)
-                .stroke(egui::Stroke::new(1.0, stroke))
-                .corner_radius(11.0),
-            )
-            .on_hover_text(format!("Add custom item to {}", title))
-            .clicked()
-        {
-            *edit_target = Some((cat_key.to_string(), usize::MAX));
-            edit_buf.clear();
-        }
     });
+
+    // Token indices: 0..items.len() for existing bubbles, items.len() for the "+ Add" chip
+    let add_token = items.len();
+    let is_adding = edit_target
+        .as_ref()
+        .is_some_and(|(k, i)| k == cat_key && *i == usize::MAX);
+    let mut widths: Vec<f32> = Vec::with_capacity(items.len() + 1);
+    for (idx, item) in items.iter().enumerate() {
+        let is_editing = edit_target
+            .as_ref()
+            .is_some_and(|(k, i)| k == cat_key && *i == idx);
+        let w = if is_editing {
+            285.0
+        } else {
+            (measure_text_px(ui, item, 11.5) + 42.0).min(max_row_w)
+        };
+        widths.push(w);
+    }
+    widths.push(if is_adding { 285.0 } else { 64.0 });
+
+    let rows = pack_pill_rows(&widths, max_row_w, 6.0);
+    let mut remove_idx: Option<usize> = None;
+
+    for row in rows {
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 6.0;
+            for tok in row {
+                if tok == add_token {
+                    if is_adding {
+                        egui::Frame::new()
+                            .fill(fill)
+                            .stroke(egui::Stroke::new(1.0, stroke))
+                            .corner_radius(11.0)
+                            .inner_margin(egui::Margin::symmetric(8, 3))
+                            .show(ui, |ui| {
+                                ui.horizontal(|ui| {
+                                    ui.spacing_mut().item_spacing.x = 4.0;
+                                    let te = ui.add(
+                                        egui::TextEdit::singleline(edit_buf)
+                                            .desired_width(165.0)
+                                            .hint_text(add_hint),
+                                    );
+                                    let enter = te.lost_focus()
+                                        && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                                    if ui.small_button("Add").clicked() || enter {
+                                        let cleaned = edit_buf.trim().to_string();
+                                        if !cleaned.is_empty()
+                                            && !items
+                                                .iter()
+                                                .any(|x| x.eq_ignore_ascii_case(&cleaned))
+                                        {
+                                            items.push(cleaned);
+                                            changed = true;
+                                        }
+                                        edit_buf.clear();
+                                        *edit_target = None;
+                                    }
+                                    if ui.small_button("Cancel").clicked() {
+                                        edit_buf.clear();
+                                        *edit_target = None;
+                                    }
+                                });
+                            });
+                    } else if ui
+                        .add(
+                            egui::Button::new(
+                                egui::RichText::new("+ Add")
+                                    .size(11.0)
+                                    .strong()
+                                    .color(accent),
+                            )
+                            .fill(fill)
+                            .stroke(egui::Stroke::new(1.0, stroke))
+                            .corner_radius(11.0),
+                        )
+                        .on_hover_text(format!("Add custom item to {}", title))
+                        .clicked()
+                    {
+                        *edit_target = Some((cat_key.to_string(), usize::MAX));
+                        edit_buf.clear();
+                    }
+                    continue;
+                }
+
+                let idx = tok;
+                let is_editing = edit_target
+                    .as_ref()
+                    .is_some_and(|(k, i)| k == cat_key && *i == idx);
+                let too_wide = measure_text_px(ui, &items[idx], 11.5) + 46.0 > max_row_w;
+
+                egui::Frame::new()
+                    .fill(fill)
+                    .stroke(egui::Stroke::new(1.0, stroke))
+                    .corner_radius(11.0)
+                    .inner_margin(egui::Margin::symmetric(8, 3))
+                    .show(ui, |ui| {
+                        if too_wide {
+                            ui.set_max_width((max_row_w - 22.0).max(180.0));
+                        }
+                        ui.horizontal(|ui| {
+                            ui.spacing_mut().item_spacing.x = 4.0;
+                            if is_editing {
+                                let te = ui.add(
+                                    egui::TextEdit::singleline(edit_buf)
+                                        .desired_width(170.0)
+                                        .hint_text("Edit item..."),
+                                );
+                                let enter = te.lost_focus()
+                                    && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                                if ui.small_button("OK").clicked() || enter {
+                                    let cleaned = edit_buf.trim().to_string();
+                                    if cleaned.is_empty() {
+                                        remove_idx = Some(idx);
+                                    } else if items[idx] != cleaned {
+                                        items[idx] = cleaned;
+                                        changed = true;
+                                    }
+                                    *edit_target = None;
+                                }
+                                if ui.small_button("Cancel").clicked() {
+                                    *edit_target = None;
+                                }
+                            } else {
+                                let lbl = egui::Label::new(
+                                    egui::RichText::new(&items[idx]).size(11.5).color(text_col),
+                                )
+                                .sense(egui::Sense::click());
+                                let resp = if too_wide {
+                                    ui.add(lbl.wrap())
+                                } else {
+                                    ui.add(lbl.extend())
+                                };
+                                if resp.on_hover_text("Click to edit item").clicked() {
+                                    *edit_target = Some((cat_key.to_string(), idx));
+                                    *edit_buf = items[idx].clone();
+                                }
+                                if ui
+                                    .add(
+                                        egui::Button::new(
+                                            egui::RichText::new("x")
+                                                .strong()
+                                                .size(11.0)
+                                                .color(remove_col),
+                                        )
+                                        .frame(false),
+                                    )
+                                    .on_hover_text("Remove from list")
+                                    .clicked()
+                                {
+                                    remove_idx = Some(idx);
+                                }
+                            }
+                        });
+                    });
+            }
+        });
+        ui.add_space(3.0);
+    }
+
+    if let Some(idx) = remove_idx {
+        if idx < items.len() {
+            items.remove(idx);
+            changed = true;
+        }
+    }
 
     if changed {
         *items = dedupe_clean_list(std::mem::take(items));
@@ -7652,6 +7727,71 @@ impl eframe::App for AgentPowerGuardApp {
                         let dark = ui.visuals().dark_mode;
                         let mut any_spec_edited = false;
 
+                        if !s.detected_specs.fetched && !s.watt_calc.manual_wizard_unlocked {
+                            app_card_frame(ui).show(ui, |ui| {
+                                ui.set_width((inner_w - 34.0).max(220.0));
+                                ui.add_space(48.0);
+                                ui.vertical_centered(|ui| {
+                                    draw_icon_inline(ui, 34.0, egui::Color32::from_rgb(56, 189, 248), UiIcon::Cpu);
+                                    ui.add_space(10.0);
+                                    ui.label(
+                                        egui::RichText::new("Fetch Your Device Hardware Specs")
+                                            .strong()
+                                            .size(18.0),
+                                    );
+                                    ui.add_space(6.0);
+                                    ui.add(
+                                        egui::Label::new(
+                                            egui::RichText::new(
+                                                "Click below to scan motherboard, CPU, RAM sticks, physical storage drives, GPU, displays, Wi-Fi/LAN, Bluetooth, audio/mic, USB peripherals & RGB controllers.",
+                                            )
+                                            .weak()
+                                            .size(12.5),
+                                        )
+                                        .wrap(),
+                                    );
+                                    ui.add_space(18.0);
+                                    if s.watt_calc.spec_fetch_in_progress {
+                                        ui.spinner();
+                                        ui.add_space(6.0);
+                                        ui.label(
+                                            egui::RichText::new("Scanning device hardware... Please wait.")
+                                                .strong()
+                                                .color(egui::Color32::from_rgb(56, 189, 248)),
+                                        );
+                                    } else {
+                                        let fetch_btn = ui.add_sized(
+                                            [240.0, 42.0],
+                                            egui::Button::new(
+                                                egui::RichText::new("Fetch Device Details")
+                                                    .strong()
+                                                    .size(15.0)
+                                                    .color(egui::Color32::WHITE),
+                                            )
+                                            .fill(egui::Color32::from_rgb(37, 99, 235))
+                                            .corner_radius(10.0),
+                                        );
+                                        if fetch_btn.clicked() {
+                                            trigger_spec_fetch_locked(&mut s, state_arc.clone());
+                                        }
+                                        ui.add_space(12.0);
+                                        if ui
+                                            .button(
+                                                egui::RichText::new("Skip scan & enter specs manually")
+                                                    .weak()
+                                                    .size(12.0),
+                                            )
+                                            .clicked()
+                                        {
+                                            s.watt_calc.manual_wizard_unlocked = true;
+                                        }
+                                    }
+                                });
+                                ui.add_space(48.0);
+                            });
+                            return;
+                        }
+
                         // STEP 1: Auto-Fetch & Color-Coded Editable Hardware Bubbles
                         app_card_frame(ui).show(ui, |ui| {
                             ui.set_width((inner_w - 34.0).max(220.0));
@@ -7669,7 +7809,7 @@ impl eframe::App for AgentPowerGuardApp {
                                     ui,
                                     UiIcon::Search,
                                     egui::Color32::WHITE,
-                                    "Fetch System Specs",
+                                    "Re-Fetch Device Specs",
                                     Some(egui::Color32::from_rgb(37, 99, 235)),
                                 )
                                 .clicked()
@@ -7678,23 +7818,13 @@ impl eframe::App for AgentPowerGuardApp {
                                 }
                             });
                             ui.add_space(4.0);
-                            if !s.detected_specs.fetched {
-                                ui.label(
-                                    egui::RichText::new(
-                                        "Click 'Fetch System Specs' to scan motherboard, CPU, RAM sticks, physical drives, GPU, displays, Wi-Fi/LAN, Bluetooth, audio, RGB controllers & USB peripherals. Or click '+ Add' below anytime.",
-                                    )
-                                    .weak()
-                                    .size(11.5),
-                                );
-                            } else {
-                                ui.label(
-                                    egui::RichText::new(
-                                        "Click any colored bubble to edit, 'x' to remove unused items (e.g. paired phones/virtual audio), or '+ Add' to append fans, ARGB strips, speakers, or custom parts.",
-                                    )
-                                    .weak()
-                                    .size(11.0),
-                                );
-                            }
+                            ui.label(
+                                egui::RichText::new(
+                                    "Click any colored bubble to edit, 'x' to remove unused items (e.g. paired phones/virtual audio), or '+ Add' to append fans, ARGB strips, speakers, or custom parts.",
+                                )
+                                .weak()
+                                .size(11.0),
+                            );
                             ui.add_space(6.0);
 
                             {
@@ -7705,78 +7835,120 @@ impl eframe::App for AgentPowerGuardApp {
                                 let edit_buf = &mut calc.spec_edit_buf;
 
                                 if specs.fetched {
-                                    ui.horizontal_wrapped(|ui| {
-                                        ui.spacing_mut().item_spacing.x = 6.0;
-                                        ui.spacing_mut().item_spacing.y = 5.0;
-                                        let (os_fill, os_stroke, os_txt) = spec_bubble_colors(
-                                            dark,
-                                            egui::Color32::from_rgb(100, 116, 139),
-                                        );
-                                        egui::Frame::new()
-                                            .fill(os_fill)
-                                            .stroke(egui::Stroke::new(1.0, os_stroke))
-                                            .corner_radius(11.0)
-                                            .inner_margin(egui::Margin::symmetric(9, 4))
-                                            .show(ui, |ui| {
-                                                ui.label(
-                                                    egui::RichText::new(format!(
-                                                        "{} ({})",
-                                                        specs.os_name,
-                                                        if specs.is_laptop {
-                                                            "Laptop"
-                                                        } else {
-                                                            "Desktop"
-                                                        }
-                                                    ))
-                                                    .size(11.5)
-                                                    .color(os_txt),
-                                                );
-                                            });
-                                        any_spec_edited |= render_core_spec_pill(
-                                            ui,
-                                            dark,
-                                            "core:board",
-                                            "Board",
-                                            egui::Color32::from_rgb(34, 211, 238),
-                                            &mut specs.motherboard,
-                                            edit_target,
-                                            edit_buf,
-                                        );
-                                        any_spec_edited |= render_core_spec_pill(
-                                            ui,
-                                            dark,
-                                            "core:cpu",
-                                            "CPU",
-                                            egui::Color32::from_rgb(59, 130, 246),
-                                            &mut specs.cpu_brand,
-                                            edit_target,
-                                            edit_buf,
-                                        );
-                                        if specs.ram_details.is_empty() && specs.ram_gb > 0.0 {
-                                            specs.ram_details = format!("{:.1} GB", specs.ram_gb);
+                                    let max_core_w = (ui.available_width() - 6.0).max(220.0);
+                                    let os_text = format!(
+                                        "{} ({})",
+                                        specs.os_name,
+                                        if specs.is_laptop { "Laptop" } else { "Desktop" }
+                                    );
+                                    if specs.ram_details.is_empty() && specs.ram_gb > 0.0 {
+                                        specs.ram_details = format!("{:.1} GB", specs.ram_gb);
+                                    }
+                                    let core_pill_w = |cat: &str, prefix: &str, val: &str| -> f32 {
+                                        if edit_target.as_ref().is_some_and(|(k, _)| k == cat) {
+                                            340.0f32.min(max_core_w)
+                                        } else {
+                                            let shown = if val.trim().is_empty() {
+                                                "Unknown (click to edit)"
+                                            } else {
+                                                val
+                                            };
+                                            (measure_text_px(ui, &format!("{}: {}", prefix, shown), 11.5) + 30.0)
+                                                .min(max_core_w)
                                         }
-                                        any_spec_edited |= render_core_spec_pill(
-                                            ui,
-                                            dark,
-                                            "core:ram",
-                                            "RAM",
-                                            egui::Color32::from_rgb(139, 92, 246),
-                                            &mut specs.ram_details,
-                                            edit_target,
-                                            edit_buf,
-                                        );
-                                        any_spec_edited |= render_core_spec_pill(
-                                            ui,
-                                            dark,
-                                            "core:gpu",
-                                            "GPU",
-                                            egui::Color32::from_rgb(236, 72, 153),
-                                            &mut specs.gpu_name,
-                                            edit_target,
-                                            edit_buf,
-                                        );
-                                    });
-                                    ui.add_space(6.0);
+                                    };
+                                    let core_widths = [
+                                        (measure_text_px(ui, &os_text, 11.5) + 22.0).min(max_core_w),
+                                        core_pill_w("core:board", "Board", &specs.motherboard),
+                                        core_pill_w("core:cpu", "CPU", &specs.cpu_brand),
+                                        core_pill_w("core:ram", "RAM", &specs.ram_details),
+                                        core_pill_w("core:gpu", "GPU", &specs.gpu_name),
+                                    ];
+                                    let core_rows = pack_pill_rows(&core_widths, max_core_w, 6.0);
+                                    for row in core_rows {
+                                        ui.horizontal(|ui| {
+                                            ui.spacing_mut().item_spacing.x = 6.0;
+                                            for tok in row {
+                                                match tok {
+                                                    0 => {
+                                                        let (os_fill, os_stroke, os_txt) = spec_bubble_colors(
+                                                            dark,
+                                                            egui::Color32::from_rgb(100, 116, 139),
+                                                        );
+                                                        egui::Frame::new()
+                                                            .fill(os_fill)
+                                                            .stroke(egui::Stroke::new(1.0, os_stroke))
+                                                            .corner_radius(11.0)
+                                                            .inner_margin(egui::Margin::symmetric(9, 4))
+                                                            .show(ui, |ui| {
+                                                                ui.add(
+                                                                    egui::Label::new(
+                                                                        egui::RichText::new(&os_text)
+                                                                            .size(11.5)
+                                                                            .color(os_txt),
+                                                                    )
+                                                                    .extend(),
+                                                                );
+                                                            });
+                                                    }
+                                                    1 => {
+                                                        any_spec_edited |= render_core_spec_pill(
+                                                            ui,
+                                                            dark,
+                                                            max_core_w,
+                                                            "core:board",
+                                                            "Board",
+                                                            egui::Color32::from_rgb(34, 211, 238),
+                                                            &mut specs.motherboard,
+                                                            edit_target,
+                                                            edit_buf,
+                                                        );
+                                                    }
+                                                    2 => {
+                                                        any_spec_edited |= render_core_spec_pill(
+                                                            ui,
+                                                            dark,
+                                                            max_core_w,
+                                                            "core:cpu",
+                                                            "CPU",
+                                                            egui::Color32::from_rgb(59, 130, 246),
+                                                            &mut specs.cpu_brand,
+                                                            edit_target,
+                                                            edit_buf,
+                                                        );
+                                                    }
+                                                    3 => {
+                                                        any_spec_edited |= render_core_spec_pill(
+                                                            ui,
+                                                            dark,
+                                                            max_core_w,
+                                                            "core:ram",
+                                                            "RAM",
+                                                            egui::Color32::from_rgb(139, 92, 246),
+                                                            &mut specs.ram_details,
+                                                            edit_target,
+                                                            edit_buf,
+                                                        );
+                                                    }
+                                                    _ => {
+                                                        any_spec_edited |= render_core_spec_pill(
+                                                            ui,
+                                                            dark,
+                                                            max_core_w,
+                                                            "core:gpu",
+                                                            "GPU",
+                                                            egui::Color32::from_rgb(236, 72, 153),
+                                                            &mut specs.gpu_name,
+                                                            edit_target,
+                                                            edit_buf,
+                                                        );
+                                                    }
+                                                }
+                                            }
+                                        });
+                                        ui.add_space(4.0);
+                                    }
+                                    ui.add_space(4.0);
                                 }
 
                                 any_spec_edited |= render_spec_bubble_category(
@@ -9923,9 +10095,6 @@ impl eframe::App for AgentPowerGuardApp {
                         .clicked()
                         {
                             s.show_watt_calc_modal = true;
-                            if !s.detected_specs.fetched && !s.watt_calc.spec_fetch_in_progress {
-                                trigger_spec_fetch_locked(&mut s, self.state.clone());
-                            }
                         }
                     });
                 });

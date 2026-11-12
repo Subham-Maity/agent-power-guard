@@ -2,7 +2,7 @@
 <package xmlns="http://schemas.microsoft.com/packaging/2015/06/nuspec.xsd">
   <metadata>
     <id>agent-power-guard</id>
-    <version>1.2.8</version>
+    <version>1.2.9</version>
     <title>Agent Power Guard</title>
     <authors>Subham Maity</authors>
     <projectUrl>https://github.com/Subham-Maity/agent-power-guard</projectUrl>
