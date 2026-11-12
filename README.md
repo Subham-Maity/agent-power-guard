@@ -173,7 +173,7 @@ Each condition can be switched off and tuned independently. The numbering below 
 | 2 | Watched agent CPU | Process-tree worker children matching watch list exceed threshold (sustained) | 2.0 % |
 | 3 | Active downloads | Download managers (`idman`, `aria2c`, `qbittorrent`, `fdm`) exceed threshold | 100 KB/s |
 | 4 | Whole-PC CPU | Total CPU minus Agent Power Guard self-CPU exceeds threshold (sustained) | 30 % |
-| 5 | Attributed disk I/O | Per-process disk I/O minus background noise (`MsMpEng`, `SearchIndexer`, etc.) exceeds threshold | 10,000 KB/s |
+| 5 | Attributed disk I/O | Per-process disk I/O bounded by physical SSD throughput (`IOCTL_DISK_PERFORMANCE`), excluding background noise (`MsMpEng`, `SearchIndexer`, etc.) and browser/WebView IPC, exceeds threshold | 10,000 KB/s |
 | 6 | Default-route network | Default-route (`0.0.0.0/0`, `::/0`) throughput exceeds threshold (ignores WSL/Docker/loopback) | 200 KB/s |
 | 7 | Signal-conditioning filter | Rolling-window duty cycle + hysteresis across analog checks (`Busy` >= 8/15s, clears <= 2/15s) | 15 s (8/2) |
 | 8 | Monitor timeout & speaker protection | Syncs OS display timeout with Stage 1; skips display-off if HDMI/monitor speakers play audio | 2 min |
@@ -185,7 +185,7 @@ How the intent engine works:
 
 - **Signal-conditioning layer:** Transient 1-second spikes enter `Pending` without resetting the sleep countdown or blocking Stage 1 display-off. Only sustained `Busy` duty cycles block sleep, and hysteresis clears smoothly when quiet.
 - **Condition 2** traverses parent-child process trees so idle IDE windows (`code.exe`, `cursor.exe`) don't block sleep by themselves while active spawned workers/compilers (`cargo`, `node`, `rustc`) do.
-- **Conditions 5 & 6** isolate real user/build traffic from antivirus/indexing noise and virtual adapters (WSL vEthernet, Hyper-V, Docker, loopback), showing raw vs filtered metrics and blaming the specific offending disk process.
+- **Conditions 5 & 6** bound per-process disk I/O by physical SSD throughput (`IOCTL_DISK_PERFORMANCE`) while excluding antivirus/indexing noise, browser/WebView Mojo IPC, and virtual adapters (WSL vEthernet, Hyper-V, Docker, loopback), showing both effective and raw metrics (`proc_rate (Disk total)`) plus top-5 raw I/O diagnostics.
 - **Condition 8 & Passive Media:** Audio-only playback allows Stage 1 display-off while keeping the machine awake (unless playing through monitor/HDMI speakers). Fullscreen/windowed media idle triggers a non-focus-stealing topmost prompt (**Keep Awake / Sleep Now / Hide**) locked to session identity (`app + session`) until pause grace expires.
 - **Condition 9 & 10 Probe Health:** When standard-user privileges (`AsInvoker`) block `powercfg /requests` or `nvml.dll` is absent, Agent Power Guard surfaces an explicit **Probe Unavailable** badge instead of silently misreporting idle.
 - **Condition 11** pairs OS mic/camera checks (`CapabilityAccessManager` / PulseAudio) with live CoreAudio peak capture classification (`Dead / Ambient / Active`) so DAWs in standby don't block sleep while muted calls still stay protected.
@@ -406,7 +406,7 @@ Abridged `/api/status` response:
 }
 ```
 
-Other fields consumed by the bundled dashboard: `operational_mode_note`, `stage1_display_off_allowed`, `defer_display_off_for_monitor_audio`, `media` (`prompt_active`, `app`, `title`, `lock_active`, `lock_app`), `mic_cam` (`mic_active`, `cam_active`, `app`, `signal_state`, `capture_peak`), `power_requests` (`display_active`, `suppressed_browser`, `unavailable`, `owners`), `gpu` (`util_pct`, `floor_pct`, `effective_threshold_pct`, `power_mw`, `unavailable`), `raw_pc_disk`, `raw_pc_net`, `top_disk_proc`, `top_disk_kbps`, `suggested_thresholds`, `agent_lease_reason`, `agent_lease_remaining_secs`, `cond1_pass` through `cond11_pass`, `live_agent_proc`, `live_gpu`, `live_download`, `live_mic_cam_active`, `live_mic_cam_app`, `live_pc_cpu`, `live_pc_disk`, `live_pc_net`, `cond7_text`, `spike_counter`, `spike_limit`, `power_request_active`, `power_mode`, `local_ip`, `mac_address`, `currency_symbol`, `co2_factor`, `history` (`agent_cpu`, `gpu`, `pc_cpu`, `pc_disk`, `pc_net` arrays), `top_processes` and `energy` (`cost_saved`, `kwh_saved`, `duration_secs`, `co2_saved`).
+Other fields consumed by the bundled dashboard: `operational_mode_note`, `stage1_display_off_allowed`, `defer_display_off_for_monitor_audio`, `media` (`prompt_active`, `app`, `title`, `lock_active`, `lock_app`), `mic_cam` (`mic_active`, `cam_active`, `app`, `signal_state`, `capture_peak`), `power_requests` (`display_active`, `suppressed_browser`, `unavailable`, `owners`), `gpu` (`util_pct`, `floor_pct`, `effective_threshold_pct`, `power_mw`, `unavailable`), `raw_pc_disk`, `raw_pc_net`, `top_disk_proc`, `top_disk_kbps`, `top_io_debug`, `suggested_thresholds` (`pc_cpu`, `disk_kbps`, `net_kbps`), `agent_lease_reason`, `agent_lease_remaining_secs`, `cond1_pass` through `cond11_pass`, `live_agent_proc`, `live_gpu`, `live_download`, `live_mic_cam_active`, `live_mic_cam_app`, `live_pc_cpu`, `live_pc_disk`, `live_pc_net`, `cond7_text`, `spike_counter`, `spike_limit`, `power_request_active`, `power_mode`, `local_ip`, `mac_address`, `currency_symbol`, `co2_factor`, `history` (`agent_cpu`, `gpu`, `pc_cpu`, `pc_disk`, `pc_net` arrays), `top_processes` and `energy` (`cost_saved`, `kwh_saved`, `duration_secs`, `co2_saved`).
 
 curl:
 
@@ -670,11 +670,11 @@ cargo test --target <target>
 cargo build --release --target <target>
 ```
 
-Unit tests cover the pure signal-conditioning filters (`src/signal.rs`), intent classification (`src/intent.rs`), T1-T15 scenario replay tests & evaluator edge cases (`src/evaluator.rs`, `src/app.rs`), OS request/NIC parsers (`src/probes.rs`), and QR encoding (`src/qr.rs`). CI does not build the Intel macOS target, run `clippy` or check formatting.
+Unit tests cover the pure signal-conditioning filters (`src/signal.rs`), intent classification (`src/intent.rs`), T1-T17 scenario replay tests & evaluator edge cases (`src/evaluator.rs`, `src/app.rs`), OS request/NIC/IPC-browser parsers (`src/probes.rs`), and QR encoding (`src/qr.rs`). CI does not build the Intel macOS target, run `clippy` or check formatting.
 
 **Releases.** Pushing a tag matching `v*`, or running the workflow manually with `tag_name`, triggers `.github/workflows/release.yml`. It builds the Windows MSI and portable EXE, the Linux `.tar.gz` and `.deb`, and the macOS `aarch64` and `x86_64` archives plus the universal `.app` zip. It then generates `SHA256SUMS.txt` and publishes a GitHub Release. A signing step exists as a placeholder and does not sign anything yet.
 
-**Version bump checklist.** The version string is duplicated in `Cargo.toml`, `wix/main.wxs` (`Version="x.y.z.0"`), `packaging/macos/Info.plist`, `packaging/build-deb.sh`, and the winget, Scoop, Chocolatey, Homebrew and AUR manifests. `build-msi.ps1` reads `Cargo.toml` and falls back to `1.2.2`. Package-manager manifests also need real SHA-256 values after release checksums are published.
+**Version bump checklist.** The version string is duplicated in `Cargo.toml`, `wix/main.wxs` (`Version="x.y.z.0"`), `packaging/macos/Info.plist`, `packaging/build-deb.sh`, and the winget, Scoop, Chocolatey, Homebrew and AUR manifests. `build-msi.ps1` reads `Cargo.toml` and falls back to `1.2.3`. Package-manager manifests also need real SHA-256 values after release checksums are published.
 
 ## Security
 
