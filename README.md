@@ -850,7 +850,7 @@ Unit tests cover the pure signal-conditioning filters (`src/signal.rs`), intent 
 
 <br/>
 
-The version string is duplicated in `Cargo.toml`, `wix/main.wxs` (`Version="x.y.z.0"`), `packaging/macos/Info.plist`, `packaging/build-deb.sh`, and the winget, Scoop, Chocolatey, Homebrew and AUR manifests. `build-msi.ps1` reads `Cargo.toml` and falls back to `1.2.4`. Package-manager manifests also need real SHA-256 values after release checksums are published.
+The version string is duplicated in `Cargo.toml`, `wix/main.wxs` (`Version="x.y.z.0"`), `packaging/macos/Info.plist`, `packaging/build-deb.sh`, and the winget, Scoop, Chocolatey, Homebrew and AUR manifests. `build-msi.ps1` reads `Cargo.toml` and falls back to `1.2.5`. Package-manager manifests also need real SHA-256 values after release checksums are published.
 
 </details>
 

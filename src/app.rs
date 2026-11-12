@@ -5442,6 +5442,508 @@ fn format_time_compact(secs: u32) -> String {
     }
 }
 
+pub fn copy_text_reliable(ctx: &egui::Context, text: &str) {
+    ctx.copy_text(text.to_string());
+    let owned = text.to_string();
+    std::thread::spawn(move || {
+        use std::io::Write as _;
+        #[cfg(windows)]
+        {
+            if let Ok(mut child) = Command::new("powershell")
+                .args([
+                    "-NoProfile",
+                    "-NonInteractive",
+                    "-Command",
+                    "[Console]::InputEncoding = [System.Text.Encoding]::UTF8; Set-Clipboard -Value ([Console]::In.ReadToEnd())",
+                ])
+                .stdin(std::process::Stdio::piped())
+                .creation_flags(CREATE_NO_WINDOW)
+                .spawn()
+            {
+                if let Some(mut stdin) = child.stdin.take() {
+                    let _ = stdin.write_all(owned.as_bytes());
+                }
+                let _ = child.wait();
+            }
+        }
+        #[cfg(target_os = "macos")]
+        {
+            if let Ok(mut child) = Command::new("pbcopy")
+                .stdin(std::process::Stdio::piped())
+                .spawn()
+            {
+                if let Some(mut stdin) = child.stdin.take() {
+                    let _ = stdin.write_all(owned.as_bytes());
+                }
+                let _ = child.wait();
+            }
+        }
+        #[cfg(target_os = "linux")]
+        {
+            let mut copied = false;
+            if let Ok(mut child) = Command::new("xclip")
+                .args(["-selection", "clipboard"])
+                .stdin(std::process::Stdio::piped())
+                .spawn()
+            {
+                if let Some(mut stdin) = child.stdin.take() {
+                    let _ = stdin.write_all(owned.as_bytes());
+                }
+                if let Ok(st) = child.wait() {
+                    copied = st.success();
+                }
+            }
+            if !copied {
+                if let Ok(mut child) = Command::new("wl-copy")
+                    .stdin(std::process::Stdio::piped())
+                    .spawn()
+                {
+                    if let Some(mut stdin) = child.stdin.take() {
+                        let _ = stdin.write_all(owned.as_bytes());
+                    }
+                    let _ = child.wait();
+                }
+            }
+        }
+    });
+}
+
+pub fn read_os_clipboard() -> Option<String> {
+    #[cfg(windows)]
+    {
+        if let Ok(out) = Command::new("powershell")
+            .args([
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                "[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; Get-Clipboard -Raw",
+            ])
+            .creation_flags(CREATE_NO_WINDOW)
+            .output()
+        {
+            if out.status.success() {
+                let s = String::from_utf8_lossy(&out.stdout).to_string();
+                if !s.trim().is_empty() {
+                    return Some(s);
+                }
+            }
+        }
+    }
+    #[cfg(target_os = "macos")]
+    {
+        if let Ok(out) = Command::new("pbpaste").output() {
+            if out.status.success() {
+                let s = String::from_utf8_lossy(&out.stdout).to_string();
+                if !s.trim().is_empty() {
+                    return Some(s);
+                }
+            }
+        }
+    }
+    #[cfg(target_os = "linux")]
+    {
+        for (bin, args) in [
+            ("xclip", vec!["-selection", "clipboard", "-o"]),
+            ("wl-paste", vec![]),
+        ] {
+            if let Ok(out) = Command::new(bin).args(&args).output() {
+                if out.status.success() {
+                    let s = String::from_utf8_lossy(&out.stdout).to_string();
+                    if !s.trim().is_empty() {
+                        return Some(s);
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+#[derive(Clone, Copy)]
+pub enum UiIcon {
+    Shield,
+    Pause,
+    Bolt,
+    Info,
+    Sleep,
+    Clock,
+    Sliders,
+    Tray,
+    Sun,
+    Moon,
+    History,
+    Coin,
+    Bell,
+    Globe,
+    Search,
+    Copy,
+    Folder,
+    Trash,
+    Download,
+    Check,
+    Warning,
+    Lock,
+    Battery,
+    Cpu,
+    Refresh,
+}
+
+fn paint_icon(painter: &egui::Painter, rect: egui::Rect, color: egui::Color32, icon: UiIcon) {
+    let w = rect.width();
+    let h = rect.height();
+    let l = rect.left();
+    let t = rect.top();
+    let p = |x: f32, y: f32| egui::pos2(l + x * w, t + y * h);
+    let st = egui::Stroke::new(1.5, color);
+
+    match icon {
+        UiIcon::Shield => {
+            let pts = [
+                p(0.50, 0.10),
+                p(0.86, 0.24),
+                p(0.82, 0.58),
+                p(0.50, 0.90),
+                p(0.18, 0.58),
+                p(0.14, 0.24),
+                p(0.50, 0.10),
+            ];
+            for seg in pts.windows(2) {
+                painter.line_segment([seg[0], seg[1]], st);
+            }
+            painter.line_segment([p(0.35, 0.50), p(0.46, 0.62)], st);
+            painter.line_segment([p(0.46, 0.62), p(0.68, 0.38)], st);
+        }
+        UiIcon::Pause => {
+            painter.rect_filled(
+                egui::Rect::from_min_max(p(0.24, 0.18), p(0.42, 0.82)),
+                1.0,
+                color,
+            );
+            painter.rect_filled(
+                egui::Rect::from_min_max(p(0.58, 0.18), p(0.76, 0.82)),
+                1.0,
+                color,
+            );
+        }
+        UiIcon::Bolt => {
+            painter.line_segment([p(0.58, 0.10), p(0.26, 0.52)], st);
+            painter.line_segment([p(0.26, 0.52), p(0.52, 0.52)], st);
+            painter.line_segment([p(0.52, 0.52), p(0.40, 0.90)], st);
+            painter.line_segment([p(0.40, 0.90), p(0.74, 0.44)], st);
+            painter.line_segment([p(0.74, 0.44), p(0.48, 0.44)], st);
+            painter.line_segment([p(0.48, 0.44), p(0.58, 0.10)], st);
+        }
+        UiIcon::Info => {
+            painter.circle_stroke(rect.center(), w * 0.40, st);
+            painter.circle_filled(p(0.50, 0.30), 1.1, color);
+            painter.line_segment([p(0.50, 0.44), p(0.50, 0.72)], st);
+        }
+        UiIcon::Sleep => {
+            // Crescent moon + Z
+            painter.circle_stroke(rect.center(), w * 0.38, st);
+            painter.line_segment([p(0.36, 0.36), p(0.64, 0.36)], st);
+            painter.line_segment([p(0.64, 0.36), p(0.36, 0.64)], st);
+            painter.line_segment([p(0.36, 0.64), p(0.64, 0.64)], st);
+        }
+        UiIcon::Clock => {
+            painter.circle_stroke(rect.center(), w * 0.40, st);
+            painter.line_segment([p(0.50, 0.26), p(0.50, 0.52)], st);
+            painter.line_segment([p(0.50, 0.52), p(0.68, 0.62)], st);
+        }
+        UiIcon::Sliders => {
+            for y in [0.26, 0.50, 0.74] {
+                painter.line_segment([p(0.14, y), p(0.86, y)], st);
+            }
+            painter.circle_filled(p(0.36, 0.26), 2.1, color);
+            painter.circle_filled(p(0.66, 0.50), 2.1, color);
+            painter.circle_filled(p(0.44, 0.74), 2.1, color);
+        }
+        UiIcon::Tray => {
+            painter.line_segment([p(0.18, 0.60), p(0.18, 0.84)], st);
+            painter.line_segment([p(0.18, 0.84), p(0.82, 0.84)], st);
+            painter.line_segment([p(0.82, 0.84), p(0.82, 0.60)], st);
+            painter.line_segment([p(0.50, 0.16), p(0.50, 0.64)], st);
+            painter.line_segment([p(0.32, 0.48), p(0.50, 0.66)], st);
+            painter.line_segment([p(0.68, 0.48), p(0.50, 0.66)], st);
+        }
+        UiIcon::Sun => {
+            painter.circle_stroke(rect.center(), w * 0.22, st);
+            for (dx, dy) in [
+                (0.0, -1.0),
+                (0.0, 1.0),
+                (-1.0, 0.0),
+                (1.0, 0.0),
+                (-0.7, -0.7),
+                (0.7, -0.7),
+                (-0.7, 0.7),
+                (0.7, 0.7),
+            ] {
+                let c = rect.center();
+                let r1 = w * 0.30;
+                let r2 = w * 0.43;
+                painter.line_segment(
+                    [
+                        egui::pos2(c.x + dx * r1, c.y + dy * r1),
+                        egui::pos2(c.x + dx * r2, c.y + dy * r2),
+                    ],
+                    st,
+                );
+            }
+        }
+        UiIcon::Moon => {
+            let pts = [
+                p(0.62, 0.16),
+                p(0.42, 0.24),
+                p(0.32, 0.42),
+                p(0.34, 0.62),
+                p(0.48, 0.78),
+                p(0.68, 0.84),
+                p(0.82, 0.78),
+                p(0.64, 0.70),
+                p(0.56, 0.52),
+                p(0.58, 0.34),
+                p(0.72, 0.20),
+                p(0.62, 0.16),
+            ];
+            for seg in pts.windows(2) {
+                painter.line_segment([seg[0], seg[1]], st);
+            }
+        }
+        UiIcon::History => {
+            painter.rect_stroke(
+                egui::Rect::from_min_max(p(0.18, 0.16), p(0.82, 0.84)),
+                2.0,
+                st,
+                egui::StrokeKind::Inside,
+            );
+            painter.line_segment([p(0.32, 0.36), p(0.68, 0.36)], st);
+            painter.line_segment([p(0.32, 0.52), p(0.68, 0.52)], st);
+            painter.line_segment([p(0.32, 0.68), p(0.56, 0.68)], st);
+        }
+        UiIcon::Coin => {
+            painter.line_segment([p(0.16, 0.78), p(0.84, 0.78)], st);
+            painter.rect_filled(
+                egui::Rect::from_min_max(p(0.22, 0.54), p(0.34, 0.74)),
+                1.0,
+                color,
+            );
+            painter.rect_filled(
+                egui::Rect::from_min_max(p(0.44, 0.38), p(0.56, 0.74)),
+                1.0,
+                color,
+            );
+            painter.rect_filled(
+                egui::Rect::from_min_max(p(0.66, 0.20), p(0.78, 0.74)),
+                1.0,
+                color,
+            );
+        }
+        UiIcon::Bell => {
+            painter.line_segment([p(0.28, 0.68), p(0.32, 0.32)], st);
+            painter.line_segment([p(0.32, 0.32), p(0.50, 0.16)], st);
+            painter.line_segment([p(0.50, 0.16), p(0.68, 0.32)], st);
+            painter.line_segment([p(0.68, 0.32), p(0.72, 0.68)], st);
+            painter.line_segment([p(0.20, 0.68), p(0.80, 0.68)], st);
+            painter.circle_filled(p(0.50, 0.82), 1.6, color);
+        }
+        UiIcon::Globe => {
+            painter.circle_stroke(rect.center(), w * 0.40, st);
+            painter.line_segment([p(0.12, 0.50), p(0.88, 0.50)], st);
+            painter.line_segment([p(0.50, 0.12), p(0.50, 0.88)], st);
+        }
+        UiIcon::Search => {
+            painter.circle_stroke(p(0.43, 0.43), w * 0.27, st);
+            painter.line_segment([p(0.63, 0.63), p(0.86, 0.86)], st);
+        }
+        UiIcon::Copy => {
+            painter.rect_stroke(
+                egui::Rect::from_min_max(p(0.32, 0.16), p(0.84, 0.68)),
+                1.5,
+                st,
+                egui::StrokeKind::Inside,
+            );
+            painter.line_segment([p(0.20, 0.34), p(0.20, 0.82)], st);
+            painter.line_segment([p(0.20, 0.82), p(0.68, 0.82)], st);
+        }
+        UiIcon::Folder => {
+            painter.rect_stroke(
+                egui::Rect::from_min_max(p(0.14, 0.28), p(0.86, 0.80)),
+                1.5,
+                st,
+                egui::StrokeKind::Inside,
+            );
+            painter.line_segment([p(0.16, 0.28), p(0.24, 0.18)], st);
+            painter.line_segment([p(0.24, 0.18), p(0.48, 0.18)], st);
+            painter.line_segment([p(0.48, 0.18), p(0.56, 0.28)], st);
+        }
+        UiIcon::Trash => {
+            painter.line_segment([p(0.20, 0.26), p(0.80, 0.26)], st);
+            painter.line_segment([p(0.38, 0.16), p(0.62, 0.16)], st);
+            painter.rect_stroke(
+                egui::Rect::from_min_max(p(0.26, 0.28), p(0.74, 0.84)),
+                1.5,
+                st,
+                egui::StrokeKind::Inside,
+            );
+            painter.line_segment([p(0.42, 0.42), p(0.42, 0.72)], st);
+            painter.line_segment([p(0.58, 0.42), p(0.58, 0.72)], st);
+        }
+        UiIcon::Download => {
+            painter.line_segment([p(0.50, 0.14), p(0.50, 0.64)], st);
+            painter.line_segment([p(0.32, 0.48), p(0.50, 0.66)], st);
+            painter.line_segment([p(0.68, 0.48), p(0.50, 0.66)], st);
+            painter.line_segment([p(0.18, 0.82), p(0.82, 0.82)], st);
+        }
+        UiIcon::Check => {
+            painter.line_segment([p(0.18, 0.54), p(0.42, 0.76)], st);
+            painter.line_segment([p(0.42, 0.76), p(0.84, 0.26)], st);
+        }
+        UiIcon::Warning => {
+            painter.line_segment([p(0.50, 0.14), p(0.86, 0.82)], st);
+            painter.line_segment([p(0.86, 0.82), p(0.14, 0.82)], st);
+            painter.line_segment([p(0.14, 0.82), p(0.50, 0.14)], st);
+            painter.line_segment([p(0.50, 0.38), p(0.50, 0.58)], st);
+            painter.circle_filled(p(0.50, 0.70), 1.1, color);
+        }
+        UiIcon::Lock => {
+            painter.rect_stroke(
+                egui::Rect::from_min_max(p(0.22, 0.46), p(0.78, 0.86)),
+                1.5,
+                st,
+                egui::StrokeKind::Inside,
+            );
+            painter.line_segment([p(0.34, 0.46), p(0.34, 0.28)], st);
+            painter.line_segment([p(0.34, 0.28), p(0.66, 0.28)], st);
+            painter.line_segment([p(0.66, 0.28), p(0.66, 0.46)], st);
+        }
+        UiIcon::Battery => {
+            painter.rect_stroke(
+                egui::Rect::from_min_max(p(0.14, 0.28), p(0.80, 0.72)),
+                1.5,
+                st,
+                egui::StrokeKind::Inside,
+            );
+            painter.rect_filled(
+                egui::Rect::from_min_max(p(0.80, 0.40), p(0.88, 0.60)),
+                1.0,
+                color,
+            );
+            painter.rect_filled(
+                egui::Rect::from_min_max(p(0.22, 0.36), p(0.60, 0.64)),
+                1.0,
+                color,
+            );
+        }
+        UiIcon::Cpu => {
+            painter.rect_stroke(
+                egui::Rect::from_min_max(p(0.26, 0.26), p(0.74, 0.74)),
+                1.5,
+                st,
+                egui::StrokeKind::Inside,
+            );
+            for pos in [0.38, 0.62] {
+                painter.line_segment([p(pos, 0.12), p(pos, 0.26)], st);
+                painter.line_segment([p(pos, 0.74), p(pos, 0.88)], st);
+                painter.line_segment([p(0.12, pos), p(0.26, pos)], st);
+                painter.line_segment([p(0.74, pos), p(0.88, pos)], st);
+            }
+        }
+        UiIcon::Refresh => {
+            painter.circle_stroke(rect.center(), w * 0.34, st);
+            painter.line_segment([p(0.64, 0.18), p(0.84, 0.26)], st);
+            painter.line_segment([p(0.84, 0.26), p(0.76, 0.44)], st);
+        }
+    }
+}
+
+fn draw_icon_inline(ui: &mut egui::Ui, size: f32, color: egui::Color32, icon: UiIcon) {
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(size, size), egui::Sense::hover());
+    paint_icon(&ui.painter_at(rect), rect, color, icon);
+}
+
+fn icon_button(
+    ui: &mut egui::Ui,
+    icon: UiIcon,
+    icon_color: egui::Color32,
+    label: impl Into<egui::RichText>,
+    fill: Option<egui::Color32>,
+) -> egui::Response {
+    let rt: egui::RichText = label.into();
+    let padded = egui::RichText::new(format!("    {}", rt.text()));
+    let mut btn = egui::Button::new(if fill.is_some() {
+        padded.strong().color(egui::Color32::WHITE)
+    } else {
+        padded
+    });
+    if let Some(bg) = fill {
+        btn = btn.fill(bg);
+    }
+    let resp = ui.add(btn);
+    let r = egui::Rect::from_center_size(
+        egui::pos2(resp.rect.left() + 12.0, resp.rect.center().y),
+        egui::vec2(13.0, 13.0),
+    );
+    let ic = if fill.is_some() {
+        egui::Color32::WHITE
+    } else {
+        icon_color
+    };
+    paint_icon(&ui.painter_at(resp.rect), r, ic, icon);
+    resp
+}
+
+fn icon_heading(ui: &mut egui::Ui, icon: UiIcon, color: egui::Color32, title: &str) {
+    ui.horizontal(|ui| {
+        draw_icon_inline(ui, 18.0, color, icon);
+        ui.label(egui::RichText::new(title).strong().size(17.0));
+    });
+}
+
+fn icon_card_title(ui: &mut egui::Ui, icon: UiIcon, color: egui::Color32, title: &str) {
+    ui.horizontal(|ui| {
+        draw_icon_inline(ui, 15.0, color, icon);
+        ui.label(egui::RichText::new(title).strong().size(14.0));
+    });
+}
+
+fn app_card_frame(ui: &egui::Ui) -> egui::Frame {
+    let dark = ui.visuals().dark_mode;
+    let fill = if dark {
+        egui::Color32::from_rgb(20, 27, 38)
+    } else {
+        egui::Color32::from_rgb(248, 250, 252)
+    };
+    let border = if dark {
+        egui::Color32::from_rgb(38, 49, 68)
+    } else {
+        egui::Color32::from_rgb(203, 213, 225)
+    };
+    egui::Frame::new()
+        .fill(fill)
+        .stroke(egui::Stroke::new(1.0, border))
+        .corner_radius(8.0)
+        .inner_margin(egui::Margin::symmetric(16, 12))
+}
+
+fn app_subcard_frame(ui: &egui::Ui) -> egui::Frame {
+    let dark = ui.visuals().dark_mode;
+    let fill = if dark {
+        egui::Color32::from_rgb(15, 22, 34)
+    } else {
+        egui::Color32::from_rgb(241, 245, 249)
+    };
+    let border = if dark {
+        egui::Color32::from_rgb(34, 46, 66)
+    } else {
+        egui::Color32::from_rgb(203, 213, 225)
+    };
+    egui::Frame::new()
+        .fill(fill)
+        .stroke(egui::Stroke::new(1.0, border))
+        .corner_radius(8.0)
+        .inner_margin(egui::Margin::symmetric(14, 10))
+}
+
 fn load_tray_icon() -> tray_icon::Icon {
     let png32_bytes = include_bytes!("../assets/icon_32.png");
     if let Ok(img) = image::load_from_memory(png32_bytes) {
@@ -5514,14 +6016,12 @@ impl AgentPowerGuardApp {
             let menu = tray_icon::menu::Menu::new();
             let show_item = tray_icon::menu::MenuItem::new("Show Agent Power Guard", true, None);
             let op_smart =
-                tray_icon::menu::MenuItem::new("🛡 Smart Guard (Watchdog Active)", true, None);
-            let op_off = tray_icon::menu::MenuItem::new("⏸ Guard Off (OS Power Plan)", true, None);
+                tray_icon::menu::MenuItem::new("Smart Guard (Watchdog Active)", true, None);
+            let op_off = tray_icon::menu::MenuItem::new("Guard Off (OS Power Plan)", true, None);
             let op_best =
-                tray_icon::menu::MenuItem::new("⚡ Best Performance (Locked Awake)", true, None);
-            let postpone_item =
-                tray_icon::menu::MenuItem::new("⏳ Postpone Sleep (+15m)", true, None);
-            let stay_awake_item =
-                tray_icon::menu::MenuItem::new("☕ Keep Awake (1 Hour)", true, None);
+                tray_icon::menu::MenuItem::new("Best Performance (Locked Awake)", true, None);
+            let postpone_item = tray_icon::menu::MenuItem::new("Postpone Sleep (+15m)", true, None);
+            let stay_awake_item = tray_icon::menu::MenuItem::new("Keep Awake (1 Hour)", true, None);
             let sep1 = tray_icon::menu::PredefinedMenuItem::separator();
             let mode_balanced =
                 tray_icon::menu::MenuItem::new("Timeout Preset: Balanced (3m)", true, None);
@@ -5532,7 +6032,7 @@ impl AgentPowerGuardApp {
             let mode_away =
                 tray_icon::menu::MenuItem::new("Timeout Preset: Away (30s)", true, None);
             let sep2 = tray_icon::menu::PredefinedMenuItem::separator();
-            let sleep_item = tray_icon::menu::MenuItem::new("⚡ Test Sleep Now", true, None);
+            let sleep_item = tray_icon::menu::MenuItem::new("Test Sleep Now", true, None);
             let exit_item = tray_icon::menu::MenuItem::new("Exit Agent Power Guard", true, None);
 
             let _ = menu.append_items(&[
@@ -5753,7 +6253,7 @@ impl eframe::App for AgentPowerGuardApp {
                     vp_ui.vertical(|ui| {
                         ui.add_space(6.0);
                         ui.label(
-                            egui::RichText::new(format!("🎬 Playback active in {}", app))
+                            egui::RichText::new(format!("Playback active in {}", app))
                                 .strong()
                                 .size(14.0),
                         );
@@ -5768,13 +6268,29 @@ impl eframe::App for AgentPowerGuardApp {
                         );
                         ui.add_space(8.0);
                         ui.horizontal(|ui| {
-                            if ui.button("✅ Keep Awake (this session)").clicked() {
+                            if icon_button(
+                                ui,
+                                UiIcon::Check,
+                                egui::Color32::from_rgb(52, 211, 153),
+                                "Keep Awake (this session)",
+                                None,
+                            )
+                            .clicked()
+                            {
                                 state_clone
                                     .lock()
                                     .unwrap()
                                     .apply_media_action(MediaPromptAction::KeepAwake);
                             }
-                            if ui.button("💤 Sleep Now").clicked() {
+                            if icon_button(
+                                ui,
+                                UiIcon::Sleep,
+                                egui::Color32::from_rgb(147, 197, 253),
+                                "Sleep Now",
+                                None,
+                            )
+                            .clicked()
+                            {
                                 let should_sleep = state_clone
                                     .lock()
                                     .unwrap()
@@ -5783,7 +6299,7 @@ impl eframe::App for AgentPowerGuardApp {
                                     let _ = sleep_now();
                                 }
                             }
-                            if ui.button("🙈 Hide").clicked() {
+                            if ui.button("Hide").clicked() {
                                 state_clone
                                     .lock()
                                     .unwrap()
@@ -5810,19 +6326,27 @@ impl eframe::App for AgentPowerGuardApp {
             });
         }
 
-        // Modal: (i) Info Guide (§6)
+        // Modal: Info Guide (§6)
         let mut guide_open = s.show_info_guide;
         if guide_open {
-            egui::Window::new("ℹ Agent Power Guard — Guide")
+            egui::Window::new("Agent Power Guard - Guide")
                 .open(&mut guide_open)
-                .default_size([560.0, 440.0])
+                .default_size([600.0, 480.0])
+                .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
                 .show(ui.ctx(), |ui| {
                     egui::ScrollArea::vertical().show(ui, |ui| {
                         for sec in get_info_guide_sections() {
-                            ui.label(egui::RichText::new(sec.title).strong().size(13.0));
-                            ui.label(egui::RichText::new(sec.body).size(11.5));
+                            app_card_frame(ui).show(ui, |ui| {
+                                icon_card_title(
+                                    ui,
+                                    UiIcon::Info,
+                                    egui::Color32::from_rgb(96, 165, 250),
+                                    sec.title,
+                                );
+                                ui.add_space(4.0);
+                                ui.label(egui::RichText::new(sec.body).size(12.0));
+                            });
                             ui.add_space(6.0);
-                            ui.separator();
                         }
                     });
                 });
@@ -5837,41 +6361,44 @@ impl eframe::App for AgentPowerGuardApp {
                 .clone()
                 .unwrap_or_else(|| "Latest".to_string());
             let dl_path_opt = s.update_downloaded_path.clone();
-            egui::Window::new("🚀 Update Ready to Install")
+            egui::Window::new("Update Ready to Install")
                 .open(&mut install_open)
                 .collapsible(false)
                 .resizable(false)
-                .default_size([430.0, 170.0])
+                .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+                .default_size([450.0, 190.0])
                 .show(ui.ctx(), |ui| {
-                    ui.label(
-                        egui::RichText::new(format!(
-                            "Agent Power Guard {} has finished downloading in the background.",
-                            dl_ver
-                        ))
-                        .strong(),
+                    icon_card_title(
+                        ui,
+                        UiIcon::Download,
+                        egui::Color32::from_rgb(52, 211, 153),
+                        &format!("Agent Power Guard {} downloaded", dl_ver),
                     );
+                    ui.add_space(4.0);
                     if let Some(ref p) = dl_path_opt {
                         ui.label(
-                            egui::RichText::new(format!("File: {}", p.display()))
+                            egui::RichText::new(format!("Saved to: {}", p.display()))
                                 .weak()
                                 .size(11.0),
                         );
                     }
                     ui.add_space(6.0);
-                    ui.label("Install now and restart the app? Once restarted, the header and Updates tab will display the new version.");
+                    ui.label("Install now and restart the app? Once restarted, the Updates tab will reflect the new version.");
                     ui.add_space(10.0);
                     ui.horizontal(|ui| {
-                        if ui
-                            .button(egui::RichText::new("✅ Install & Restart Now").strong())
-                            .clicked()
+                        if icon_button(
+                            ui,
+                            UiIcon::Check,
+                            egui::Color32::WHITE,
+                            "Install & Restart Now",
+                            Some(egui::Color32::from_rgb(16, 185, 129)),
+                        )
+                        .clicked()
                         {
                             if let Some(ref p) = dl_path_opt {
-                                match install_downloaded_update(p) {
-                                    Ok(()) => {}
-                                    Err(err) => {
-                                        s.update_check_status_msg = Some(err.clone());
-                                        s.set_toast(err);
-                                    }
+                                if let Err(err) = install_downloaded_update(p) {
+                                    s.update_check_status_msg = Some(err.clone());
+                                    s.set_toast(err);
                                 }
                             }
                         }
@@ -5888,17 +6415,21 @@ impl eframe::App for AgentPowerGuardApp {
         // Modal: Uninstall Software Confirmation
         let mut uninstall_open = s.show_uninstall_modal;
         if uninstall_open {
-            egui::Window::new("🗑 Uninstall Agent Power Guard")
+            egui::Window::new("Uninstall Agent Power Guard")
                 .open(&mut uninstall_open)
                 .collapsible(false)
                 .resizable(false)
-                .default_size([430.0, 190.0])
+                .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+                .default_size([450.0, 210.0])
                 .show(ui.ctx(), |ui| {
-                    ui.label(
-                        egui::RichText::new("Are you sure you want to uninstall Agent Power Guard?")
-                            .strong(),
+                    icon_card_title(
+                        ui,
+                        UiIcon::Trash,
+                        egui::Color32::from_rgb(248, 113, 113),
+                        "Confirm Uninstall",
                     );
-                    ui.label("This will disable auto-startup, remove any background service task, and launch the uninstaller (or remove the portable binary).");
+                    ui.add_space(4.0);
+                    ui.label("This disables startup registration, stops/removes any background service, and launches the uninstaller (or deletes the portable executable).");
                     ui.add_space(6.0);
                     ui.checkbox(
                         &mut s.uninstall_wipe_data,
@@ -5909,13 +6440,14 @@ impl eframe::App for AgentPowerGuardApp {
                     }
                     ui.add_space(10.0);
                     ui.horizontal(|ui| {
-                        if ui
-                            .button(
-                                egui::RichText::new("Confirm Uninstall")
-                                    .strong()
-                                    .color(egui::Color32::RED),
-                            )
-                            .clicked()
+                        if icon_button(
+                            ui,
+                            UiIcon::Trash,
+                            egui::Color32::WHITE,
+                            "Confirm Uninstall",
+                            Some(egui::Color32::from_rgb(185, 28, 28)),
+                        )
+                        .clicked()
                         {
                             if let Err(err) = execute_software_uninstall(s.uninstall_wipe_data) {
                                 s.uninstall_status_msg = Some(err);
@@ -5931,134 +6463,177 @@ impl eframe::App for AgentPowerGuardApp {
             }
         }
 
-        // Modal: Custom Hardware Watt Calculator & AI Spec Estimator
+        // Modal: Custom Hardware Watt Calculator & AI Estimator (Clean 4-Step Wizard)
         let mut calc_open = s.show_watt_calc_modal;
         if calc_open {
             let state_arc = self.state.clone();
-            egui::Window::new("⚡ Hardware Watt Calculator & AI Estimator")
+            egui::Window::new("Hardware Watt Calculator & AI Estimator")
                 .open(&mut calc_open)
-                .default_size([680.0, 580.0])
+                .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+                .default_size([740.0, 610.0])
+                .max_height(660.0)
                 .show(ui.ctx(), |ui| {
-                    egui::ScrollArea::vertical().show(ui, |ui| {
-                        // Step 1: System Spec Fetcher
-                        ui.horizontal(|ui| {
-                            if s.watt_calc.spec_fetch_in_progress {
-                                ui.label("⏳ Fetching local system specs...");
-                            } else if ui.button("🔍 Fetch System Specs").clicked() {
-                                trigger_spec_fetch_locked(&mut s, state_arc.clone());
-                            }
-                            if ui.button("📋 Generate & Copy AI Prompt").clicked() {
-                                let prompt = build_ai_watt_prompt(
-                                    &s.detected_specs,
-                                    &s.watt_calc,
-                                    &s.config.currency_symbol,
-                                    s.config.electricity_rate_kwh,
+                    egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+                        // STEP 1: Auto-Fetch System Hardware Specs
+                        app_card_frame(ui).show(ui, |ui| {
+                            ui.horizontal(|ui| {
+                                icon_card_title(
+                                    ui,
+                                    UiIcon::Cpu,
+                                    egui::Color32::from_rgb(56, 189, 248),
+                                    "Step 1: Fetch System Specs",
                                 );
-                                ui.ctx().copy_text(prompt.clone());
-                                s.watt_calc.generated_prompt = prompt;
-                                s.set_toast("Hardware wattage AI prompt copied to clipboard.");
+                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                    if s.watt_calc.spec_fetch_in_progress {
+                                        ui.label("Detecting hardware...");
+                                    } else if icon_button(
+                                        ui,
+                                        UiIcon::Search,
+                                        egui::Color32::WHITE,
+                                        "Fetch System Specs",
+                                        Some(egui::Color32::from_rgb(37, 99, 235)),
+                                    )
+                                    .clicked()
+                                    {
+                                        trigger_spec_fetch_locked(&mut s, state_arc.clone());
+                                    }
+                                });
+                            });
+                            ui.add_space(6.0);
+                            if !s.detected_specs.fetched {
+                                ui.label(egui::RichText::new("Click 'Fetch System Specs' to scan CPU, RAM, GPU, storage, and connected monitors.").weak().size(12.0));
+                            } else {
+                                let mon_str = if s.detected_specs.monitors.is_empty() {
+                                    "Not auto-detected (enter in Step 2)".to_string()
+                                } else {
+                                    s.detected_specs.monitors.join(", ")
+                                };
+                                egui::Grid::new("specs_grid").num_columns(2).spacing([14.0, 4.0]).show(ui, |ui| {
+                                    ui.label(egui::RichText::new("OS / Type:").weak());
+                                    ui.label(format!("{} ({})", s.detected_specs.os_name, if s.detected_specs.is_laptop { "Laptop" } else { "Desktop" }));
+                                    ui.end_row();
+                                    ui.label(egui::RichText::new("CPU:").weak());
+                                    ui.label(format!("{} ({} cores)", s.detected_specs.cpu_brand, s.detected_specs.cpu_cores));
+                                    ui.end_row();
+                                    ui.label(egui::RichText::new("Memory & Storage:").weak());
+                                    ui.label(format!("{:.1} GB RAM | {}", s.detected_specs.ram_gb, s.detected_specs.storage_summary));
+                                    ui.end_row();
+                                    ui.label(egui::RichText::new("GPU:").weak());
+                                    ui.label(format!("{} ({:.1} GB VRAM)", if s.detected_specs.gpu_name.is_empty() { "Integrated" } else { &s.detected_specs.gpu_name }, s.detected_specs.gpu_vram_gb));
+                                    ui.end_row();
+                                    ui.label(egui::RichText::new("Detected Displays:").weak());
+                                    ui.label(mon_str);
+                                    ui.end_row();
+                                });
                             }
                         });
 
-                        ui.add_space(6.0);
-                        egui::Frame::new()
-                            .fill(egui::Color32::from_rgb(22, 29, 39))
-                            .corner_radius(6.0)
-                            .inner_margin(egui::Margin::symmetric(10, 8))
-                            .show(ui, |ui| {
-                                ui.label(egui::RichText::new("1. Auto-Detected Hardware Specs").strong());
-                                if !s.detected_specs.fetched {
-                                    ui.label(egui::RichText::new("Click 'Fetch System Specs' above to detect your CPU, RAM, GPU, storage, and monitors.").weak().size(11.5));
-                                } else {
-                                    let mon_str = if s.detected_specs.monitors.is_empty() {
-                                        "Not auto-detected (enter manually below)".to_string()
-                                    } else {
-                                        s.detected_specs.monitors.join(", ")
-                                    };
-                                    ui.label(format!(
-                                        "OS: {} ({}) | CPU: {} ({} cores) | RAM: {:.1} GB",
-                                        s.detected_specs.os_name,
-                                        if s.detected_specs.is_laptop { "Laptop" } else { "Desktop" },
-                                        s.detected_specs.cpu_brand,
-                                        s.detected_specs.cpu_cores,
-                                        s.detected_specs.ram_gb
-                                    ));
-                                    ui.label(format!(
-                                        "GPU: {} ({:.1} GB VRAM) | Storage: {} | Monitors: {}",
-                                        if s.detected_specs.gpu_name.is_empty() { "Integrated" } else { &s.detected_specs.gpu_name },
-                                        s.detected_specs.gpu_vram_gb,
-                                        s.detected_specs.storage_summary,
-                                        mon_str
-                                    ));
-                                }
-                            });
+                        ui.add_space(8.0);
 
-                        ui.add_space(6.0);
-
-                        // Step 2: Manual Hardware Inputs (SMPS, monitors, extras)
-                        egui::Frame::new()
-                            .fill(egui::Color32::from_rgb(22, 29, 39))
-                            .corner_radius(6.0)
-                            .inner_margin(egui::Margin::symmetric(10, 8))
-                            .show(ui, |ui| {
-                                ui.label(egui::RichText::new("2. Manual Hardware Inputs & Custom Watt Distribution").strong());
-                                ui.horizontal(|ui| {
-                                    ui.label("SMPS / PSU:");
-                                    ui.add(egui::TextEdit::singleline(&mut s.watt_calc.smps_model_note).desired_width(180.0));
-                                    ui.label("Rated W:");
-                                    ui.add(egui::DragValue::new(&mut s.watt_calc.psu_wattage).range(45..=2000).suffix("W"));
+                        // STEP 2: Missing Hardware Inputs, Custom Watt Distribution & Tariff
+                        app_card_frame(ui).show(ui, |ui| {
+                            icon_card_title(
+                                ui,
+                                UiIcon::Sliders,
+                                egui::Color32::from_rgb(16, 185, 129),
+                                "Step 2: Missing Details, Watt Distribution & Electricity Price",
+                            );
+                            ui.add_space(6.0);
+                            egui::Grid::new("watt_inputs_grid").num_columns(2).spacing([16.0, 8.0]).show(ui, |ui| {
+                                ui.label("SMPS / PSU:");
+                                ui.horizontal_wrapped(|ui| {
+                                    ui.add(egui::TextEdit::singleline(&mut s.watt_calc.smps_model_note).desired_width(240.0));
+                                    ui.label("Rated:");
+                                    ui.add(egui::DragValue::new(&mut s.watt_calc.psu_wattage).range(45..=2000).suffix(" W"));
                                     ui.label("Efficiency:");
                                     ui.add(egui::DragValue::new(&mut s.watt_calc.psu_efficiency_pct).range(60.0..=96.0).suffix("%"));
                                 });
-                                ui.horizontal(|ui| {
-                                    ui.label("Monitors:");
+                                ui.end_row();
+
+                                ui.label("Monitors:");
+                                ui.horizontal_wrapped(|ui| {
+                                    ui.label("Count:");
                                     ui.add(egui::DragValue::new(&mut s.watt_calc.monitor_count).range(1..=6));
                                     ui.label("Models:");
                                     ui.add(egui::TextEdit::singleline(&mut s.watt_calc.monitor_models_note).desired_width(220.0));
-                                    ui.label("W/monitor:");
-                                    ui.add(egui::DragValue::new(&mut s.watt_calc.monitor_each_w).range(5.0..=200.0).suffix("W"));
+                                    ui.label("Each:");
+                                    ui.add(egui::DragValue::new(&mut s.watt_calc.monitor_each_w).range(5.0..=200.0).suffix(" W"));
                                 });
-                                ui.horizontal(|ui| {
-                                    ui.label("Peripherals:");
-                                    ui.add(egui::TextEdit::singleline(&mut s.watt_calc.extra_gear_note).desired_width(220.0));
-                                    ui.label("Wall Meter Override (0 = off):");
-                                    ui.add(egui::DragValue::new(&mut s.watt_calc.wall_meter_override_w).range(0.0..=1500.0).suffix("W"));
+                                ui.end_row();
+
+                                ui.label("Peripherals / Meter:");
+                                ui.horizontal_wrapped(|ui| {
+                                    ui.add(egui::TextEdit::singleline(&mut s.watt_calc.extra_gear_note).desired_width(240.0));
+                                    ui.label("Wall Meter (0 = calc):");
+                                    ui.add(egui::DragValue::new(&mut s.watt_calc.wall_meter_override_w).range(0.0..=1500.0).suffix(" W"));
                                 });
-                                ui.separator();
-                                ui.horizontal(|ui| {
-                                    ui.label("CPU Idle:");
+                                ui.end_row();
+
+                                ui.label("Component Idle (W):");
+                                ui.horizontal_wrapped(|ui| {
+                                    ui.label("CPU:");
                                     ui.add(egui::DragValue::new(&mut s.watt_calc.cpu_idle_w).range(1.0..=300.0).suffix("W"));
-                                    ui.label("GPU Idle:");
+                                    ui.label("GPU:");
                                     ui.add(egui::DragValue::new(&mut s.watt_calc.gpu_idle_w).range(0.0..=300.0).suffix("W"));
-                                    ui.label("Board/RAM/Fans:");
+                                    ui.label("Board/RAM/SSD:");
                                     ui.add(egui::DragValue::new(&mut s.watt_calc.mobo_ram_ssd_fans_w).range(2.0..=150.0).suffix("W"));
                                     ui.label("Extras:");
                                     ui.add(egui::DragValue::new(&mut s.watt_calc.peripherals_w).range(0.0..=100.0).suffix("W"));
                                     ui.label("Sleep:");
                                     ui.add(egui::DragValue::new(&mut s.watt_calc.sleep_watts).range(0.5..=50.0).suffix("W"));
                                 });
-                                ui.horizontal(|ui| {
-                                    ui.label("Daily Usage Schedule:");
-                                    ui.add(egui::DragValue::new(&mut s.watt_calc.daily_active_hours).range(0.0..=24.0).speed(0.5).suffix("h active"));
-                                    ui.add(egui::DragValue::new(&mut s.watt_calc.daily_idle_sleep_hours).range(0.0..=24.0).speed(0.5).suffix("h saved sleep"));
-                                });
+                                ui.end_row();
 
-                                let bd = s.watt_calc.compute_breakdown();
-                                let cur = s.config.currency_symbol.clone();
-                                let co2_kg = get_carbon_factor_kg(&s.config);
-                                let proj = compute_power_projection(
-                                    bd.total_active_watts,
-                                    bd.total_monitor_watts,
-                                    bd.sleep_watts,
-                                    s.config.electricity_rate_kwh,
-                                    co2_kg,
-                                    s.watt_calc.daily_active_hours,
-                                    s.watt_calc.daily_idle_sleep_hours,
-                                );
-                                ui.add_space(4.0);
+                                ui.label("Usage & Electricity Rate:");
+                                ui.horizontal_wrapped(|ui| {
+                                    ui.label("Active/day:");
+                                    ui.add(egui::DragValue::new(&mut s.watt_calc.daily_active_hours).range(0.0..=24.0).speed(0.5).suffix("h"));
+                                    ui.label("Sleep/day:");
+                                    ui.add(egui::DragValue::new(&mut s.watt_calc.daily_idle_sleep_hours).range(0.0..=24.0).speed(0.5).suffix("h"));
+                                    ui.label("Currency:");
+                                    let selected_lbl = MAJOR_CURRENCIES
+                                        .iter()
+                                        .find(|c| c.symbol == s.config.currency_symbol)
+                                        .map(|c| c.code.to_string())
+                                        .unwrap_or_else(|| s.config.currency_symbol.clone());
+                                    egui::ComboBox::from_id_salt("calc_currency_combo")
+                                        .selected_text(selected_lbl)
+                                        .width(86.0)
+                                        .show_ui(ui, |ui| {
+                                            for c in MAJOR_CURRENCIES {
+                                                if ui.selectable_label(s.config.currency_symbol == c.symbol, c.label).clicked() {
+                                                    s.config.currency_symbol = c.symbol.to_string();
+                                                    s.custom_currency_input = c.symbol.to_string();
+                                                    s.config_dirty = true;
+                                                }
+                                            }
+                                        });
+                                    ui.label("Rate/kWh:");
+                                    let csym = s.config.currency_symbol.clone();
+                                    if ui.add(egui::DragValue::new(&mut s.config.electricity_rate_kwh).prefix(&csym).suffix("/kWh").range(0.01..=50000.0).speed(0.1)).changed() {
+                                        s.config_dirty = true;
+                                    }
+                                });
+                                ui.end_row();
+                            });
+
+                            ui.add_space(6.0);
+                            let bd = s.watt_calc.compute_breakdown();
+                            let cur = s.config.currency_symbol.clone();
+                            let co2_kg = get_carbon_factor_kg(&s.config);
+                            let proj = compute_power_projection(
+                                bd.total_active_watts,
+                                bd.total_monitor_watts,
+                                bd.sleep_watts,
+                                s.config.electricity_rate_kwh,
+                                co2_kg,
+                                s.watt_calc.daily_active_hours,
+                                s.watt_calc.daily_idle_sleep_hours,
+                            );
+                            app_subcard_frame(ui).show(ui, |ui| {
                                 ui.label(
                                     egui::RichText::new(format!(
-                                        "Calculated -> Active Total: {:.0}W (PC Wall {:.0}W + Monitors {:.0}W) | Display Off: {:.0}W | Sleep: {:.1}W",
+                                        "Active Total: {:.0} W (PC Wall {:.0} W + Monitors {:.0} W)  |  Display Off: {:.0} W  |  Sleep: {:.1} W",
                                         bd.total_active_watts, bd.wall_pc_watts, bd.total_monitor_watts, proj.display_off_watts, bd.sleep_watts
                                     ))
                                     .strong()
@@ -6066,54 +6641,126 @@ impl eframe::App for AgentPowerGuardApp {
                                 );
                                 ui.label(
                                     egui::RichText::new(format!(
-                                        "Daily Cost w/ Guard: {}{:.2}/day | Savings: {}{:.2}/day ({:.2} kWh/day) · {}{:.2}/month · {}{:.0}/year",
-                                        cur, proj.daily_guard_cost, cur, proj.daily_saved_cost, proj.daily_saved_kwh, cur, proj.monthly_saved_cost, cur, proj.yearly_saved_cost
+                                        "Daily Protected Cost: {}{:.2}/day ({:.2} kWh)  |  Est. Savings: {}{:.2}/day  |  {}{:.1}/month  |  {}{:.0}/year",
+                                        cur, proj.daily_guard_cost, proj.daily_with_guard_kwh, cur, proj.daily_saved_cost, cur, proj.monthly_saved_cost, cur, proj.yearly_saved_cost
                                     ))
-                                    .size(11.5)
+                                    .size(12.0)
                                     .color(egui::Color32::from_rgb(147, 197, 253)),
                                 );
-                                if ui.button("✅ Apply Calculated Watts to Energy Dashboard").clicked() {
-                                    s.config.active_watts = bd.total_active_watts.max(20.0);
-                                    s.config.monitor_watts = bd.total_monitor_watts.max(0.0);
-                                    s.config.sleep_watts = bd.sleep_watts.max(0.5);
-                                    s.config_dirty = true;
-                                    s.set_toast("Applied custom wattage distribution to Energy Dashboard.");
-                                }
                             });
+                            ui.add_space(6.0);
+                            if icon_button(
+                                ui,
+                                UiIcon::Check,
+                                egui::Color32::WHITE,
+                                "Apply Calculated Watts to Dashboard",
+                                Some(egui::Color32::from_rgb(16, 185, 129)),
+                            )
+                            .clicked()
+                            {
+                                s.config.active_watts = bd.total_active_watts.max(20.0);
+                                s.config.monitor_watts = bd.total_monitor_watts.max(0.0);
+                                s.config.sleep_watts = bd.sleep_watts.max(0.5);
+                                s.config_dirty = true;
+                                s.set_toast("Applied custom wattage distribution to Energy Dashboard.");
+                            }
+                        });
 
-                        ui.add_space(6.0);
+                        ui.add_space(8.0);
 
-                        // Step 3: Prompt Preview & Direct AI JSON Response Paste Importer
-                        egui::Frame::new()
-                            .fill(egui::Color32::from_rgb(22, 29, 39))
-                            .corner_radius(6.0)
-                            .inner_margin(egui::Margin::symmetric(10, 8))
-                            .show(ui, |ui| {
-                                ui.label(egui::RichText::new("3. Paste AI Response (JSON from ChatGPT / Claude / Gemini — No API Required)").strong());
-                                ui.label(egui::RichText::new("Click 'Generate & Copy AI Prompt' above, paste it into any AI chat, then paste the AI's JSON response below and click Apply.").weak().size(11.0));
-                                ui.collapsing("View Generated Prompt", |ui| {
-                                    if s.watt_calc.generated_prompt.is_empty() {
-                                        s.watt_calc.generated_prompt = build_ai_watt_prompt(
+                        // STEP 3: Generate Prompt & Reliable Clipboard Copy
+                        app_card_frame(ui).show(ui, |ui| {
+                            ui.horizontal_wrapped(|ui| {
+                                icon_card_title(
+                                    ui,
+                                    UiIcon::Bolt,
+                                    egui::Color32::from_rgb(245, 158, 11),
+                                    "Step 3: Generate AI Prompt (Use Any AI Chat)",
+                                );
+                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                    if icon_button(
+                                        ui,
+                                        UiIcon::Copy,
+                                        egui::Color32::WHITE,
+                                        "Copy Prompt",
+                                        Some(egui::Color32::from_rgb(37, 99, 235)),
+                                    )
+                                    .clicked()
+                                    {
+                                        if s.watt_calc.generated_prompt.is_empty() {
+                                            s.watt_calc.generated_prompt = build_ai_watt_prompt(
+                                                &s.detected_specs,
+                                                &s.watt_calc,
+                                                &s.config.currency_symbol,
+                                                s.config.electricity_rate_kwh,
+                                            );
+                                        }
+                                        copy_text_reliable(ui.ctx(), &s.watt_calc.generated_prompt);
+                                        s.set_toast("Prompt copied to system clipboard. Paste into ChatGPT, Claude, or Gemini.");
+                                    }
+                                    if icon_button(
+                                        ui,
+                                        UiIcon::Refresh,
+                                        egui::Color32::from_rgb(245, 158, 11),
+                                        "Generate Prompt",
+                                        None,
+                                    )
+                                    .clicked()
+                                    {
+                                        let prompt = build_ai_watt_prompt(
                                             &s.detected_specs,
                                             &s.watt_calc,
                                             &s.config.currency_symbol,
                                             s.config.electricity_rate_kwh,
                                         );
+                                        s.watt_calc.generated_prompt = prompt;
+                                        s.set_toast("AI prompt updated with current specs & rates.");
                                     }
+                                });
+                            });
+                            ui.add_space(4.0);
+                            if s.watt_calc.generated_prompt.is_empty() {
+                                s.watt_calc.generated_prompt = build_ai_watt_prompt(
+                                    &s.detected_specs,
+                                    &s.watt_calc,
+                                    &s.config.currency_symbol,
+                                    s.config.electricity_rate_kwh,
+                                );
+                            }
+                            egui::ScrollArea::vertical()
+                                .id_salt("ai_prompt_scroll")
+                                .max_height(130.0)
+                                .show(ui, |ui| {
                                     ui.add(
                                         egui::TextEdit::multiline(&mut s.watt_calc.generated_prompt)
+                                            .code_editor()
                                             .desired_rows(6)
                                             .desired_width(f32::INFINITY),
                                     );
                                 });
-                                ui.add(
-                                    egui::TextEdit::multiline(&mut s.watt_calc.ai_response_input)
-                                        .desired_rows(5)
-                                        .desired_width(f32::INFINITY)
-                                        .hint_text("Paste AI JSON response here, e.g. {\"active_watts\": 115, \"monitor_watts\": 25, \"sleep_watts\": 3, \"currency_symbol\": \"₹\", \"electricity_rate_kwh\": 9.0}"),
+                        });
+
+                        ui.add_space(8.0);
+
+                        // STEP 4: Paste AI JSON Response & Auto-Apply
+                        app_card_frame(ui).show(ui, |ui| {
+                            ui.horizontal_wrapped(|ui| {
+                                icon_card_title(
+                                    ui,
+                                    UiIcon::Download,
+                                    egui::Color32::from_rgb(168, 85, 247),
+                                    "Step 4: Paste AI Response & Calculate All Savings",
                                 );
-                                ui.horizontal(|ui| {
-                                    if ui.button("⚡ Parse & Apply AI Response").clicked() {
+                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                    if icon_button(
+                                        ui,
+                                        UiIcon::Check,
+                                        egui::Color32::WHITE,
+                                        "Apply AI Response",
+                                        Some(egui::Color32::from_rgb(124, 58, 237)),
+                                    )
+                                    .clicked()
+                                    {
                                         let raw = s.watt_calc.ai_response_input.clone();
                                         match parse_ai_watt_response(&raw) {
                                             Ok(parsed) => {
@@ -6156,28 +6803,59 @@ impl eframe::App for AgentPowerGuardApp {
                                                 }
                                                 s.config_dirty = true;
                                                 s.watt_calc.ai_parse_status = Some(format!(
-                                                    "Applied! Active: {:.0}W, Monitor: {:.0}W, Sleep: {:.1}W, Rate: {}{:.2}/kWh",
+                                                    "Applied: Active {:.0}W, Monitor {:.0}W, Sleep {:.1}W, Rate {}{:.2}/kWh",
                                                     s.config.active_watts,
                                                     s.config.monitor_watts,
                                                     s.config.sleep_watts,
                                                     s.config.currency_symbol,
                                                     s.config.electricity_rate_kwh
                                                 ));
-                                                s.set_toast("AI power estimate imported and applied.");
+                                                s.set_toast("AI estimate parsed and applied to Energy Dashboard.");
                                             }
                                             Err(err) => {
                                                 s.watt_calc.ai_parse_status = Some(format!("Error: {}", err));
                                             }
                                         }
                                     }
-                                    if !s.watt_calc.ai_notes.is_empty() {
-                                        ui.label(egui::RichText::new(&s.watt_calc.ai_notes).weak().size(11.0));
+                                    if icon_button(
+                                        ui,
+                                        UiIcon::Copy,
+                                        egui::Color32::from_rgb(168, 85, 247),
+                                        "Paste Clipboard",
+                                        None,
+                                    )
+                                    .clicked()
+                                    {
+                                        if let Some(clip_txt) = read_os_clipboard() {
+                                            s.watt_calc.ai_response_input = clip_txt;
+                                            s.set_toast("Pasted clipboard into AI response box.");
+                                        } else {
+                                            s.set_toast("Clipboard is empty.");
+                                        }
                                     }
                                 });
-                                if let Some(ref st) = s.watt_calc.ai_parse_status {
-                                    ui.label(egui::RichText::new(st).color(egui::Color32::from_rgb(147, 197, 253)).size(11.5));
-                                }
                             });
+                            ui.add_space(4.0);
+                            egui::ScrollArea::vertical()
+                                .id_salt("ai_resp_scroll")
+                                .max_height(110.0)
+                                .show(ui, |ui| {
+                                    ui.add(
+                                        egui::TextEdit::multiline(&mut s.watt_calc.ai_response_input)
+                                            .code_editor()
+                                            .desired_rows(5)
+                                            .desired_width(f32::INFINITY)
+                                            .hint_text("Paste AI JSON response here, e.g. {\"active_watts\": 115, \"monitor_watts\": 25, \"sleep_watts\": 3, \"currency_symbol\": \"₹\", \"electricity_rate_kwh\": 9.0}"),
+                                    );
+                                });
+                            if let Some(ref st) = s.watt_calc.ai_parse_status {
+                                ui.add_space(4.0);
+                                ui.label(egui::RichText::new(st).strong().color(egui::Color32::from_rgb(52, 211, 153)));
+                            }
+                            if !s.watt_calc.ai_notes.is_empty() {
+                                ui.label(egui::RichText::new(&s.watt_calc.ai_notes).weak().size(11.5));
+                            }
+                        });
                     });
                 });
             s.show_watt_calc_modal = calc_open;
@@ -6188,37 +6866,32 @@ impl eframe::App for AgentPowerGuardApp {
         // ====================================================================
         egui::Panel::top("top_bar").resizable(false).show(ui, |ui| {
             ui.add_space(4.0);
-            ui.horizontal(|ui| {
+            ui.horizontal_wrapped(|ui| {
                 // 3-Mode Operational Segmented Selector (§6)
                 let cur_mode = s.operational_mode;
-                for (mode, label, active_rgb) in [
+                for (mode, label, active_rgb, icon) in [
                     (
                         OperationalMode::SmartGuard,
-                        "🛡 Smart Guard",
-                        egui::Color32::from_rgb(34, 139, 34),
+                        "Smart Guard",
+                        egui::Color32::from_rgb(22, 163, 74),
+                        UiIcon::Shield,
                     ),
                     (
                         OperationalMode::GuardOff,
-                        "⏸ Guard Off",
-                        egui::Color32::from_rgb(100, 116, 139),
+                        "Guard Off",
+                        egui::Color32::from_rgb(71, 85, 105),
+                        UiIcon::Pause,
                     ),
                     (
                         OperationalMode::BestPerformance,
-                        "⚡ Best Performance",
+                        "Best Performance",
                         egui::Color32::from_rgb(217, 119, 6),
+                        UiIcon::Bolt,
                     ),
                 ] {
                     let selected = cur_mode == mode;
-                    let text = if selected {
-                        egui::RichText::new(label).color(egui::Color32::WHITE).strong()
-                    } else {
-                        egui::RichText::new(label)
-                    };
-                    let mut btn = egui::Button::new(text);
-                    if selected {
-                        btn = btn.fill(active_rgb);
-                    }
-                    if ui.add(btn).clicked() && !selected {
+                    let fill = if selected { Some(active_rgb) } else { None };
+                    if icon_button(ui, icon, active_rgb, label, fill).clicked() && !selected {
                         s.set_operational_mode(mode, None);
                     }
                 }
@@ -6231,15 +6904,20 @@ impl eframe::App for AgentPowerGuardApp {
                     if ui.small_button("2h").clicked() {
                         s.set_operational_mode(OperationalMode::BestPerformance, Some(2));
                     }
-                    if ui.small_button("∞").clicked() {
+                    if ui.small_button("Unlimited").clicked() {
                         s.set_operational_mode(OperationalMode::BestPerformance, None);
                     }
                 }
 
-                if ui
-                    .button("ℹ Guide")
-                    .on_hover_text("Open how Agent Power Guard modes & intent detection work")
-                    .clicked()
+                if icon_button(
+                    ui,
+                    UiIcon::Info,
+                    egui::Color32::from_rgb(96, 165, 250),
+                    "Guide",
+                    None,
+                )
+                .on_hover_text("Open how Agent Power Guard modes & intent detection work")
+                .clicked()
                 {
                     s.show_info_guide = !s.show_info_guide;
                 }
@@ -6273,12 +6951,12 @@ impl eframe::App for AgentPowerGuardApp {
                     .text(egui::RichText::new(progress_label).strong())
                     .animate(s.all_conditions_pass && s.operational_mode == OperationalMode::SmartGuard);
 
-                ui.add_sized([(ui.available_width() - 390.0).max(120.0), 22.0], pbar);
+                ui.add_sized([(ui.available_width() - 370.0).max(140.0), 22.0], pbar);
 
                 ui.separator();
 
                 // Quick Action Buttons
-                if ui.button("⚡ Sleep").clicked() {
+                if icon_button(ui, UiIcon::Sleep, egui::Color32::from_rgb(147, 197, 253), "Sleep", None).clicked() {
                     s.set_toast("Executing sleep now via OS power call...");
                     let ok = sleep_now();
                     if !ok {
@@ -6286,7 +6964,7 @@ impl eframe::App for AgentPowerGuardApp {
                     }
                 }
 
-                if ui.button("⏱ 15s Test").clicked() {
+                if icon_button(ui, UiIcon::Clock, egui::Color32::from_rgb(56, 189, 248), "15s Test", None).clicked() {
                     s.config.idle_threshold_secs = 15;
                     s.config.monitor_timeout_mins = 1;
                     s.config.active_mode = PowerMode::Custom;
@@ -6297,42 +6975,42 @@ impl eframe::App for AgentPowerGuardApp {
                     s.set_toast("15s Test active (sleep 15s, display off 1m).");
                 }
 
-                if ui.button("⚙ Power Plan").clicked() {
+                if icon_button(ui, UiIcon::Sliders, egui::Color32::from_rgb(148, 163, 184), "Power Plan", None).clicked() {
                     apply_optimal_power_plan(s.config.monitor_timeout_mins);
                     s.set_toast("Optimal Power Plan applied.");
                 }
 
-                if ui.button("📥 Tray").clicked() {
+                if icon_button(ui, UiIcon::Tray, egui::Color32::from_rgb(148, 163, 184), "Tray", None).clicked() {
                     ui.ctx()
                         .send_viewport_cmd(egui::ViewportCommand::Visible(false));
                     flush_working_set();
                     s.set_toast("Minimized to system tray. Active in background.");
                 }
 
-                let theme_icon = if s.config.dark_mode {
-                    "☀ Light"
+                let (theme_lbl, theme_ic, theme_col) = if s.config.dark_mode {
+                    ("Light", UiIcon::Sun, egui::Color32::from_rgb(251, 191, 36))
                 } else {
-                    "🌙 Dark"
+                    ("Dark", UiIcon::Moon, egui::Color32::from_rgb(99, 102, 241))
                 };
-                if ui.button(theme_icon).clicked() {
+                if icon_button(ui, theme_ic, theme_col, theme_lbl, None).clicked() {
                     s.config.dark_mode = !s.config.dark_mode;
                     s.config_dirty = true;
                 }
             });
 
             // Status note directly under 3-mode selector + live Intent & Stage 1 badge (§6)
-            ui.horizontal(|ui| {
+            ui.horizontal_wrapped(|ui| {
                 ui.label(
                     egui::RichText::new(s.operational_mode.status_note())
                         .weak()
-                        .size(11.0),
+                        .size(11.5),
                 );
                 ui.separator();
                 ui.label(
                     egui::RichText::new(format!("Intent: {}", s.intent.display_label()))
                         .strong()
                         .color(egui::Color32::from_rgb(96, 165, 250))
-                        .size(11.0),
+                        .size(11.5),
                 );
                 ui.separator();
                 let stage1_txt = if s.defer_display_off_for_monitor_audio {
@@ -6352,7 +7030,7 @@ impl eframe::App for AgentPowerGuardApp {
                 } else {
                     "Display-off: Held by Meeting / Active Video / Mode".to_string()
                 };
-                ui.label(egui::RichText::new(stage1_txt).weak().size(11.0));
+                ui.label(egui::RichText::new(stage1_txt).weak().size(11.5));
             });
 
             // Best Performance explicit expiry reminder banner
@@ -6369,12 +7047,13 @@ impl eframe::App for AgentPowerGuardApp {
                 egui::Frame::new()
                     .fill(egui::Color32::from_rgb(146, 64, 14))
                     .corner_radius(6.0)
-                    .inner_margin(egui::Margin::symmetric(12, 4))
+                    .inner_margin(egui::Margin::symmetric(12, 5))
                     .show(ui, |ui| {
                         ui.horizontal(|ui| {
+                            draw_icon_inline(ui, 15.0, egui::Color32::WHITE, UiIcon::Bolt);
                             ui.label(
                                 egui::RichText::new(format!(
-                                    "⚡ BEST PERFORMANCE ACTIVE: Sleep & display-off are locked off ({}).",
+                                    "BEST PERFORMANCE ACTIVE: Sleep & display-off are locked off ({}).",
                                     exp_msg
                                 ))
                                 .color(egui::Color32::WHITE)
@@ -6395,23 +7074,24 @@ impl eframe::App for AgentPowerGuardApp {
                     .corner_radius(6.0)
                     .inner_margin(egui::Margin::symmetric(12, 5))
                     .show(ui, |ui| {
-                        ui.horizontal(|ui| {
+                        ui.horizontal_wrapped(|ui| {
+                            draw_icon_inline(ui, 15.0, egui::Color32::from_rgb(191, 219, 254), UiIcon::Info);
                             let label = if s.media_prompt_title.is_empty() {
-                                format!("🎬 Idle playback detected in {}. Keep PC awake for this session?", s.media_prompt_app)
+                                format!("Idle playback detected in {}. Keep PC awake for this session?", s.media_prompt_app)
                             } else {
-                                format!("🎬 Playing \"{}\" in {}. Keep PC awake for this session?", s.media_prompt_title, s.media_prompt_app)
+                                format!("Playing \"{}\" in {}. Keep PC awake for this session?", s.media_prompt_title, s.media_prompt_app)
                             };
                             ui.label(egui::RichText::new(label).color(egui::Color32::WHITE).strong());
-                            if ui.button("✅ Keep Awake").clicked() {
+                            if icon_button(ui, UiIcon::Check, egui::Color32::from_rgb(52, 211, 153), "Keep Awake", None).clicked() {
                                 s.apply_media_action(MediaPromptAction::KeepAwake);
                             }
-                            if ui.button("💤 Sleep Now").clicked() {
+                            if icon_button(ui, UiIcon::Sleep, egui::Color32::from_rgb(147, 197, 253), "Sleep Now", None).clicked() {
                                 let should_sleep = s.apply_media_action(MediaPromptAction::SleepNow);
                                 if should_sleep {
                                     let _ = sleep_now();
                                 }
                             }
-                            if ui.button("🙈 Hide").clicked() {
+                            if ui.button("Hide").clicked() {
                                 s.apply_media_action(MediaPromptAction::Hide);
                             }
                         });
@@ -6419,13 +7099,14 @@ impl eframe::App for AgentPowerGuardApp {
             } else if s.media_lock_active {
                 ui.add_space(2.0);
                 ui.horizontal(|ui| {
+                    draw_icon_inline(ui, 13.0, egui::Color32::from_rgb(147, 197, 253), UiIcon::Lock);
                     ui.label(
                         egui::RichText::new(format!(
-                            "🎬 Media session lock active ({}) — unlocks {}s after pause/stop",
+                            "Media session lock active ({}) — unlocks {}s after pause/stop",
                             s.media_lock_app, s.config.media_pause_grace_secs
                         ))
                         .color(egui::Color32::from_rgb(147, 197, 253))
-                        .size(11.0),
+                        .size(11.5),
                     );
                     if ui.small_button("Sleep Now / Release Lock").clicked() {
                         let should_sleep = s.apply_media_action(MediaPromptAction::SleepNow);
@@ -6451,18 +7132,19 @@ impl eframe::App for AgentPowerGuardApp {
                     .corner_radius(6.0)
                     .inner_margin(egui::Margin::symmetric(12, 6))
                     .show(ui, |ui| {
-                        ui.horizontal(|ui| {
+                        ui.horizontal_wrapped(|ui| {
+                            draw_icon_inline(ui, 15.0, egui::Color32::from_rgb(147, 197, 253), UiIcon::Download);
                             ui.label(
                                 egui::RichText::new(format!(
-                                    "🚀 New release available: {} (Installed: v{})",
+                                    "New release available: {} (Installed: v{})",
                                     new_ver,
                                     env!("CARGO_PKG_VERSION")
                                 ))
                                 .strong()
-                                .color(egui::Color32::from_rgb(147, 197, 253)),
+                                .color(egui::Color32::from_rgb(191, 219, 254)),
                             );
                             if dl_ready {
-                                if ui.button("✅ Install & Restart Now").clicked() {
+                                if icon_button(ui, UiIcon::Check, egui::Color32::WHITE, "Install & Restart Now", Some(egui::Color32::from_rgb(16, 185, 129))).clicked() {
                                     if let Some(ref p) = dl_path {
                                         if let Err(err) = install_downloaded_update(p) {
                                             s.set_toast(err);
@@ -6471,10 +7153,10 @@ impl eframe::App for AgentPowerGuardApp {
                                 }
                             } else if dl_busy {
                                 ui.label(
-                                    egui::RichText::new("⏳ Downloading in background...")
+                                    egui::RichText::new("Downloading update in background...")
                                         .color(egui::Color32::from_rgb(191, 219, 254)),
                                 );
-                            } else if ui.button("⬇ Update Now").clicked() {
+                            } else if icon_button(ui, UiIcon::Download, egui::Color32::WHITE, "Update Now", Some(egui::Color32::from_rgb(37, 99, 235))).clicked() {
                                 trigger_update_download_locked(&mut s, state_arc, Some(new_ver));
                             }
                             if ui.button("View Releases").clicked() {
@@ -6487,33 +7169,28 @@ impl eframe::App for AgentPowerGuardApp {
                 ui.add_space(4.0);
             }
 
-            // Tab Navigation Bar
-            ui.horizontal(|ui| {
-                ui.selectable_value(
-                    &mut s.active_tab,
-                    ActiveTab::Guard,
-                    egui::RichText::new("🛡️ Watchdog & Presets").strong(),
-                );
-                ui.selectable_value(
-                    &mut s.active_tab,
-                    ActiveTab::History,
-                    egui::RichText::new("📜 Block History").strong(),
-                );
-                ui.selectable_value(
-                    &mut s.active_tab,
-                    ActiveTab::Energy,
-                    egui::RichText::new("💰 Energy Savings").strong(),
-                );
-                ui.selectable_value(
-                    &mut s.active_tab,
-                    ActiveTab::Notifications,
-                    egui::RichText::new("🔔 Alerts & Updates").strong(),
-                );
-                ui.selectable_value(
-                    &mut s.active_tab,
-                    ActiveTab::Remote,
-                    egui::RichText::new("🌐 Remote").strong(),
-                );
+            // Tab Navigation Bar (with crisp vector icons)
+            ui.horizontal_wrapped(|ui| {
+                for (tab, label, icon, col) in [
+                    (ActiveTab::Guard, "Watchdog & Presets", UiIcon::Shield, egui::Color32::from_rgb(52, 211, 153)),
+                    (ActiveTab::History, "Block History", UiIcon::History, egui::Color32::from_rgb(245, 158, 11)),
+                    (ActiveTab::Energy, "Energy Savings", UiIcon::Coin, egui::Color32::from_rgb(56, 189, 248)),
+                    (ActiveTab::Notifications, "Alerts & Updates", UiIcon::Bell, egui::Color32::from_rgb(168, 85, 247)),
+                    (ActiveTab::Remote, "Remote", UiIcon::Globe, egui::Color32::from_rgb(96, 165, 250)),
+                ] {
+                    let active = s.active_tab == tab;
+                    let rt = egui::RichText::new(format!("    {}", label)).strong();
+                    let resp = ui.selectable_label(active, rt);
+                    let r = egui::Rect::from_center_size(
+                        egui::pos2(resp.rect.left() + 11.0, resp.rect.center().y),
+                        egui::vec2(13.0, 13.0),
+                    );
+                    let ic = if active { egui::Color32::WHITE } else { col };
+                    paint_icon(&ui.painter_at(resp.rect), r, ic, icon);
+                    if resp.clicked() {
+                        s.active_tab = tab;
+                    }
+                }
             });
 
             // Feature 4: Grace Period Imminent Sleep Alert Banner
@@ -6525,32 +7202,35 @@ impl eframe::App for AgentPowerGuardApp {
                     .inner_margin(egui::Margin::symmetric(12, 6));
                 grace_frame.show(ui, |ui| {
                     ui.horizontal(|ui| {
+                        draw_icon_inline(ui, 15.0, egui::Color32::WHITE, UiIcon::Warning);
                         ui.label(
                             egui::RichText::new(format!(
-                                "⚠️ SLEEP IMMINENT: PC sleeping in {} seconds!",
+                                "SLEEP IMMINENT: PC sleeping in {} seconds!",
                                 s.countdown_secs
                             ))
                             .strong()
                             .color(egui::Color32::WHITE),
                         );
-                        if ui
-                            .button(
-                                egui::RichText::new("⏳ Postpone (+15m)")
-                                    .strong()
-                                    .color(egui::Color32::BLACK),
-                            )
-                            .clicked()
+                        if icon_button(
+                            ui,
+                            UiIcon::Clock,
+                            egui::Color32::from_rgb(15, 23, 42),
+                            "Postpone (+15m)",
+                            None,
+                        )
+                        .clicked()
                         {
                             s.postponed_until = Some(Instant::now() + Duration::from_secs(15 * 60));
                             s.set_toast("Sleep postponed for 15 minutes.");
                         }
-                        if ui
-                            .button(
-                                egui::RichText::new("⚡ Sleep Immediately")
-                                    .strong()
-                                    .color(egui::Color32::WHITE),
-                            )
-                            .clicked()
+                        if icon_button(
+                            ui,
+                            UiIcon::Bolt,
+                            egui::Color32::WHITE,
+                            "Sleep Immediately",
+                            Some(egui::Color32::from_rgb(153, 27, 27)),
+                        )
+                        .clicked()
                         {
                             let _ = sleep_now();
                         }
@@ -6569,9 +7249,10 @@ impl eframe::App for AgentPowerGuardApp {
                         .inner_margin(egui::Margin::symmetric(12, 4));
                     lease_frame.show(ui, |ui| {
                         ui.horizontal(|ui| {
+                            draw_icon_inline(ui, 14.0, egui::Color32::WHITE, UiIcon::Lock);
                             ui.label(
                                 egui::RichText::new(format!(
-                                    "🔒 ACTIVE AGENT LEASE: \"{}\" ({}s remaining)",
+                                    "ACTIVE AGENT LEASE: \"{}\" ({}s remaining)",
                                     s.agent_lease_reason, rem
                                 ))
                                 .color(egui::Color32::WHITE)
@@ -6591,9 +7272,12 @@ impl eframe::App for AgentPowerGuardApp {
             if let Some((msg, created)) = &s.toast_message.clone() {
                 if created.elapsed() < Duration::from_secs(5) {
                     ui.add_space(2.0);
-                    ui.label(
-                        egui::RichText::new(format!("ℹ {}", msg)).color(egui::Color32::LIGHT_BLUE),
-                    );
+                    ui.horizontal(|ui| {
+                        draw_icon_inline(ui, 13.0, egui::Color32::LIGHT_BLUE, UiIcon::Info);
+                        ui.label(
+                            egui::RichText::new(msg).color(egui::Color32::LIGHT_BLUE).size(12.0),
+                        );
+                    });
                 }
             }
             ui.add_space(4.0);
@@ -6616,13 +7300,13 @@ impl eframe::App for AgentPowerGuardApp {
                         // Phase 3.1 & 3.3: Power Modes & Battery Status
                         ui.group(|ui| {
                             ui.horizontal(|ui| {
-                                ui.label(egui::RichText::new("⚡ Power Mode").strong());
+                                icon_card_title(ui, UiIcon::Bolt, egui::Color32::from_rgb(245, 158, 11), "Power Mode");
                                 if s.live_battery_status.has_battery {
                                     let batt_pct = s.live_battery_status.percent.unwrap_or(100);
                                     let batt_text = if s.live_battery_status.on_ac_power {
-                                        format!("⚡ AC ({}%)", batt_pct)
+                                        format!("AC ({}%)", batt_pct)
                                     } else {
-                                        format!("🔋 Battery ({}%)", batt_pct)
+                                        format!("Battery ({}%)", batt_pct)
                                     };
                                     let batt_color = if !s.live_battery_status.on_ac_power && batt_pct <= s.config.low_battery_percent_threshold {
                                         egui::Color32::RED
@@ -6633,11 +7317,12 @@ impl eframe::App for AgentPowerGuardApp {
                                     };
                                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                                         ui.label(egui::RichText::new(batt_text).color(batt_color).strong().size(11.0));
+                                        draw_icon_inline(ui, 13.0, batt_color, UiIcon::Battery);
                                     });
                                 }
                             });
                             ui.label(egui::RichText::new("Active operational profile:").weak().size(11.0));
-                            ui.horizontal(|ui| {
+                            ui.horizontal_wrapped(|ui| {
                                 let modes = [
                                     (PowerMode::Balanced, "Balanced (3m)"),
                                     (PowerMode::Work, "Work (10m)"),
@@ -6670,7 +7355,8 @@ impl eframe::App for AgentPowerGuardApp {
                                 if now_epoch < until {
                                     let rem_m = (until - now_epoch) / 60 + 1;
                                     ui.horizontal(|ui| {
-                                        ui.label(egui::RichText::new(format!("☕ Keep Awake Active ({}m left)", rem_m)).color(egui::Color32::from_rgb(245, 158, 11)).strong());
+                                        draw_icon_inline(ui, 13.0, egui::Color32::from_rgb(245, 158, 11), UiIcon::Clock);
+                                        ui.label(egui::RichText::new(format!("Keep Awake Active ({}m left)", rem_m)).color(egui::Color32::from_rgb(245, 158, 11)).strong());
                                         if ui.button("Cancel").clicked() {
                                             s.config.stay_awake_until_epoch_secs = None;
                                             s.config_dirty = true;
@@ -6682,7 +7368,8 @@ impl eframe::App for AgentPowerGuardApp {
                                 }
                             } else {
                                 ui.horizontal(|ui| {
-                                    ui.label(egui::RichText::new("☕ Keep Awake:").weak());
+                                    draw_icon_inline(ui, 13.0, egui::Color32::from_rgb(148, 163, 184), UiIcon::Clock);
+                                    ui.label(egui::RichText::new("Keep Awake:").weak());
                                     if ui.button("+30m").clicked() {
                                         s.config.stay_awake_until_epoch_secs = Some(now_epoch + 30 * 60);
                                         s.config_dirty = true;
@@ -6706,14 +7393,14 @@ impl eframe::App for AgentPowerGuardApp {
 
                         // Quick Presets
                         ui.group(|ui| {
-                            ui.label(egui::RichText::new("⏱ Quick Presets (Staged Power Strategy)").strong());
+                            icon_card_title(ui, UiIcon::Clock, egui::Color32::from_rgb(56, 189, 248), "Quick Presets (Staged Power Strategy)");
                             ui.label(egui::RichText::new("Turns monitor off first, then puts PC to deep sleep.").weak().size(11.0));
                             ui.add_space(4.0);
 
                             ui.horizontal_wrapped(|ui| {
                                 let presets: [(&str, u32, u32, &str); 10] = [
                                     ("15s Test", 15, 1, "15s Test Mode"),
-                                    ("3m ★", 180, 2, "3m Default"),
+                                    ("3m (Default)", 180, 2, "3m Default"),
                                     ("5m", 300, 3, "5m Preset"),
                                     ("10m", 600, 5, "10m Preset"),
                                     ("15m", 900, 10, "15m Preset"),
@@ -6811,7 +7498,10 @@ impl eframe::App for AgentPowerGuardApp {
                                 });
                             });
                             if let Some(reason) = &s.cond10_gpu.probe_unavailable {
-                                ui.label(egui::RichText::new(format!("⚠ {}", reason)).color(egui::Color32::from_rgb(245, 158, 11)).size(10.5));
+                                ui.horizontal(|ui| {
+                                    draw_icon_inline(ui, 13.0, egui::Color32::from_rgb(245, 158, 11), UiIcon::Warning);
+                                    ui.label(egui::RichText::new(reason).color(egui::Color32::from_rgb(245, 158, 11)).size(10.5));
+                                });
                             } else {
                                 let pwr_str = s.gpu_power_mw.map(|mw| format!(", {:.1}W", mw as f32 / 1000.0)).unwrap_or_default();
                                 ui.label(egui::RichText::new(format!(
@@ -7052,7 +7742,10 @@ impl eframe::App for AgentPowerGuardApp {
                                 });
                             });
                             if let Some(reason) = &s.cond9_power_requests.probe_unavailable {
-                                ui.label(egui::RichText::new(format!("⚠ {} — Run once elevated to inspect driver/app locks", reason)).color(egui::Color32::from_rgb(245, 158, 11)).size(10.5));
+                                ui.horizontal(|ui| {
+                                    draw_icon_inline(ui, 13.0, egui::Color32::from_rgb(245, 158, 11), UiIcon::Warning);
+                                    ui.label(egui::RichText::new(format!("{} — Run once elevated to inspect driver/app locks", reason)).color(egui::Color32::from_rgb(245, 158, 11)).size(10.5));
+                                });
                             }
                             if ui.checkbox(&mut s.config.respect_display_requests, "Respect DISPLAY Requests (Video Playback)").changed() {
                                 s.config_dirty = true;
@@ -7088,7 +7781,7 @@ impl eframe::App for AgentPowerGuardApp {
                             }
                         });
 
-                        ui.collapsing("🎬 Passive Media, Zombie Leases & Wake", |ui| {
+                        ui.collapsing("Passive Media, Zombie Leases & Wake", |ui| {
                             ui.horizontal(|ui| {
                                 ui.label("Media Prompt Delay:");
                                 if ui.add(egui::Slider::new(&mut s.config.media_prompt_after_secs, 30..=1800).suffix("s")).changed() {
@@ -7130,7 +7823,7 @@ impl eframe::App for AgentPowerGuardApp {
                         ui.separator();
 
                         // Phase 3.1: Quiet Hours & Schedules
-                        ui.collapsing("🌙 Quiet Hours & Night Schedule", |ui| {
+                        ui.collapsing("Quiet Hours & Night Schedule", |ui| {
                             if ui.checkbox(&mut s.config.quiet_hours_enabled, "Enable Quiet Hours (Aggressive sleep during night)").changed() {
                                 s.config_dirty = true;
                             }
@@ -7155,7 +7848,7 @@ impl eframe::App for AgentPowerGuardApp {
                         });
 
                         // Phase 3.3: Laptop & Battery Profile
-                        ui.collapsing("🔋 Laptop & Battery Profile", |ui| {
+                        ui.collapsing("Laptop & Battery Profile", |ui| {
                             if ui.checkbox(&mut s.config.battery_profile_enabled, "Enable DC Battery Profile (Applies automatically on battery)").changed() {
                                 s.config_dirty = true;
                             }
@@ -7192,14 +7885,15 @@ impl eframe::App for AgentPowerGuardApp {
                         });
 
                         // Phase 3.2: Scheduled Wake Timers
-                        ui.collapsing("⏰ Scheduled Wake Timers", |ui| {
+                        ui.collapsing("Scheduled Wake Timers", |ui| {
                             ui.label(egui::RichText::new("Wake machine from sleep at specified times (e.g. for nightly backup or CI jobs), then let Watchdog put it back to sleep once idle.").weak().size(11.0));
                             let mut to_remove = Vec::new();
                             for timer in &s.config.wake_timers {
                                 ui.horizontal(|ui| {
-                                    ui.label(egui::RichText::new(format!("🕒 {}", timer.time_str)).strong());
+                                    draw_icon_inline(ui, 13.0, egui::Color32::from_rgb(96, 165, 250), UiIcon::Clock);
+                                    ui.label(egui::RichText::new(&timer.time_str).strong());
                                     ui.label(&timer.label);
-                                    if ui.button("❌ Remove").clicked() {
+                                    if icon_button(ui, UiIcon::Trash, egui::Color32::from_rgb(248, 113, 113), "Remove", None).clicked() {
                                         to_remove.push(timer.id.clone());
                                     }
                                 });
@@ -7465,10 +8159,11 @@ impl eframe::App for AgentPowerGuardApp {
                             .corner_radius(6.0)
                             .inner_margin(egui::Margin::symmetric(12, 6))
                             .show(ui, |ui| {
-                                ui.horizontal(|ui| {
+                                ui.horizontal_wrapped(|ui| {
+                                    draw_icon_inline(ui, 14.0, egui::Color32::from_rgb(147, 197, 253), UiIcon::Info);
                                     ui.label(
                                         egui::RichText::new(format!(
-                                            "💡 Suggested idle floors from quiet periods: CPU {:.0}%, Disk {:.0} KB/s, Net {:.0} KB/s",
+                                            "Suggested idle floors from quiet periods: CPU {:.0}%, Disk {:.0} KB/s, Net {:.0} KB/s",
                                             sug.pc_cpu_pct, sug.disk_kbps, sug.net_kbps
                                         ))
                                         .color(egui::Color32::from_rgb(191, 219, 254))
@@ -7555,52 +8250,95 @@ impl eframe::App for AgentPowerGuardApp {
         else if s.active_tab == ActiveTab::History {
             egui::CentralPanel::default_margins().show(ui, |ui| {
                 ui.add_space(4.0);
-                ui.horizontal(|ui| {
-                    ui.heading("📜 What Kept My PC Awake (Block History)");
+                ui.horizontal_wrapped(|ui| {
+                    icon_heading(
+                        ui,
+                        UiIcon::History,
+                        egui::Color32::from_rgb(245, 158, 11),
+                        "What Kept My PC Awake (Block History)",
+                    );
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui.button("🗑️ Clear History").clicked() {
+                        if icon_button(
+                            ui,
+                            UiIcon::Trash,
+                            egui::Color32::from_rgb(248, 113, 113),
+                            "Clear History",
+                            None,
+                        )
+                        .clicked()
+                        {
                             s.clear_block_history();
                             s.set_toast("Block reason history cleared.");
                         }
-                        if ui.button("📋 Copy CSV").clicked() {
+                        if icon_button(
+                            ui,
+                            UiIcon::Copy,
+                            egui::Color32::from_rgb(147, 197, 253),
+                            "Copy CSV",
+                            None,
+                        )
+                        .clicked()
+                        {
                             let csv = export_block_history_csv(&s.block_history);
-                            ui.ctx().copy_text(csv);
+                            copy_text_reliable(ui.ctx(), &csv);
                             s.set_toast("History CSV copied to clipboard.");
                         }
-                        if ui.button("📋 Copy JSON").clicked() {
+                        if icon_button(
+                            ui,
+                            UiIcon::Copy,
+                            egui::Color32::from_rgb(147, 197, 253),
+                            "Copy JSON",
+                            None,
+                        )
+                        .clicked()
+                        {
                             let json = export_block_history_json(&s.block_history);
-                            ui.ctx().copy_text(json);
+                            copy_text_reliable(ui.ctx(), &json);
                             s.set_toast("History JSON copied to clipboard.");
                         }
                     });
                 });
 
-                ui.add_space(6.0);
+                ui.add_space(8.0);
                 let now_epoch = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
 
-                // 1. Metric Summary Cards
+                // 1. Metric Summary Cards (3 even-width cards)
                 let top_blockers = calculate_top_blockers(&s.block_history);
                 let total_blocked_secs: u64 = s.block_history.iter().map(|r| r.duration_secs).sum();
                 let last_night = calculate_last_night_summary(&s.block_history, now_epoch);
 
-                ui.horizontal(|ui| {
-                    // Card 1: Total Blocked Time
-                    egui::Frame::new().fill(egui::Color32::from_rgb(22, 29, 39)).corner_radius(8.0).inner_margin(egui::Margin::symmetric(14, 10)).show(ui, |ui| {
-                        ui.label(egui::RichText::new("⏱️ Total Blocked Time").weak().size(12.0));
+                ui.columns(3, |cols| {
+                    app_card_frame(&cols[0]).show(&mut cols[0], |ui| {
+                        ui.horizontal(|ui| {
+                            draw_icon_inline(ui, 13.0, egui::Color32::from_rgb(245, 158, 11), UiIcon::Clock);
+                            ui.label(egui::RichText::new("Total Blocked Time").weak().size(12.0));
+                        });
+                        ui.add_space(2.0);
                         ui.label(egui::RichText::new(format_human_duration(total_blocked_secs)).strong().size(18.0).color(egui::Color32::from_rgb(245, 158, 11)));
                     });
 
-                    // Card 2: Top Blocker Overall
-                    egui::Frame::new().fill(egui::Color32::from_rgb(22, 29, 39)).corner_radius(8.0).inner_margin(egui::Margin::symmetric(14, 10)).show(ui, |ui| {
-                        ui.label(egui::RichText::new("🛑 Top Blocker").weak().size(12.0));
+                    app_card_frame(&cols[1]).show(&mut cols[1], |ui| {
+                        ui.horizontal(|ui| {
+                            draw_icon_inline(ui, 13.0, egui::Color32::from_rgb(239, 68, 68), UiIcon::Warning);
+                            ui.label(egui::RichText::new("Top Blocker").weak().size(12.0));
+                        });
+                        ui.add_space(2.0);
                         let top_name = top_blockers.first().map(|t| t.name.as_str()).unwrap_or("None");
                         let top_time = top_blockers.first().map(|t| format_human_duration(t.total_secs)).unwrap_or_default();
-                        ui.label(egui::RichText::new(format!("{} ({})", top_name, top_time)).strong().size(14.0).color(egui::Color32::from_rgb(239, 68, 68)));
+                        let top_txt = if top_time.is_empty() {
+                            top_name.to_string()
+                        } else {
+                            format!("{} ({})", top_name, top_time)
+                        };
+                        ui.label(egui::RichText::new(top_txt).strong().size(14.0).color(egui::Color32::from_rgb(248, 113, 113)));
                     });
 
-                    // Card 3: Last Night Summary
-                    egui::Frame::new().fill(egui::Color32::from_rgb(22, 29, 39)).corner_radius(8.0).inner_margin(egui::Margin::symmetric(14, 10)).show(ui, |ui| {
-                        ui.label(egui::RichText::new("🌙 Last Night (Past 12h)").weak().size(12.0));
+                    app_card_frame(&cols[2]).show(&mut cols[2], |ui| {
+                        ui.horizontal(|ui| {
+                            draw_icon_inline(ui, 13.0, egui::Color32::from_rgb(147, 197, 253), UiIcon::Moon);
+                            ui.label(egui::RichText::new("Last Night (Past 12h)").weak().size(12.0));
+                        });
+                        ui.add_space(2.0);
                         let top = last_night.top_blocker.unwrap_or_else(|| "All Quiet".to_string());
                         ui.label(egui::RichText::new(format!("Blocked: {} | Top: {}", format_human_duration(last_night.total_blocked_secs), top)).strong().size(13.0).color(egui::Color32::from_rgb(147, 197, 253)));
                     });
@@ -7609,7 +8347,7 @@ impl eframe::App for AgentPowerGuardApp {
                 ui.add_space(8.0);
 
                 // Config Controls Row
-                ui.horizontal(|ui| {
+                ui.horizontal_wrapped(|ui| {
                     if ui.checkbox(&mut s.config.block_history_enabled, egui::RichText::new("Record Block History").strong()).changed() {
                         s.config_dirty = true;
                     }
@@ -7690,11 +8428,33 @@ impl eframe::App for AgentPowerGuardApp {
         else if s.active_tab == ActiveTab::Energy {
             egui::CentralPanel::default_margins().show(ui, |ui| {
                 ui.add_space(4.0);
-                ui.heading("💰 Energy & Cost Savings Dashboard");
-                ui.label(egui::RichText::new("Track electricity and money saved when Agent Power Guard puts your monitor and workstation into deep standby.").weak());
+                ui.horizontal_wrapped(|ui| {
+                    icon_heading(
+                        ui,
+                        UiIcon::Coin,
+                        egui::Color32::from_rgb(56, 189, 248),
+                        "Energy & Cost Savings Dashboard",
+                    );
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if icon_button(
+                            ui,
+                            UiIcon::Bolt,
+                            egui::Color32::WHITE,
+                            "Watt Calculator & AI Estimator",
+                            Some(egui::Color32::from_rgb(37, 99, 235)),
+                        )
+                        .clicked()
+                        {
+                            s.show_watt_calc_modal = true;
+                            if !s.detected_specs.fetched && !s.watt_calc.spec_fetch_in_progress {
+                                trigger_spec_fetch_locked(&mut s, self.state.clone());
+                            }
+                        }
+                    });
+                });
+                ui.label(egui::RichText::new("Track electricity and money saved when Agent Power Guard puts your monitor and workstation into deep standby.").weak().size(12.0));
                 ui.separator();
 
-                // 1. Metric Summary Cards
                 let now_epoch = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
                 let filtered_records: Vec<EnergyRecord> = s.energy_history.iter().filter(|r| {
                     match s.energy_filter {
@@ -7706,33 +8466,34 @@ impl eframe::App for AgentPowerGuardApp {
                     }
                 }).cloned().collect();
 
-                let total_kwh: f64 = filtered_records.iter().map(|r| r.kwh_saved).sum();
-                let total_cost: f64 = filtered_records.iter().map(|r| r.cost_saved).sum();
+                let clean_zero = |v: f64| -> f64 {
+                    if v <= 0.0 || v.abs() < 0.0005 { 0.0 } else { v }
+                };
+                let total_kwh = clean_zero(filtered_records.iter().map(|r| r.kwh_saved).sum());
+                let total_cost = clean_zero(filtered_records.iter().map(|r| r.cost_saved).sum());
                 let total_secs: u64 = filtered_records.iter().map(|r| r.duration_secs).sum();
                 let co2_factor = get_carbon_factor_kg(&s.config);
-                let total_co2_kg = total_kwh * co2_factor;
+                let total_co2_kg = clean_zero(total_kwh * co2_factor);
 
-                ui.horizontal(|ui| {
-                    let card_w = (ui.available_width() - 36.0) / 4.0;
-
+                // 1. Metric Summary Cards (4 even columns)
+                let cur = s.config.currency_symbol.clone();
+                ui.columns(4, |cols| {
                     let stat_card = |ui: &mut egui::Ui, title: &str, val: String, color: egui::Color32| {
-                        egui::Frame::new().fill(egui::Color32::from_rgb(22, 29, 39)).corner_radius(8.0).inner_margin(egui::Margin::symmetric(14, 10)).show(ui, |ui| {
-                            ui.set_width(card_w);
-                            ui.label(egui::RichText::new(title).size(11.0).weak());
-                            ui.label(egui::RichText::new(val).size(22.0).strong().color(color));
+                        app_card_frame(ui).show(ui, |ui| {
+                            ui.label(egui::RichText::new(title).size(11.5).weak());
+                            ui.add_space(2.0);
+                            ui.label(egui::RichText::new(val).size(20.0).strong().color(color));
                         });
                     };
-
-                    let cur = s.config.currency_symbol.clone();
-                    stat_card(ui, "Money Saved", format!("{}{:.2}", cur, total_cost), egui::Color32::from_rgb(16, 185, 129));
-                    stat_card(ui, "Electricity Saved", format!("{:.1} kWh", total_kwh), egui::Color32::from_rgb(59, 130, 246));
-                    stat_card(ui, "Standby Hours", format!("{:.1} hrs", total_secs as f64 / 3600.0), egui::Color32::from_rgb(245, 158, 11));
-                    stat_card(ui, "CO₂ Avoided", format!("{:.1} kg", total_co2_kg), egui::Color32::from_rgb(168, 85, 247));
+                    stat_card(&mut cols[0], "Money Saved", format!("{}{:.2}", cur, total_cost), egui::Color32::from_rgb(16, 185, 129));
+                    stat_card(&mut cols[1], "Electricity Saved", format!("{:.1} kWh", total_kwh), egui::Color32::from_rgb(59, 130, 246));
+                    stat_card(&mut cols[2], "Standby Hours", format!("{:.1} hrs", total_secs as f64 / 3600.0), egui::Color32::from_rgb(245, 158, 11));
+                    stat_card(&mut cols[3], "CO₂ Avoided", format!("{:.1} kg", total_co2_kg), egui::Color32::from_rgb(168, 85, 247));
                 });
 
                 ui.add_space(6.0);
 
-                // Daily Power Projection Strip (Active vs Display-Off vs Sleep + Daily/Monthly/Yearly Savings)
+                // Daily Power Projection Strip
                 let proj = compute_power_projection(
                     s.config.active_watts,
                     s.config.monitor_watts,
@@ -7743,21 +8504,22 @@ impl eframe::App for AgentPowerGuardApp {
                     s.watt_calc.daily_idle_sleep_hours,
                 );
                 let cur_proj = s.config.currency_symbol.clone();
-                egui::Frame::new().fill(egui::Color32::from_rgb(15, 23, 42)).corner_radius(8.0).inner_margin(egui::Margin::symmetric(14, 8)).show(ui, |ui| {
+                app_subcard_frame(ui).show(ui, |ui| {
                     ui.horizontal_wrapped(|ui| {
+                        draw_icon_inline(ui, 14.0, egui::Color32::from_rgb(52, 211, 153), UiIcon::Bolt);
                         ui.label(egui::RichText::new(format!(
-                            "📊 Power Profile: Active {:.0}W | Display Off {:.0}W | Sleep {:.1}W",
+                            "Power Profile: Active {:.0}W  |  Display Off {:.0}W  |  Sleep {:.1}W",
                             proj.active_watts, proj.display_off_watts, proj.sleep_watts
-                        )).strong().size(11.5));
+                        )).strong().size(12.0));
                         ui.separator();
                         ui.label(egui::RichText::new(format!(
-                            "Daily Usage ({:.0}h active / {:.0}h sleep): {}{:.2}/day ({:.2} kWh)",
+                            "Daily Cost ({:.0}h active / {:.0}h sleep): {}{:.2}/day ({:.2} kWh)",
                             s.watt_calc.daily_active_hours,
                             s.watt_calc.daily_idle_sleep_hours,
                             cur_proj,
                             proj.daily_guard_cost,
                             proj.daily_with_guard_kwh
-                        )).size(11.5));
+                        )).size(12.0));
                         ui.separator();
                         ui.label(egui::RichText::new(format!(
                             "Est. Savings: {}{:.2}/day · {}{:.1}/mo · {}{:.0}/yr ({:.0} kWh, {:.0} kg CO₂/yr)",
@@ -7769,22 +8531,108 @@ impl eframe::App for AgentPowerGuardApp {
                             proj.yearly_saved_cost,
                             proj.yearly_saved_kwh,
                             proj.yearly_co2_kg
-                        )).strong().color(egui::Color32::from_rgb(52, 211, 153)).size(11.5));
+                        )).strong().color(egui::Color32::from_rgb(52, 211, 153)).size(12.0));
                     });
                 });
 
-                ui.add_space(8.0);
+                ui.add_space(6.0);
 
-                // 2. Storage Location & Manual Reset Info
+                // 2. Settings Card (Power Draw, Tariff, 26+ Currencies & Custom Symbol, Carbon Region)
+                app_card_frame(ui).show(ui, |ui| {
+                    ui.horizontal_wrapped(|ui| {
+                        if ui.checkbox(&mut s.config.record_energy_data, egui::RichText::new("Record Energy Data").strong()).changed() {
+                            s.config_dirty = true;
+                        }
+                        ui.separator();
+                        ui.label("Active Power:");
+                        if ui.add(egui::DragValue::new(&mut s.config.active_watts).suffix(" W").range(10.0..=2000.0)).changed() {
+                            s.config_dirty = true;
+                        }
+                        ui.label("Monitor Power:");
+                        if ui.add(egui::DragValue::new(&mut s.config.monitor_watts).suffix(" W").range(0.0..=500.0)).changed() {
+                            s.config_dirty = true;
+                        }
+                        ui.label("Sleep Power:");
+                        if ui.add(egui::DragValue::new(&mut s.config.sleep_watts).suffix(" W").range(0.5..=100.0).speed(0.5)).changed() {
+                            s.config_dirty = true;
+                        }
+                        ui.label("Electricity Rate:");
+                        let cur_str = s.config.currency_symbol.clone();
+                        if ui.add(egui::DragValue::new(&mut s.config.electricity_rate_kwh).prefix(&cur_str).suffix("/kWh").range(0.01..=50000.0).speed(0.1)).changed() {
+                            s.config_dirty = true;
+                        }
+                    });
+
+                    ui.add_space(4.0);
+
+                    ui.horizontal_wrapped(|ui| {
+                        ui.label("Currency:");
+                        let selected_label = MAJOR_CURRENCIES
+                            .iter()
+                            .find(|c| c.symbol == s.config.currency_symbol)
+                            .map(|c| c.label.to_string())
+                            .unwrap_or_else(|| format!("Custom ({})", s.config.currency_symbol));
+                        egui::ComboBox::from_id_salt("currency_combo")
+                            .selected_text(selected_label)
+                            .show_ui(ui, |ui| {
+                                for c in MAJOR_CURRENCIES {
+                                    if ui.selectable_label(s.config.currency_symbol == c.symbol, c.label).clicked() {
+                                        s.config.currency_symbol = c.symbol.to_string();
+                                        s.custom_currency_input = c.symbol.to_string();
+                                        s.config_dirty = true;
+                                    }
+                                }
+                            });
+                        for &sym in &["₹", "$", "€", "£", "¥", "C$", "A$"] {
+                            if ui.selectable_label(s.config.currency_symbol == sym, sym).clicked() {
+                                s.config.currency_symbol = sym.to_string();
+                                s.custom_currency_input = sym.to_string();
+                                s.config_dirty = true;
+                            }
+                        }
+                        ui.label("Custom:");
+                        ui.add(egui::TextEdit::singleline(&mut s.custom_currency_input).desired_width(52.0));
+                        if ui.small_button("Set").clicked() {
+                            let cleaned = normalize_currency_input(&s.custom_currency_input);
+                            if !cleaned.is_empty() {
+                                s.config.currency_symbol = cleaned;
+                                s.config_dirty = true;
+                                s.set_toast("Custom currency applied.");
+                            }
+                        }
+                        ui.separator();
+                        ui.label("Grid Carbon:");
+                        let regions = get_carbon_regions();
+                        let current_region = s.config.carbon_region.clone();
+                        egui::ComboBox::from_id_salt("carbon_region_combo")
+                            .selected_text(&current_region)
+                            .show_ui(ui, |ui| {
+                                for reg in regions {
+                                    if ui.selectable_label(s.config.carbon_region == reg.name, format!("{} ({:.0} g/kWh) - {}", reg.name, reg.g_per_kwh, reg.source)).clicked() {
+                                        s.config.carbon_region = reg.name.to_string();
+                                        s.config_dirty = true;
+                                    }
+                                }
+                            });
+                        if s.config.carbon_region == "Custom" {
+                            if ui.add(egui::DragValue::new(&mut s.config.custom_carbon_g_kwh).range(10.0..=1200.0).suffix(" g/kWh")).changed() {
+                                s.config_dirty = true;
+                            }
+                        }
+                    });
+                });
+
+                ui.add_space(6.0);
+
+                // 3. Storage Location
                 let storage_path = get_energy_history_path();
                 let storage_str = storage_path.to_string_lossy().to_string();
-
-                egui::Frame::new().fill(egui::Color32::from_rgb(15, 23, 42)).corner_radius(8.0).inner_margin(egui::Margin::symmetric(14, 10)).show(ui, |ui| {
-                    ui.horizontal(|ui| {
-                        ui.label(egui::RichText::new("📁 Data Storage File:").strong());
-                        ui.label(egui::RichText::new(&storage_str).monospace().color(egui::Color32::LIGHT_BLUE));
-
-                        if ui.button("📂 Open Folder").clicked() {
+                app_subcard_frame(ui).show(ui, |ui| {
+                    ui.horizontal_wrapped(|ui| {
+                        draw_icon_inline(ui, 13.0, egui::Color32::LIGHT_BLUE, UiIcon::Folder);
+                        ui.label(egui::RichText::new("Data File:").strong().size(11.5));
+                        ui.label(egui::RichText::new(&storage_str).monospace().color(egui::Color32::LIGHT_BLUE).size(11.0));
+                        if icon_button(ui, UiIcon::Folder, egui::Color32::from_rgb(245, 158, 11), "Open Folder", None).clicked() {
                             if let Some(parent) = storage_path.parent() {
                                 #[cfg(windows)]
                                 let _ = Command::new("explorer").arg(parent).status();
@@ -7794,114 +8642,17 @@ impl eframe::App for AgentPowerGuardApp {
                                 let _ = Command::new("open").arg(parent).status();
                             }
                         }
-
-                        if ui.button("📋 Copy Path").clicked() {
-                            ui.ctx().copy_text(storage_str.clone());
+                        if icon_button(ui, UiIcon::Copy, egui::Color32::from_rgb(147, 197, 253), "Copy Path", None).clicked() {
+                            copy_text_reliable(ui.ctx(), &storage_str);
                             s.set_toast("Path copied to clipboard.");
                         }
                     });
-                    ui.label(egui::RichText::new("💡 To manually reset, edit, or back up data: You can directly open or delete this JSON file anytime. The app will automatically recreate an empty file on the next sleep event.").weak().size(11.0));
-                });
-
-                ui.add_space(8.0);
-
-                // 3. Wattage & Cost Settings + Watt Calculator Launcher
-                ui.horizontal_wrapped(|ui| {
-                    if ui.checkbox(&mut s.config.record_energy_data, "Record Energy Data").changed() {
-                        s.config_dirty = true;
-                    }
-                    ui.separator();
-                    ui.label("Active Power:");
-                    if ui.add(egui::DragValue::new(&mut s.config.active_watts).suffix("W").range(10.0..=2000.0)).changed() {
-                        s.config_dirty = true;
-                    }
-                    ui.label("Monitor Power:");
-                    if ui.add(egui::DragValue::new(&mut s.config.monitor_watts).suffix("W").range(0.0..=500.0)).changed() {
-                        s.config_dirty = true;
-                    }
-                    ui.label("Sleep Power:");
-                    if ui.add(egui::DragValue::new(&mut s.config.sleep_watts).suffix("W").range(0.5..=100.0).speed(0.5)).changed() {
-                        s.config_dirty = true;
-                    }
-                    ui.label("Electricity Rate:");
-                    let cur_str = s.config.currency_symbol.clone();
-                    if ui.add(egui::DragValue::new(&mut s.config.electricity_rate_kwh).prefix(&cur_str).suffix("/kWh").range(0.01..=50000.0).speed(0.1)).changed() {
-                        s.config_dirty = true;
-                    }
-                    if ui.button("⚡ Watt Calculator & AI Estimator").clicked() {
-                        s.show_watt_calc_modal = true;
-                        if !s.detected_specs.fetched && !s.watt_calc.spec_fetch_in_progress {
-                            trigger_spec_fetch_locked(&mut s, self.state.clone());
-                        }
-                    }
-                });
-
-                ui.add_space(4.0);
-
-                // Phase 3.4: 26 Major Currencies + Custom Symbol + Regional Grid Intensity
-                ui.horizontal_wrapped(|ui| {
-                    ui.label("Currency:");
-                    let selected_label = MAJOR_CURRENCIES
-                        .iter()
-                        .find(|c| c.symbol == s.config.currency_symbol)
-                        .map(|c| c.label.to_string())
-                        .unwrap_or_else(|| format!("Custom ({})", s.config.currency_symbol));
-                    egui::ComboBox::from_id_salt("currency_combo")
-                        .selected_text(selected_label)
-                        .show_ui(ui, |ui| {
-                            for c in MAJOR_CURRENCIES {
-                                if ui.selectable_label(s.config.currency_symbol == c.symbol, c.label).clicked() {
-                                    s.config.currency_symbol = c.symbol.to_string();
-                                    s.custom_currency_input = c.symbol.to_string();
-                                    s.config_dirty = true;
-                                }
-                            }
-                        });
-                    for &sym in &["₹", "$", "€", "£", "¥", "C$", "A$"] {
-                        if ui.selectable_label(s.config.currency_symbol == sym, sym).clicked() {
-                            s.config.currency_symbol = sym.to_string();
-                            s.custom_currency_input = sym.to_string();
-                            s.config_dirty = true;
-                        }
-                    }
-                    ui.label("Custom:");
-                    ui.add(egui::TextEdit::singleline(&mut s.custom_currency_input).desired_width(48.0));
-                    if ui.small_button("Set").clicked() {
-                        let cleaned = normalize_currency_input(&s.custom_currency_input);
-                        if !cleaned.is_empty() {
-                            s.config.currency_symbol = cleaned;
-                            s.config_dirty = true;
-                            s.set_toast("Custom currency applied.");
-                        }
-                    }
-                });
-
-                ui.horizontal(|ui| {
-                    ui.label("Grid Carbon Region:");
-                    let regions = get_carbon_regions();
-                    let current_region = s.config.carbon_region.clone();
-                    egui::ComboBox::from_id_salt("carbon_region_combo")
-                        .selected_text(&current_region)
-                        .show_ui(ui, |ui| {
-                            for reg in regions {
-                                if ui.selectable_label(s.config.carbon_region == reg.name, format!("{} ({:.0} g/kWh) - {}", reg.name, reg.g_per_kwh, reg.source)).clicked() {
-                                    s.config.carbon_region = reg.name.to_string();
-                                    s.config_dirty = true;
-                                }
-                            }
-                        });
-                    if s.config.carbon_region == "Custom" {
-                        ui.label("g/kWh:");
-                        if ui.add(egui::DragValue::new(&mut s.config.custom_carbon_g_kwh).range(10.0..=1200.0).suffix(" g/kWh")).changed() {
-                            s.config_dirty = true;
-                        }
-                    }
                 });
 
                 ui.add_space(6.0);
 
-                // Filter Buttons & Clear
-                ui.horizontal(|ui| {
+                // 4. Filter Buttons & Delete Actions (wrapped cleanly so Delete buttons never clip!)
+                ui.horizontal_wrapped(|ui| {
                     ui.label("Filter Period:");
                     ui.selectable_value(&mut s.energy_filter, EnergyFilter::All, "All Time");
                     ui.selectable_value(&mut s.energy_filter, EnergyFilter::Today, "Today");
@@ -7909,36 +8660,44 @@ impl eframe::App for AgentPowerGuardApp {
                     ui.selectable_value(&mut s.energy_filter, EnergyFilter::ThisMonth, "This Month");
                     ui.selectable_value(&mut s.energy_filter, EnergyFilter::ThisYear, "This Year");
 
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui.button(egui::RichText::new("⚠️ Delete All Data").color(egui::Color32::RED)).clicked() {
-                            s.energy_history.clear();
-                            s.save_energy_history();
-                            s.set_toast("All energy history deleted.");
-                        }
+                    ui.separator();
 
-                        if s.energy_filter != EnergyFilter::All {
-                            if ui.button("🗑️ Delete Selected Period").clicked() {
-                                let filter = s.energy_filter;
-                                s.energy_history.retain(|r| {
-                                    let matches = match filter {
-                                        EnergyFilter::All => true,
-                                        EnergyFilter::Today => now_epoch.saturating_sub(r.timestamp) <= 86400,
-                                        EnergyFilter::Last7Days => now_epoch.saturating_sub(r.timestamp) <= 7 * 86400,
-                                        EnergyFilter::ThisMonth => now_epoch.saturating_sub(r.timestamp) <= 30 * 86400,
-                                        EnergyFilter::ThisYear => now_epoch.saturating_sub(r.timestamp) <= 365 * 86400,
-                                    };
-                                    !matches
-                                });
-                                s.save_energy_history();
-                                s.set_toast("Selected period data deleted.");
-                            }
+                    if s.energy_filter != EnergyFilter::All {
+                        if icon_button(ui, UiIcon::Trash, egui::Color32::from_rgb(248, 113, 113), "Delete Selected Period", None).clicked() {
+                            let filter = s.energy_filter;
+                            s.energy_history.retain(|r| {
+                                let matches = match filter {
+                                    EnergyFilter::All => true,
+                                    EnergyFilter::Today => now_epoch.saturating_sub(r.timestamp) <= 86400,
+                                    EnergyFilter::Last7Days => now_epoch.saturating_sub(r.timestamp) <= 7 * 86400,
+                                    EnergyFilter::ThisMonth => now_epoch.saturating_sub(r.timestamp) <= 30 * 86400,
+                                    EnergyFilter::ThisYear => now_epoch.saturating_sub(r.timestamp) <= 365 * 86400,
+                                };
+                                !matches
+                            });
+                            s.save_energy_history();
+                            s.set_toast("Selected period data deleted.");
                         }
-                    });
+                    }
+
+                    if icon_button(
+                        ui,
+                        UiIcon::Trash,
+                        egui::Color32::WHITE,
+                        "Delete All Data",
+                        Some(egui::Color32::from_rgb(185, 28, 28)),
+                    )
+                    .clicked()
+                    {
+                        s.energy_history.clear();
+                        s.save_energy_history();
+                        s.set_toast("All energy history deleted.");
+                    }
                 });
 
                 ui.separator();
 
-                // 4. History Table
+                // 5. History Table
                 egui::ScrollArea::vertical().show(ui, |ui| {
                     if filtered_records.is_empty() {
                         ui.add_space(20.0);
@@ -7959,7 +8718,7 @@ impl eframe::App for AgentPowerGuardApp {
 
                                 for record in filtered_records.iter().rev() {
                                     ui.label(&record.start_time);
-                                    let tag = if record.event_type == "sleep" { "⚡ Deep Sleep" } else { "🖥 Monitor Standby" };
+                                    let tag = if record.event_type == "sleep" { "Deep Sleep" } else { "Monitor Standby" };
                                     ui.label(tag);
                                     ui.label(format_time_compact(record.duration_secs as u32));
                                     ui.label(format!("{:.0} W", record.watts_saved_avg));
@@ -7973,236 +8732,302 @@ impl eframe::App for AgentPowerGuardApp {
             });
         }
         // ====================================================================
-        // TAB 4: ALERTS, NOTIFICATIONS & OPT-IN UPDATES VIEW
+        // TAB 4: ALERTS, UPDATES & SOFTWARE MANAGEMENT VIEW
         // ====================================================================
         else if s.active_tab == ActiveTab::Notifications {
             egui::CentralPanel::default_margins().show(ui, |ui| {
-                ui.add_space(4.0);
-                ui.horizontal(|ui| {
-                    ui.heading("🔔 Alerts, Webhooks & Opt-in Updates");
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui.button("🔔 Send Test Notification").clicked() {
-                            send_notification(&s.config, &NotificationEvent::TestMessage);
-                            s.set_toast("Test notification dispatched across configured channels.");
-                        }
-                    });
-                });
-
-                ui.add_space(6.0);
-                egui::Frame::new().fill(egui::Color32::from_rgb(22, 29, 39)).corner_radius(8.0).inner_margin(egui::Margin::symmetric(14, 10)).show(ui, |ui| {
-                    ui.label(egui::RichText::new("🔒 Privacy Guarantee: Outbound notifications and update checks are completely opt-in and off by default. Secrets and tokens are stored locally on your machine and never logged or sent to any telemetry service.").weak().size(12.0));
-                });
-
-                ui.add_space(10.0);
-
-                // Section 1: Notification Channels
-                egui::Frame::new().fill(egui::Color32::from_rgb(22, 29, 39)).corner_radius(8.0).inner_margin(egui::Margin::symmetric(14, 10)).show(ui, |ui| {
-                    ui.label(egui::RichText::new("📡 Outbound Channels").strong().size(14.0));
-                    ui.add_space(6.0);
-
-                    // 1. ntfy
-                    ui.horizontal(|ui| {
-                        ui.label(egui::RichText::new("ntfy URL:").strong().size(12.0));
-                        if ui.add(egui::TextEdit::singleline(&mut s.config.notify_ntfy_url).hint_text("https://ntfy.sh/your_private_topic")).changed() {
-                            s.config_dirty = true;
-                        }
-                    });
-                    ui.horizontal(|ui| {
-                        ui.label(egui::RichText::new("ntfy Token (optional):").size(12.0));
-                        if ui.add(egui::TextEdit::singleline(&mut s.config.notify_ntfy_token).password(true).hint_text("Bearer token if topic is protected")).changed() {
-                            s.config_dirty = true;
-                        }
-                    });
-
-                    ui.separator();
-
-                    // 2. Telegram
-                    ui.horizontal(|ui| {
-                        ui.label(egui::RichText::new("Telegram Bot Token:").strong().size(12.0));
-                        if ui.add(egui::TextEdit::singleline(&mut s.config.notify_telegram_token).password(true).hint_text("123456789:ABCdefGhIJKlmNoPQRsTUVwxyZ")).changed() {
-                            s.config_dirty = true;
-                        }
-                    });
-                    ui.horizontal(|ui| {
-                        ui.label(egui::RichText::new("Telegram Chat ID:").strong().size(12.0));
-                        if ui.add(egui::TextEdit::singleline(&mut s.config.notify_telegram_chat_id).hint_text("-100123456789 or user id")).changed() {
-                            s.config_dirty = true;
-                        }
-                    });
-
-                    ui.separator();
-
-                    // 3. Generic Webhook
-                    ui.horizontal(|ui| {
-                        ui.label(egui::RichText::new("Webhook URL (POST):").strong().size(12.0));
-                        if ui.add(egui::TextEdit::singleline(&mut s.config.notify_webhook_url).hint_text("https://discord.com/api/webhooks/... or custom server")).changed() {
-                            s.config_dirty = true;
-                        }
-                    });
-                });
-
-                ui.add_space(10.0);
-
-                // Section 2: Event Subscriptions
-                egui::Frame::new().fill(egui::Color32::from_rgb(22, 29, 39)).corner_radius(8.0).inner_margin(egui::Margin::symmetric(14, 10)).show(ui, |ui| {
-                    ui.label(egui::RichText::new("⚡ Trigger Events").strong().size(14.0));
-                    ui.add_space(6.0);
-
-                    if ui.checkbox(&mut s.config.notify_on_sleep_imminent, "Sleep Imminent (Grace period countdown reaches 30 seconds)").changed() {
-                        s.config_dirty = true;
-                    }
-
-                    ui.horizontal(|ui| {
-                        if ui.checkbox(&mut s.config.notify_on_blocked_long, "Machine Blocked for longer than:").changed() {
-                            s.config_dirty = true;
-                        }
-                        if ui.add(egui::DragValue::new(&mut s.config.notify_blocked_long_hours).range(1..=12)).changed() {
-                            s.config_dirty = true;
-                        }
-                        ui.label("hours");
-                    });
-
-                    if ui.checkbox(&mut s.config.notify_on_lease_ended, "Agent Lease Concluded / Expired").changed() {
-                        s.config_dirty = true;
-                    }
-
-                    if ui.checkbox(&mut s.config.notify_on_pc_woke, "System Resumed from Sleep").changed() {
-                        s.config_dirty = true;
-                    }
-
-                    ui.horizontal(|ui| {
-                        if ui.checkbox(&mut s.config.notify_on_guard_paused_long, "Master Guard Disabled for longer than:").changed() {
-                            s.config_dirty = true;
-                        }
-                        if ui.add(egui::DragValue::new(&mut s.config.notify_guard_paused_hours).range(1..=24)).changed() {
-                            s.config_dirty = true;
-                        }
-                        ui.label("hours");
-                    });
-                });
-
-                ui.add_space(10.0);
-
-                // Section 3: Opt-in Update Check & In-Panel Updater (GitHub Public Releases API)
-                let state_arc = self.state.clone();
-                egui::Frame::new().fill(egui::Color32::from_rgb(22, 29, 39)).corner_radius(8.0).inner_margin(egui::Margin::symmetric(14, 10)).show(ui, |ui| {
-                    ui.label(egui::RichText::new("🚀 Software Updates (In-Panel Auto-Updater)").strong().size(14.0));
+                egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
                     ui.add_space(4.0);
-                    let latest_label = s
-                        .update_latest_tag
-                        .as_deref()
-                        .unwrap_or("Not fetched yet");
-                    ui.label(
-                        egui::RichText::new(format!(
-                            "Installed Version: v{} | Latest Release on GitHub: {}",
-                            env!("CARGO_PKG_VERSION"),
-                            latest_label
-                        ))
-                        .size(12.0),
-                    );
-                    ui.add_space(4.0);
-
-                    let dl_ready_path = s.update_downloaded_path.clone();
-                    let dl_ready_ver = s.update_downloaded_version.clone();
-                    let dl_busy = s.update_download_in_progress;
-                    let chk_busy = s.update_check_in_progress;
-                    let upd_avail = s.update_available.clone();
-
                     ui.horizontal_wrapped(|ui| {
-                        if ui.checkbox(&mut s.config.check_for_updates, "Check for updates automatically (daily via GitHub Releases API)").changed() {
-                            s.config_dirty = true;
-                        }
+                        icon_heading(
+                            ui,
+                            UiIcon::Bell,
+                            egui::Color32::from_rgb(168, 85, 247),
+                            "Alerts, Updates & Software Management",
+                        );
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if icon_button(
+                                ui,
+                                UiIcon::Bell,
+                                egui::Color32::WHITE,
+                                "Send Test Notification",
+                                Some(egui::Color32::from_rgb(124, 58, 237)),
+                            )
+                            .clicked()
+                            {
+                                send_notification(&s.config, &NotificationEvent::TestMessage);
+                                s.set_toast("Test notification dispatched across configured channels.");
+                            }
+                        });
+                    });
 
-                        if chk_busy {
-                            ui.label("⏳ Checking...");
-                        } else if ui.button("🔍 Check & List All Releases").clicked() {
-                            trigger_update_check_locked(&mut s, state_arc.clone());
-                        }
+                    ui.add_space(8.0);
 
-                        if let Some(ref p) = dl_ready_path {
-                            let ver_lbl = dl_ready_ver.as_deref().unwrap_or("Update");
-                            if ui.button(format!("✅ Install {} & Restart", ver_lbl)).clicked() {
-                                if let Err(err) = install_downloaded_update(p) {
-                                    s.set_toast(err);
+                    // Card 1: Software Updates (In-Panel Auto-Updater — GitHub Public Releases API)
+                    let state_arc = self.state.clone();
+                    app_card_frame(ui).show(ui, |ui| {
+                        icon_card_title(
+                            ui,
+                            UiIcon::Download,
+                            egui::Color32::from_rgb(56, 189, 248),
+                            "Software Updates (GitHub Public Releases)",
+                        );
+                        ui.add_space(4.0);
+                        let latest_label = s
+                            .update_latest_tag
+                            .as_deref()
+                            .unwrap_or("Not checked yet (click 'Check & List Releases')");
+                        ui.horizontal_wrapped(|ui| {
+                            ui.label(egui::RichText::new("Installed:").weak());
+                            ui.label(egui::RichText::new(format!("v{}", env!("CARGO_PKG_VERSION"))).strong().color(egui::Color32::from_rgb(96, 165, 250)));
+                            ui.separator();
+                            ui.label(egui::RichText::new("Latest on GitHub:").weak());
+                            ui.label(egui::RichText::new(latest_label).strong().color(egui::Color32::from_rgb(52, 211, 153)));
+                        });
+                        ui.add_space(6.0);
+
+                        let dl_ready_path = s.update_downloaded_path.clone();
+                        let dl_ready_ver = s.update_downloaded_version.clone();
+                        let dl_busy = s.update_download_in_progress;
+                        let chk_busy = s.update_check_in_progress;
+                        let upd_avail = s.update_available.clone();
+
+                        ui.horizontal_wrapped(|ui| {
+                            if chk_busy {
+                                ui.label("Checking GitHub releases...");
+                            } else if icon_button(
+                                ui,
+                                UiIcon::Search,
+                                egui::Color32::WHITE,
+                                "Check & List Releases",
+                                Some(egui::Color32::from_rgb(37, 99, 235)),
+                            )
+                            .clicked()
+                            {
+                                trigger_update_check_locked(&mut s, state_arc.clone());
+                            }
+
+                            if let Some(ref p) = dl_ready_path {
+                                let ver_lbl = dl_ready_ver.as_deref().unwrap_or("Update");
+                                if icon_button(
+                                    ui,
+                                    UiIcon::Check,
+                                    egui::Color32::WHITE,
+                                    format!("Install {} & Restart", ver_lbl),
+                                    Some(egui::Color32::from_rgb(16, 185, 129)),
+                                )
+                                .clicked()
+                                {
+                                    if let Err(err) = install_downloaded_update(p) {
+                                        s.set_toast(err);
+                                    }
+                                }
+                            } else if dl_busy {
+                                ui.label("Downloading update in background...");
+                            } else if let Some(ref new_ver) = upd_avail {
+                                if icon_button(
+                                    ui,
+                                    UiIcon::Download,
+                                    egui::Color32::WHITE,
+                                    format!("Update Now ({})", new_ver),
+                                    Some(egui::Color32::from_rgb(16, 185, 129)),
+                                )
+                                .clicked()
+                                {
+                                    trigger_update_download_locked(&mut s, state_arc.clone(), Some(new_ver.clone()));
                                 }
                             }
-                        } else if dl_busy {
-                            ui.label("⏳ Downloading update in background...");
-                        } else if let Some(ref new_ver) = upd_avail {
-                            if ui.button(format!("⬇ Update Now ({})", new_ver)).clicked() {
-                                trigger_update_download_locked(&mut s, state_arc.clone(), Some(new_ver.clone()));
+
+                            if ui.checkbox(&mut s.config.check_for_updates, "Auto-check daily via GitHub API").changed() {
+                                s.config_dirty = true;
                             }
+                        });
+
+                        if let Some(msg) = &s.update_check_status_msg {
+                            ui.add_space(4.0);
+                            ui.label(egui::RichText::new(msg).color(egui::Color32::from_rgb(147, 197, 253)).size(12.0));
                         }
-                    });
+                        ui.add_space(4.0);
+                        ui.label(
+                            egui::RichText::new("Windows Defender note: Release binaries are unsigned. If downloading manually in Chrome/Edge, click Keep -> Show more -> Keep anyway (or More info -> Run anyway).")
+                                .weak()
+                                .size(11.0),
+                        );
 
-                    ui.add_space(4.0);
-                    if let Some(msg) = &s.update_check_status_msg {
-                        ui.label(egui::RichText::new(format!("Update Status: {}", msg)).color(egui::Color32::from_rgb(147, 197, 253)));
-                    }
-                    ui.label(
-                        egui::RichText::new("Note: Release binaries are unsigned. If Windows Defender / SmartScreen prompts when downloading manually, click Keep -> Show more -> Keep anyway (or More info -> Run anyway).")
-                            .weak()
-                            .size(11.0),
-                    );
+                        if !s.available_releases.is_empty() {
+                            ui.add_space(6.0);
+                            ui.collapsing(format!("All Published Releases ({} versions)", s.available_releases.len()), |ui| {
+                                let latest_tag = s.update_latest_tag.clone();
+                                let current_clean = env!("CARGO_PKG_VERSION");
+                                let releases_snapshot = s.available_releases.clone();
+                                let mut download_tag_req: Option<String> = None;
 
-                    if !s.available_releases.is_empty() {
-                        ui.add_space(6.0);
-                        ui.collapsing(format!("📦 All GitHub Releases ({} versions)", s.available_releases.len()), |ui| {
-                            let latest_tag = s.update_latest_tag.clone();
-                            let current_clean = env!("CARGO_PKG_VERSION");
-                            let releases_snapshot = s.available_releases.clone();
-                            let mut download_tag_req: Option<String> = None;
+                                egui::ScrollArea::vertical().max_height(210.0).show(ui, |ui| {
+                                    for rel in &releases_snapshot {
+                                        let is_latest = latest_tag.as_deref() == Some(rel.tag.as_str());
+                                        let is_installed = rel.tag.trim_start_matches('v') == current_clean;
+                                        app_subcard_frame(ui).show(ui, |ui| {
+                                            ui.horizontal_wrapped(|ui| {
+                                                ui.label(egui::RichText::new(&rel.tag).strong());
+                                                if is_latest {
+                                                    ui.label(egui::RichText::new("[LATEST]").color(egui::Color32::from_rgb(52, 211, 153)).strong().size(11.0));
+                                                }
+                                                if is_installed {
+                                                    ui.label(egui::RichText::new("[INSTALLED]").color(egui::Color32::from_rgb(96, 165, 250)).strong().size(11.0));
+                                                }
+                                                if !rel.published_at.is_empty() {
+                                                    ui.label(egui::RichText::new(&rel.published_at).weak().size(11.0));
+                                                }
+                                                if !is_installed && !dl_busy && ui.small_button("Download & Install").clicked() {
+                                                    download_tag_req = Some(rel.tag.clone());
+                                                }
+                                            });
+                                            let first_line = rel
+                                                .body
+                                                .lines()
+                                                .find(|l| !l.trim().is_empty() && !l.trim().starts_with("---"))
+                                                .unwrap_or(&rel.name);
+                                            ui.label(egui::RichText::new(first_line).weak().size(11.0));
+                                        });
+                                        ui.add_space(4.0);
+                                    }
+                                });
 
-                            egui::ScrollArea::vertical().max_height(210.0).show(ui, |ui| {
-                                for rel in &releases_snapshot {
-                                    let is_latest = latest_tag.as_deref() == Some(rel.tag.as_str());
-                                    let is_installed = rel.tag.trim_start_matches('v') == current_clean;
-                                    ui.horizontal(|ui| {
-                                        ui.label(egui::RichText::new(&rel.tag).strong());
-                                        if is_latest {
-                                            ui.label(egui::RichText::new("[LATEST]").color(egui::Color32::from_rgb(52, 211, 153)).strong().size(11.0));
-                                        }
-                                        if is_installed {
-                                            ui.label(egui::RichText::new("[INSTALLED]").color(egui::Color32::from_rgb(96, 165, 250)).strong().size(11.0));
-                                        }
-                                        if !rel.published_at.is_empty() {
-                                            ui.label(egui::RichText::new(&rel.published_at).weak().size(11.0));
-                                        }
-                                        if !is_installed && !dl_busy && ui.small_button("Download & Install").clicked() {
-                                            download_tag_req = Some(rel.tag.clone());
-                                        }
-                                    });
-                                    let first_line = rel
-                                        .body
-                                        .lines()
-                                        .find(|l| !l.trim().is_empty() && !l.trim().starts_with("---"))
-                                        .unwrap_or(&rel.name);
-                                    ui.label(egui::RichText::new(first_line).weak().size(11.0));
-                                    ui.add_space(3.0);
+                                if let Some(tag_req) = download_tag_req {
+                                    trigger_update_download_locked(&mut s, state_arc.clone(), Some(tag_req));
                                 }
                             });
+                        }
+                    });
 
-                            if let Some(tag_req) = download_tag_req {
-                                trigger_update_download_locked(&mut s, state_arc.clone(), Some(tag_req));
+                    ui.add_space(10.0);
+
+                    // Card 2: Outbound Notification Channels (aligned 2-column grid)
+                    app_card_frame(ui).show(ui, |ui| {
+                        icon_card_title(
+                            ui,
+                            UiIcon::Bell,
+                            egui::Color32::from_rgb(168, 85, 247),
+                            "Outbound Notification Channels",
+                        );
+                        ui.add_space(6.0);
+                        egui::Grid::new("notify_channels_grid").num_columns(2).spacing([14.0, 8.0]).show(ui, |ui| {
+                            ui.label(egui::RichText::new("ntfy URL:").strong());
+                            if ui.add(egui::TextEdit::singleline(&mut s.config.notify_ntfy_url).desired_width(420.0).hint_text("https://ntfy.sh/your_private_topic")).changed() {
+                                s.config_dirty = true;
                             }
-                        });
-                    }
-                });
+                            ui.end_row();
 
-                ui.add_space(10.0);
-
-                // Section 4: Software Management & Uninstall
-                egui::Frame::new().fill(egui::Color32::from_rgb(22, 29, 39)).corner_radius(8.0).inner_margin(egui::Margin::symmetric(14, 10)).show(ui, |ui| {
-                    ui.horizontal(|ui| {
-                        ui.label(egui::RichText::new("🗑 Software Management").strong().size(14.0));
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            if ui.button(egui::RichText::new("Uninstall Software...").color(egui::Color32::from_rgb(248, 113, 113))).clicked() {
-                                s.uninstall_status_msg = None;
-                                s.show_uninstall_modal = true;
+                            ui.label("ntfy Token (optional):");
+                            if ui.add(egui::TextEdit::singleline(&mut s.config.notify_ntfy_token).desired_width(420.0).password(true).hint_text("Bearer token if topic is protected")).changed() {
+                                s.config_dirty = true;
                             }
+                            ui.end_row();
+
+                            ui.label(egui::RichText::new("Telegram Bot Token:").strong());
+                            if ui.add(egui::TextEdit::singleline(&mut s.config.notify_telegram_token).desired_width(420.0).password(true).hint_text("123456789:ABCdefGhIJKlmNoPQRsTUVwxyZ")).changed() {
+                                s.config_dirty = true;
+                            }
+                            ui.end_row();
+
+                            ui.label(egui::RichText::new("Telegram Chat ID:").strong());
+                            if ui.add(egui::TextEdit::singleline(&mut s.config.notify_telegram_chat_id).desired_width(420.0).hint_text("-100123456789 or user id")).changed() {
+                                s.config_dirty = true;
+                            }
+                            ui.end_row();
+
+                            ui.label(egui::RichText::new("Webhook URL (POST):").strong());
+                            if ui.add(egui::TextEdit::singleline(&mut s.config.notify_webhook_url).desired_width(420.0).hint_text("https://discord.com/api/webhooks/... or custom server")).changed() {
+                                s.config_dirty = true;
+                            }
+                            ui.end_row();
                         });
                     });
-                    ui.label(egui::RichText::new("Cleanly remove startup tasks, background daemon registration, and uninstall Agent Power Guard (with optional removal of saved config/history).").weak().size(11.5));
+
+                    ui.add_space(10.0);
+
+                    // Card 3: Event Subscriptions
+                    app_card_frame(ui).show(ui, |ui| {
+                        icon_card_title(
+                            ui,
+                            UiIcon::Bolt,
+                            egui::Color32::from_rgb(245, 158, 11),
+                            "Trigger Events",
+                        );
+                        ui.add_space(6.0);
+
+                        if ui.checkbox(&mut s.config.notify_on_sleep_imminent, "Sleep Imminent (Grace period countdown reaches 30 seconds)").changed() {
+                            s.config_dirty = true;
+                        }
+
+                        ui.horizontal(|ui| {
+                            if ui.checkbox(&mut s.config.notify_on_blocked_long, "Machine Blocked for longer than:").changed() {
+                                s.config_dirty = true;
+                            }
+                            if ui.add(egui::DragValue::new(&mut s.config.notify_blocked_long_hours).range(1..=12)).changed() {
+                                s.config_dirty = true;
+                            }
+                            ui.label("hours");
+                        });
+
+                        if ui.checkbox(&mut s.config.notify_on_lease_ended, "Agent Lease Concluded / Expired").changed() {
+                            s.config_dirty = true;
+                        }
+
+                        if ui.checkbox(&mut s.config.notify_on_pc_woke, "System Resumed from Sleep").changed() {
+                            s.config_dirty = true;
+                        }
+
+                        ui.horizontal(|ui| {
+                            if ui.checkbox(&mut s.config.notify_on_guard_paused_long, "Master Guard Disabled for longer than:").changed() {
+                                s.config_dirty = true;
+                            }
+                            if ui.add(egui::DragValue::new(&mut s.config.notify_guard_paused_hours).range(1..=24)).changed() {
+                                s.config_dirty = true;
+                            }
+                            ui.label("hours");
+                        });
+                    });
+
+                    ui.add_space(10.0);
+
+                    // Card 4: Privacy Guarantee
+                    app_subcard_frame(ui).show(ui, |ui| {
+                        ui.horizontal_wrapped(|ui| {
+                            draw_icon_inline(ui, 14.0, egui::Color32::from_rgb(52, 211, 153), UiIcon::Lock);
+                            ui.label(egui::RichText::new("Privacy Guarantee: No telemetry is sent. Channels start blank and secrets stay strictly local on your machine.").weak().size(12.0));
+                        });
+                    });
+
+                    ui.add_space(10.0);
+
+                    // Card 5: Software Management & Uninstall
+                    app_card_frame(ui).show(ui, |ui| {
+                        ui.horizontal_wrapped(|ui| {
+                            icon_card_title(
+                                ui,
+                                UiIcon::Trash,
+                                egui::Color32::from_rgb(248, 113, 113),
+                                "Software Management",
+                            );
+                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                if icon_button(
+                                    ui,
+                                    UiIcon::Trash,
+                                    egui::Color32::WHITE,
+                                    "Uninstall Software...",
+                                    Some(egui::Color32::from_rgb(185, 28, 28)),
+                                )
+                                .clicked()
+                                {
+                                    s.uninstall_status_msg = None;
+                                    s.show_uninstall_modal = true;
+                                }
+                            });
+                        });
+                        ui.add_space(4.0);
+                        ui.label(egui::RichText::new("Cleanly remove startup tasks, unregister background service, optionally wipe saved config/history, and launch the uninstaller.").weak().size(12.0));
+                    });
                 });
             });
         }
@@ -8211,191 +9036,232 @@ impl eframe::App for AgentPowerGuardApp {
         // ====================================================================
         else if s.active_tab == ActiveTab::Remote {
             egui::CentralPanel::default_margins().show(ui, |ui| {
-                ui.add_space(4.0);
-                ui.heading("🌐 Web & Mobile Remote Dashboard");
-                ui.label(egui::RichText::new("Control Agent Power Guard from your phone, tablet, or another browser on your local Wi-Fi.").weak());
-                ui.separator();
-
-                // 0. LAN Access Toggle & API Security
-                egui::Frame::new().fill(egui::Color32::from_rgb(22, 29, 39)).corner_radius(10.0).inner_margin(egui::Margin::symmetric(18, 14)).show(ui, |ui| {
-                    ui.heading("🔒 API & Network Security");
+                egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
                     ui.add_space(4.0);
+                    icon_heading(
+                        ui,
+                        UiIcon::Globe,
+                        egui::Color32::from_rgb(96, 165, 250),
+                        "Web & Mobile Remote Dashboard",
+                    );
+                    ui.label(egui::RichText::new("Control Agent Power Guard from your phone, tablet, or another browser on your local Wi-Fi.").weak().size(12.0));
+                    ui.separator();
 
-                    if ui.checkbox(&mut s.config.allow_lan_access, egui::RichText::new("Allow access from local network (LAN)").strong()).changed() {
-                        s.config_dirty = true;
-                    }
-                    ui.label(egui::RichText::new("When disabled (default), only this computer (127.0.0.1) can reach the API and dashboard. When enabled, other devices on your Wi-Fi/LAN can connect.").weak().size(12.0));
+                    // Card 1: LAN Access Toggle & API Security
+                    app_card_frame(ui).show(ui, |ui| {
+                        icon_card_title(
+                            ui,
+                            UiIcon::Lock,
+                            egui::Color32::from_rgb(52, 211, 153),
+                            "API & Network Security",
+                        );
+                        ui.add_space(4.0);
 
-                    ui.add_space(8.0);
-                    ui.horizontal(|ui| {
-                        ui.label(egui::RichText::new("API Token:").strong());
-                        let masked_token = format!("{}...{}", &s.api_token[..8], &s.api_token[56..]);
-                        ui.label(egui::RichText::new(&masked_token).monospace().color(egui::Color32::from_rgb(245, 158, 11)));
-
-                        if ui.button("📋 Copy Token").clicked() {
-                            ui.ctx().copy_text(s.api_token.clone());
-                            s.set_toast("API token copied to clipboard.");
+                        if ui.checkbox(&mut s.config.allow_lan_access, egui::RichText::new("Allow access from local network (LAN)").strong()).changed() {
+                            s.config_dirty = true;
                         }
+                        ui.label(egui::RichText::new("When disabled (default), only this computer (127.0.0.1) can reach the API and dashboard. When enabled, other devices on your Wi-Fi/LAN can connect.").weak().size(12.0));
 
-                        if ui.button("🔄 Regenerate Token").clicked() {
-                            let new_token = regenerate_api_token();
-                            s.api_token = new_token;
-                            s.set_toast("API token regenerated successfully.");
-                        }
-                    });
-                });
-
-                ui.add_space(10.0);
-
-                let local_url = format!("http://{}:{}/#t={}", s.local_ip, s.config.web_server_port, s.api_token);
-
-                egui::Frame::new().fill(egui::Color32::from_rgb(22, 29, 39)).corner_radius(10.0).inner_margin(egui::Margin::symmetric(18, 14)).show(ui, |ui| {
-                    ui.horizontal(|ui| {
-                        ui.label(egui::RichText::new("📱 Remote Mobile URL:").strong().size(14.0));
-                        ui.label(egui::RichText::new(&local_url).strong().size(14.0).color(egui::Color32::from_rgb(52, 211, 153)));
-
-                        if ui.button("🌐 Open in Browser").clicked() {
-                            #[cfg(windows)]
-                            let _ = Command::new("cmd").args(["/c", "start", &local_url]).creation_flags(CREATE_NO_WINDOW).status();
-                            #[cfg(target_os = "linux")]
-                            let _ = Command::new("xdg-open").arg(&local_url).status();
-                            #[cfg(target_os = "macos")]
-                            let _ = Command::new("open").arg(&local_url).status();
-                        }
-
-                        if ui.button("📋 Copy Link with Token").clicked() {
-                            ui.ctx().copy_text(local_url.clone());
-                            s.set_toast("Mobile remote link with token copied to clipboard.");
-                        }
-                    });
-
-                    ui.add_space(8.0);
-                    ui.label(egui::RichText::new("Open this URL on your phone while connected to the same Wi-Fi. The token fragment auto-authenticates your phone so you can view live condition graphs, monitor countdown, put the PC to sleep immediately, postpone sleep, or grant/release agent leases!").weak());
-
-                    // Phase 4.2: QR Code for Pairing
-                    if let Ok(qr) = crate::qr::QrCode::encode_text(&local_url, crate::qr::QrEcLevel::L) {
-                        ui.add_space(10.0);
-                        ui.separator();
                         ui.add_space(8.0);
-                        ui.horizontal(|ui| {
-                            let qr_pixels = 160.0;
-                            let (rect, _response) = ui.allocate_exact_size(egui::Vec2::splat(qr_pixels), egui::Sense::hover());
-                            let painter = ui.painter_at(rect);
-                            painter.rect_filled(rect, 4.0, egui::Color32::WHITE);
-                            let cell = qr_pixels / qr.size as f32;
-                            for y in 0..qr.size {
-                                for x in 0..qr.size {
-                                    if qr.get_module(x, y) {
-                                        let min = rect.min + egui::vec2(x as f32 * cell, y as f32 * cell);
-                                        let cell_rect = egui::Rect::from_min_size(min, egui::Vec2::splat(cell));
-                                        painter.rect_filled(cell_rect, 0.0, egui::Color32::BLACK);
+                        ui.horizontal_wrapped(|ui| {
+                            ui.label(egui::RichText::new("API Token:").strong());
+                            let masked_token = format!("{}...{}", &s.api_token[..8], &s.api_token[56..]);
+                            ui.label(egui::RichText::new(&masked_token).monospace().color(egui::Color32::from_rgb(245, 158, 11)));
+
+                            if icon_button(ui, UiIcon::Copy, egui::Color32::from_rgb(147, 197, 253), "Copy Token", None).clicked() {
+                                copy_text_reliable(ui.ctx(), &s.api_token);
+                                s.set_toast("API token copied to clipboard.");
+                            }
+
+                            if icon_button(ui, UiIcon::Refresh, egui::Color32::from_rgb(245, 158, 11), "Regenerate Token", None).clicked() {
+                                let new_token = regenerate_api_token();
+                                s.api_token = new_token;
+                                s.set_toast("API token regenerated successfully.");
+                            }
+                        });
+                    });
+
+                    ui.add_space(10.0);
+
+                    let local_url = format!("http://{}:{}/#t={}", s.local_ip, s.config.web_server_port, s.api_token);
+
+                    // Card 2: Mobile Remote URL & QR Pairing
+                    app_card_frame(ui).show(ui, |ui| {
+                        ui.horizontal_wrapped(|ui| {
+                            icon_card_title(
+                                ui,
+                                UiIcon::Globe,
+                                egui::Color32::from_rgb(52, 211, 153),
+                                "Remote Mobile URL",
+                            );
+                            ui.label(egui::RichText::new(&local_url).strong().size(13.0).color(egui::Color32::from_rgb(52, 211, 153)));
+
+                            if icon_button(ui, UiIcon::Globe, egui::Color32::WHITE, "Open in Browser", Some(egui::Color32::from_rgb(37, 99, 235))).clicked() {
+                                #[cfg(windows)]
+                                let _ = Command::new("cmd").args(["/c", "start", &local_url]).creation_flags(CREATE_NO_WINDOW).status();
+                                #[cfg(target_os = "linux")]
+                                let _ = Command::new("xdg-open").arg(&local_url).status();
+                                #[cfg(target_os = "macos")]
+                                let _ = Command::new("open").arg(&local_url).status();
+                            }
+
+                            if icon_button(ui, UiIcon::Copy, egui::Color32::from_rgb(147, 197, 253), "Copy Link with Token", None).clicked() {
+                                copy_text_reliable(ui.ctx(), &local_url);
+                                s.set_toast("Mobile remote link with token copied to clipboard.");
+                            }
+                        });
+
+                        ui.add_space(6.0);
+                        ui.label(egui::RichText::new("Open this URL on your phone while connected to the same Wi-Fi. The token fragment auto-authenticates your phone so you can view live condition graphs, monitor countdown, put the PC to sleep immediately, postpone sleep, or grant/release agent leases.").weak());
+
+                        // Phase 4.2: QR Code for Pairing
+                        if let Ok(qr) = crate::qr::QrCode::encode_text(&local_url, crate::qr::QrEcLevel::L) {
+                            ui.add_space(10.0);
+                            ui.separator();
+                            ui.add_space(8.0);
+                            ui.horizontal(|ui| {
+                                let qr_pixels = 160.0;
+                                let (rect, _response) = ui.allocate_exact_size(egui::Vec2::splat(qr_pixels), egui::Sense::hover());
+                                let painter = ui.painter_at(rect);
+                                painter.rect_filled(rect, 4.0, egui::Color32::WHITE);
+                                let cell = qr_pixels / qr.size as f32;
+                                for y in 0..qr.size {
+                                    for x in 0..qr.size {
+                                        if qr.get_module(x, y) {
+                                            let min = rect.min + egui::vec2(x as f32 * cell, y as f32 * cell);
+                                            let cell_rect = egui::Rect::from_min_size(min, egui::Vec2::splat(cell));
+                                            painter.rect_filled(cell_rect, 0.0, egui::Color32::BLACK);
+                                        }
                                     }
                                 }
-                            }
 
-                            ui.vertical(|ui| {
-                                ui.add_space(4.0);
-                                ui.label(egui::RichText::new("📷 Scan with Phone to Pair").strong().size(15.0));
-                                ui.label(egui::RichText::new("Scan this QR code with your camera app to immediately open the remote dashboard with your authentication token pre-configured.").weak().size(12.0));
-                                ui.add_space(8.0);
-                                ui.label(egui::RichText::new("⚠️ Security Warning:").strong().color(egui::Color32::from_rgb(245, 158, 11)));
-                                ui.label(egui::RichText::new("This QR code grants full control over your PC's power management and embeds your secret API token. Do not share, publish, or take public screenshots of this code.").weak().size(11.0));
+                                ui.vertical(|ui| {
+                                    ui.add_space(4.0);
+                                    icon_card_title(
+                                        ui,
+                                        UiIcon::Search,
+                                        egui::Color32::from_rgb(96, 165, 250),
+                                        "Scan with Phone Camera to Pair",
+                                    );
+                                    ui.label(egui::RichText::new("Scan this QR code with your camera app to open the remote dashboard with your authentication token pre-configured.").weak().size(12.0));
+                                    ui.add_space(8.0);
+                                    ui.horizontal(|ui| {
+                                        draw_icon_inline(ui, 13.0, egui::Color32::from_rgb(245, 158, 11), UiIcon::Warning);
+                                        ui.label(egui::RichText::new("Security Warning:").strong().color(egui::Color32::from_rgb(245, 158, 11)));
+                                    });
+                                    ui.label(egui::RichText::new("This QR code grants full control over your PC's power management and embeds your secret API token. Do not share, publish, or take public screenshots of this code.").weak().size(11.0));
+                                });
                             });
-                        });
-                    }
-                });
+                        }
+                    });
 
-                ui.add_space(10.0);
+                    ui.add_space(10.0);
 
-                // Phase 1.3: Agent Profiles One-Click Selector
-                egui::Frame::new().fill(egui::Color32::from_rgb(22, 29, 39)).corner_radius(10.0).inner_margin(egui::Margin::symmetric(18, 14)).show(ui, |ui| {
-                    ui.heading("🤖 AI Agent Profiles (One-Click Presets)");
-                    ui.add_space(4.0);
-                    ui.label(egui::RichText::new("Apply tailored process watchlists and thresholds for specific AI coding tools and workloads:").weak().size(12.0));
-                    ui.add_space(8.0);
+                    // Card 3: AI Agent Profiles One-Click Selector
+                    app_card_frame(ui).show(ui, |ui| {
+                        icon_card_title(
+                            ui,
+                            UiIcon::Cpu,
+                            egui::Color32::from_rgb(56, 189, 248),
+                            "AI Agent Profiles (One-Click Presets)",
+                        );
+                        ui.add_space(4.0);
+                        ui.label(egui::RichText::new("Apply tailored process watchlists and thresholds for specific AI coding tools and workloads:").weak().size(12.0));
+                        ui.add_space(8.0);
 
-                    let profiles = get_built_in_profiles();
-                    ui.horizontal_wrapped(|ui| {
-                        for p in &profiles {
-                            if ui.button(format!("⚡ {}", p.name)).clicked() {
-                                s.config.agent_keywords = p.keywords.clone();
-                                s.config.agent_cpu_threshold = p.agent_cpu_threshold;
-                                s.config.gpu_threshold_pct = p.gpu_threshold_pct;
-                                s.config_dirty = true;
-                                s.set_toast(format!("Applied profile: {} ({})", p.name, p.keywords));
+                        let profiles = get_built_in_profiles();
+                        ui.horizontal_wrapped(|ui| {
+                            for p in &profiles {
+                                if icon_button(ui, UiIcon::Bolt, egui::Color32::from_rgb(245, 158, 11), &p.name, None).clicked() {
+                                    s.config.agent_keywords = p.keywords.clone();
+                                    s.config.agent_cpu_threshold = p.agent_cpu_threshold;
+                                    s.config.gpu_threshold_pct = p.gpu_threshold_pct;
+                                    s.config_dirty = true;
+                                    s.set_toast(format!("Applied profile: {} ({})", p.name, p.keywords));
+                                }
                             }
-                        }
+                        });
                     });
-                });
 
-                ui.add_space(12.0);
+                    ui.add_space(10.0);
 
-                // Wake-on-LAN Remote Turn-On Card
-                egui::Frame::new().fill(egui::Color32::from_rgb(15, 23, 42)).corner_radius(10.0).inner_margin(egui::Margin::symmetric(18, 14)).show(ui, |ui| {
-                    ui.heading("⚡ Turning PC Back On (Wake-on-LAN)");
-                    ui.add_space(4.0);
-                    ui.label(egui::RichText::new("When your PC enters sleep, the CPU is suspended and the web server pauses. To turn it back ON from your phone, you can send a standard Wake-on-LAN (WoL) magic packet using any free app (e.g. 'Wake On Lan' on iOS / Android or your router's admin portal).").weak());
-                    ui.add_space(8.0);
+                    // Card 4: Wake-on-LAN Remote Turn-On
+                    app_subcard_frame(ui).show(ui, |ui| {
+                        icon_card_title(
+                            ui,
+                            UiIcon::Bolt,
+                            egui::Color32::from_rgb(245, 158, 11),
+                            "Turning PC Back On (Wake-on-LAN)",
+                        );
+                        ui.add_space(4.0);
+                        ui.label(egui::RichText::new("When your PC enters sleep, the CPU is suspended and the web server pauses. To wake it remotely, send a standard Wake-on-LAN (WoL) magic packet from your phone, router, or the CLI relay.").weak());
+                        ui.add_space(8.0);
 
-                    ui.horizontal(|ui| {
-                        ui.label(egui::RichText::new("Target PC MAC Address:").strong());
-                        ui.label(egui::RichText::new(&s.mac_address).monospace().color(egui::Color32::from_rgb(96, 165, 250)));
-                        if ui.button("📋 Copy MAC").clicked() {
-                            ui.ctx().copy_text(s.mac_address.clone());
-                            s.set_toast("MAC address copied.");
-                        }
+                        ui.horizontal_wrapped(|ui| {
+                            ui.label(egui::RichText::new("Target PC MAC Address:").strong());
+                            ui.label(egui::RichText::new(&s.mac_address).monospace().color(egui::Color32::from_rgb(96, 165, 250)));
+                            if icon_button(ui, UiIcon::Copy, egui::Color32::from_rgb(147, 197, 253), "Copy MAC", None).clicked() {
+                                copy_text_reliable(ui.ctx(), &s.mac_address);
+                                s.set_toast("MAC address copied.");
+                            }
 
-                        ui.separator();
-                        ui.label(egui::RichText::new("Port:").strong());
-                        ui.label(egui::RichText::new("9 (Standard WoL UDP)").monospace());
+                            ui.separator();
+                            ui.label(egui::RichText::new("Port:").strong());
+                            ui.label(egui::RichText::new("9 (Standard WoL UDP)").monospace());
+                        });
                     });
-                });
 
-                ui.add_space(12.0);
+                    ui.add_space(10.0);
 
-                // HTTP API Endpoints Reference
-                egui::Frame::new().fill(egui::Color32::from_rgb(22, 29, 39)).corner_radius(10.0).inner_margin(egui::Margin::symmetric(18, 14)).show(ui, |ui| {
-                    ui.heading("🔌 Lightweight Agent Heartbeat API Reference");
-                    ui.add_space(4.0);
-                    ui.label(egui::RichText::new("Any AI agent, CLI script, or IDE hook can invoke these endpoints on localhost to control sleep:").weak());
-                    ui.add_space(6.0);
+                    // Card 5: HTTP API Endpoints Reference
+                    app_card_frame(ui).show(ui, |ui| {
+                        icon_card_title(
+                            ui,
+                            UiIcon::Sliders,
+                            egui::Color32::from_rgb(147, 197, 253),
+                            "Lightweight Agent Heartbeat API Reference",
+                        );
+                        ui.add_space(4.0);
+                        ui.label(egui::RichText::new("Any AI agent, CLI script, or IDE hook can invoke these endpoints on localhost to control sleep:").weak());
+                        ui.add_space(6.0);
 
-                    egui::Grid::new("api_routes_grid").striped(true).min_col_width(120.0).show(ui, |ui| {
-                        ui.label(egui::RichText::new("Endpoint").strong());
-                        ui.label(egui::RichText::new("Method").strong());
-                        ui.label(egui::RichText::new("Description").strong());
-                        ui.label(egui::RichText::new("CLI Example").strong());
-                        ui.end_row();
+                        egui::Grid::new("api_routes_grid").striped(true).min_col_width(120.0).show(ui, |ui| {
+                            ui.label(egui::RichText::new("Endpoint").strong());
+                            ui.label(egui::RichText::new("Method").strong());
+                            ui.label(egui::RichText::new("Description").strong());
+                            ui.label(egui::RichText::new("CLI Example").strong());
+                            ui.end_row();
 
-                        ui.label("POST /api/lease?mins=30&reason=Build");
-                        ui.label("GET / POST");
-                        ui.label("Block sleep for N minutes with a named lease");
-                        ui.label("agent-power-guard lease 30 \"Build\"");
-                        ui.end_row();
+                            ui.label("POST /api/lease?mins=30&reason=Build");
+                            ui.label("GET / POST");
+                            ui.label("Block sleep for N minutes with a named lease");
+                            ui.label("agent-power-guard lease 30 \"Build\"");
+                            ui.end_row();
 
-                        ui.label("POST /api/release");
-                        ui.label("GET / POST");
-                        ui.label("Release the active agent lease");
-                        ui.label("agent-power-guard release");
-                        ui.end_row();
+                            ui.label("POST /api/release");
+                            ui.label("GET / POST");
+                            ui.label("Release the active agent lease");
+                            ui.label("agent-power-guard release");
+                            ui.end_row();
 
-                        ui.label("GET /api/status");
-                        ui.label("GET");
-                        ui.label("Get live JSON metrics, conditions, countdown");
-                        ui.label("agent-power-guard status");
-                        ui.end_row();
+                            ui.label("GET /api/status");
+                            ui.label("GET");
+                            ui.label("Get live JSON metrics, conditions, countdown");
+                            ui.label("agent-power-guard status");
+                            ui.end_row();
 
-                        ui.label("POST /api/postpone?mins=15");
-                        ui.label("GET / POST");
-                        ui.label("Postpone sleep by 15 minutes");
-                        ui.label("agent-power-guard postpone 15");
-                        ui.end_row();
+                            ui.label("POST /api/postpone?mins=15");
+                            ui.label("GET / POST");
+                            ui.label("Postpone sleep by 15 minutes");
+                            ui.label("agent-power-guard postpone 15");
+                            ui.end_row();
 
-                        ui.label("POST /api/sleep");
-                        ui.label("GET / POST");
-                        ui.label("Put the PC to sleep immediately");
-                        ui.label("agent-power-guard sleep");
-                        ui.end_row();
+                            ui.label("POST /api/sleep");
+                            ui.label("GET / POST");
+                            ui.label("Put the PC to sleep immediately");
+                            ui.label("agent-power-guard sleep");
+                            ui.end_row();
+                        });
                     });
                 });
             });

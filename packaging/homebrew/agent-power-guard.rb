@@ -1,7 +1,7 @@
 class AgentPowerGuard < Formula
   desc "Keep-awake watchdog utility for workstations running autonomous AI agents"
   homepage "https://github.com/Subham-Maity/agent-power-guard"
-  version "1.2.4"
+  version "1.2.5"
 
   on_macos do
     if Hardware::CPU.arm?
