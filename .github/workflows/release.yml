@@ -172,7 +172,11 @@ jobs:
 
             ---
 
-            ### 🌟 What's New & Fixed in v1.2.6 (Full Upgrade Since v1.0.3)
+            ### 🌟 What's New & Fixed in v1.2.7 (Full Upgrade Since v1.0.3)
+
+            #### 🧩 v1.2.7 Editable Color-Coded Hardware Bubbles, Case Cooling & ARGB Support
+            - **Interactive Color-Coded Hardware Bubbles (Step 1):** Redesigned detected specs into responsive, color-coded pills by category (**Board/CPU/RAM/GPU**, **Storage Drives**, **Displays**, **Wi-Fi/LAN**, **Bluetooth**, **Audio/Mic**, **USB & Peripherals**, and **Cabinet Cooling/ARGB**). Click any bubble to rename/edit inline, click `x` to remove unused paired/virtual devices, or click `+ Add` inside any category to append custom gear — with responsive modal sizing so buttons and long hardware lists never clip on narrow/portrait monitors.
+            - **Cabinet Fans, ARGB Lighting & Cooler Controls (Step 2):** Added dedicated inputs for **Case Fan count**, **ARGB/RGB Fan count**, **CPU Cooler type** (Stock/Tower/Dual-Tower Air, 120mm/240mm/360mm AIO Liquid, Custom Loop, Laptop), **ARGB Hub / LED Strips**, 1-click Quick-Add chips, full-width Extra Notes, and auto-classification of motherboard/USB RGB controllers (`ITE Device` RGB Fusion, iCUE, NZXT, Lian Li) plus virtual audio filter cleanup (`FxSound`/`VB-Audio`). All edits auto-sync into Step 3's AI estimator prompt.
 
             #### 🔍 v1.2.6 Cross-Platform Deep Hardware Detection & Watt Calculator Fixes
             - **Real Physical Storage, RAM & Motherboard Detection (Windows, Linux & macOS):** Replaced logical volume-count storage summaries with unprivileged physical drive model/bus/size detection (`MSFT_PhysicalDisk`/`Win32_DiskDrive` on Windows, `lsblk -J`/`/sys/block` on Linux, `SPNVMeDataType`/`SPSerialATADataType` on macOS), motherboard/system model (`Win32_BaseBoard`, `/sys/class/dmi/id`, `SPHardwareDataType`), DDR generation/MHz/stick-count RAM formatting (`Win32_PhysicalMemory` SMBIOSMemoryType, `lshw`, `SPMemoryDataType`), and 64-bit GPU VRAM lookup on Windows.
@@ -226,7 +230,7 @@ jobs:
             |---|---|---|
             | **Windows 10 / 11 (Installer)** | [`AgentPowerGuard-windows-x64.msi`](#) | **Recommended for Windows.** Start Menu, desktop shortcuts, Add/Remove Programs. |
             | **Windows 10 / 11 (Portable)** | [`agent-power-guard-windows-x64.exe`](#) | Portable single-file binary. Runs as standard user (`AsInvoker`) without UAC prompts. |
-            | **Debian / Ubuntu Linux** | [`agent-power-guard_1.2.6_amd64.deb`](#) | Native `.deb` package with desktop integration and systemd user unit. |
+            | **Debian / Ubuntu Linux** | [`agent-power-guard_1.2.7_amd64.deb`](#) | Native `.deb` package with desktop integration and systemd user unit. |
             | **Linux (Generic tarball)** | [`agent-power-guard-linux-x86_64.tar.gz`](#) | Standalone Linux x86_64 binary supporting X11 & Wayland. |
             | **macOS (Universal Bundle)** | [`AgentPowerGuard-macos-universal.zip`](#) | Universal `.app` bundle for both Apple Silicon (M1–M4) and Intel Macs. |
             | **macOS (Apple Silicon)** | [`agent-power-guard-macos-aarch64.tar.gz`](#) | Raw standalone ARM64 binary. |

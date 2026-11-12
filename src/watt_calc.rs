@@ -161,6 +161,7 @@ pub struct DetectedSystemSpecs {
     pub bluetooth_devices: Vec<String>,
     pub audio_devices: Vec<String>,
     pub usb_peripherals: Vec<String>,
+    pub cabinet_cooling: Vec<String>,
     pub is_laptop: bool,
 }
 
@@ -257,6 +258,11 @@ pub struct WattCalculatorState {
     pub monitor_models_note: String,
     pub extra_gear_note: String,
 
+    pub case_fan_count: u32,
+    pub argb_fan_count: u32,
+    pub cooler_type: String,
+    pub has_rgb_strips_or_hub: bool,
+
     pub daily_active_hours: f32,
     pub daily_idle_sleep_hours: f32,
 
@@ -265,6 +271,10 @@ pub struct WattCalculatorState {
     pub ai_notes: String,
     pub ai_parse_status: Option<String>,
     pub spec_fetch_in_progress: bool,
+    pub spec_edit_target: Option<(String, usize)>,
+    pub spec_edit_buf: String,
+    pub spec_add_cat: String,
+    pub spec_add_buf: String,
 }
 
 impl Default for WattCalculatorState {
@@ -285,6 +295,11 @@ impl Default for WattCalculatorState {
             monitor_models_note: "1x 24\" 1080p IPS monitor (~25W)".to_string(),
             extra_gear_note: "Keyboard, mouse, speakers / USB DAC".to_string(),
 
+            case_fan_count: 2,
+            argb_fan_count: 0,
+            cooler_type: "Stock / Tower Air Cooler".to_string(),
+            has_rgb_strips_or_hub: false,
+
             daily_active_hours: 8.0,
             daily_idle_sleep_hours: 10.0,
 
@@ -293,6 +308,10 @@ impl Default for WattCalculatorState {
             ai_notes: String::new(),
             ai_parse_status: None,
             spec_fetch_in_progress: false,
+            spec_edit_target: None,
+            spec_edit_buf: String::new(),
+            spec_add_cat: "Cabinet / ARGB & Fans".to_string(),
+            spec_add_buf: String::new(),
         }
     }
 }
@@ -453,6 +472,23 @@ pub fn build_ai_watt_prompt(
     } else {
         specs.usb_peripherals.join(", ")
     };
+    let cabinet_line = {
+        let mut parts = vec![
+            format!("CPU Cooler: {}", calc.cooler_type),
+            format!("Case Fans: {}", calc.case_fan_count),
+            format!("ARGB/RGB Fans: {}", calc.argb_fan_count),
+        ];
+        if calc.has_rgb_strips_or_hub {
+            parts.push("ARGB Controller Hub / LED Light Strips: Yes".to_string());
+        }
+        if !specs.cabinet_cooling.is_empty() {
+            parts.push(format!(
+                "Detected/Added: {}",
+                specs.cabinet_cooling.join(", ")
+            ));
+        }
+        parts.join(" | ")
+    };
     let cpu_threads = specs.cpu_logical_threads.max(specs.cpu_cores);
 
     format!(
@@ -469,11 +505,12 @@ Detected System Specs:\n\
 - Network (Wi-Fi / LAN): {}\n\
 - Bluetooth: {}\n\
 - Audio / Mic / DAC: {}\n\
-- Mouse / Keyboard / USB Peripherals: {}\n\n\
+- Mouse / Keyboard / USB Peripherals: {}\n\
+- Cabinet Cooling, Fans & ARGB Lighting: {}\n\n\
 Manual Hardware & Usage Inputs:\n\
 - SMPS / PSU: {} ({}W, ~{:.0}% efficiency)\n\
 - Monitor count & models: {} ({} monitor(s))\n\
-- Peripherals / extras note: {}\n\
+- Additional gear / notes: {}\n\
 - Electricity rate: {}{:.2}/kWh\n\
 - Typical usage: {:.1}h active/day, {:.1}h idle that should sleep/day\n\n\
 Reply ONLY with a single JSON object using these exact keys (numbers in watts / tariff, no extra markdown):\n\
@@ -506,6 +543,7 @@ Reply ONLY with a single JSON object using these exact keys (numbers in watts / 
         bt_line,
         audio_line,
         periph_line,
+        cabinet_line,
         calc.smps_model_note,
         calc.psu_wattage,
         calc.psu_efficiency_pct,
@@ -784,14 +822,20 @@ mod tests {
             bluetooth_devices: vec!["TP-Link Bluetooth USB Adapter".to_string()],
             audio_devices: vec!["Microphone (Blue Snowball)".to_string()],
             usb_peripherals: vec!["Dell KB216 Wired Keyboard".to_string()],
+            cabinet_cooling: vec!["3x 120mm ARGB Case Fans".to_string()],
             is_laptop: false,
         };
-        let calc = WattCalculatorState::default();
+        let mut calc = WattCalculatorState::default();
+        calc.case_fan_count = 4;
+        calc.argb_fan_count = 3;
+        calc.cooler_type = "240mm AIO Liquid Cooler".to_string();
         let prompt = build_ai_watt_prompt(&specs, &calc, "₹", 9.0);
         assert!(prompt.contains("Ryzen 5 5600"));
         assert!(prompt.contains("Gigabyte B550M DS3H R2"));
         assert!(prompt.contains("WD Blue SN570 1TB"));
         assert!(prompt.contains("Blue Snowball"));
+        assert!(prompt.contains("ARGB/RGB Fans: 3"));
+        assert!(prompt.contains("240mm AIO Liquid Cooler"));
         assert!(prompt.contains("₹9.00/kWh"));
 
         let ai_reply = "Here is your estimated breakdown:\n```json\n{\n  \"active_watts\": 115,\n  \"monitor_watts\": 25,\n  \"sleep_watts\": 3,\n  \"currency_symbol\": \"INR\",\n  \"electricity_rate_kwh\": 9.0,\n  \"notes\": \"Ryzen 5600 + RTX 3060 idle + Acer VG240Y\"\n}\n```\nHope this helps!";

@@ -5177,7 +5177,40 @@ struct PlatformHwDetails {
     bluetooth_devices: Vec<String>,
     audio_devices: Vec<String>,
     usb_peripherals: Vec<String>,
+    cabinet_cooling: Vec<String>,
     is_laptop_override: Option<bool>,
+}
+
+/// Move detected USB ARGB/RGB/fan controllers (e.g. Gigabyte ITE Device, Corsair, NZXT, Lian Li)
+/// out of generic USB peripherals into `cabinet_cooling` with readable labels.
+fn classify_rgb_and_cooling_peripherals(
+    usb_peripherals: &mut Vec<String>,
+    cabinet_cooling: &mut Vec<String>,
+) {
+    let mut kept_usb = Vec::with_capacity(usb_peripherals.len());
+    for item in usb_peripherals.drain(..) {
+        let lower = item.to_ascii_lowercase();
+        if lower == "ite device" || lower.contains("ite829") || lower.contains("ite570") {
+            cabinet_cooling.push("Motherboard ARGB Controller (ITE Device)".to_string());
+        } else if lower.contains("icue")
+            || lower.contains("commander")
+            || lower.contains("lighting node")
+            || lower.contains("kraken")
+            || lower.contains("nzxt")
+            || lower.contains("lian li")
+            || lower.contains("uni fan")
+            || lower.contains("aura led")
+            || lower.contains("mystic light")
+            || lower.contains("rgb controller")
+            || lower.contains("argb")
+        {
+            cabinet_cooling.push(item);
+        } else {
+            kept_usb.push(item);
+        }
+    }
+    *usb_peripherals = dedupe_clean_list(kept_usb);
+    *cabinet_cooling = dedupe_clean_list(std::mem::take(cabinet_cooling));
 }
 
 #[cfg(windows)]
@@ -5289,10 +5322,10 @@ $out.bluetooth = @($bt | Select-Object -Unique)
 
 $aud = @()
 Get-CimInstance Win32_SoundDevice | Where-Object { $_.Status -eq 'OK' } | ForEach-Object {
-    if ($_.Name -and $_.Name -notmatch 'Virtual|VB-Audio|^High Definition Audio Device$|^USB Audio 2\.0$') { $aud += $_.Name.Trim() }
+    if ($_.Name -and $_.Name -notmatch 'Virtual|VB-Audio|FxSound|^High Definition Audio Device$|^USB Audio 2\.0$') { $aud += $_.Name.Trim() }
 }
 Get-CimInstance Win32_PnPEntity | Where-Object {
-    $_.Present -eq $true -and $_.PNPClass -eq 'AudioEndpoint' -and $_.Name -notmatch 'VB-Audio'
+    $_.Present -eq $true -and $_.PNPClass -eq 'AudioEndpoint' -and $_.Name -notmatch 'VB-Audio|FxSound'
 } | ForEach-Object {
     if ($_.Name) { $aud += $_.Name.Trim() }
 }
@@ -6125,7 +6158,8 @@ pub fn trigger_spec_fetch_locked(s: &mut SharedState, state: Arc<Mutex<SharedSta
             Err(_) => "Unknown".to_string(),
         };
 
-        let hw = fetch_platform_hw_details(ram_gb);
+        let mut hw = fetch_platform_hw_details(ram_gb);
+        classify_rgb_and_cooling_peripherals(&mut hw.usb_peripherals, &mut hw.cabinet_cooling);
         let is_laptop = hw
             .is_laptop_override
             .unwrap_or_else(|| get_battery_status().has_battery);
@@ -6134,6 +6168,8 @@ pub fn trigger_spec_fetch_locked(s: &mut SharedState, state: Arc<Mutex<SharedSta
         } else {
             hw.ram_details
         };
+
+        let detected_rgb_ctrl = !hw.cabinet_cooling.is_empty();
 
         let specs = DetectedSystemSpecs {
             fetched: true,
@@ -6154,11 +6190,21 @@ pub fn trigger_spec_fetch_locked(s: &mut SharedState, state: Arc<Mutex<SharedSta
             bluetooth_devices: hw.bluetooth_devices,
             audio_devices: hw.audio_devices,
             usb_peripherals: hw.usb_peripherals,
+            cabinet_cooling: hw.cabinet_cooling,
             is_laptop,
         };
 
         let mut s = state.lock().unwrap();
         s.watt_calc.spec_fetch_in_progress = false;
+        if detected_rgb_ctrl {
+            s.watt_calc.has_rgb_strips_or_hub = true;
+            if s.watt_calc.argb_fan_count == 0 && !specs.is_laptop {
+                s.watt_calc.argb_fan_count = s.watt_calc.case_fan_count.max(3);
+                if s.watt_calc.case_fan_count < s.watt_calc.argb_fan_count {
+                    s.watt_calc.case_fan_count = s.watt_calc.argb_fan_count;
+                }
+            }
+        }
         if !specs.monitors.is_empty() {
             let new_count = specs.monitors.len() as u32;
             if !s.detected_specs.fetched
@@ -6176,23 +6222,11 @@ pub fn trigger_spec_fetch_locked(s: &mut SharedState, state: Arc<Mutex<SharedSta
             s.watt_calc.monitor_models_note = specs.monitors.join(", ");
         }
         if s.watt_calc.extra_gear_note == WattCalculatorState::default().extra_gear_note {
-            let mut gear: Vec<String> = Vec::new();
-            for item in specs
-                .usb_peripherals
-                .iter()
-                .chain(specs.audio_devices.iter())
-                .chain(specs.bluetooth_devices.iter())
-            {
-                if gear.len() >= 6 {
-                    break;
-                }
-                if !gear.iter().any(|g| g.eq_ignore_ascii_case(item)) {
-                    gear.push(item.clone());
-                }
-            }
-            if !gear.is_empty() {
-                s.watt_calc.extra_gear_note = gear.join(", ");
-            }
+            s.watt_calc.extra_gear_note = if specs.is_laptop {
+                "Laptop built-in speakers/mic + external peripherals".to_string()
+            } else {
+                "Standard PC chassis cooling & desk accessories".to_string()
+            };
         }
         if let Some(w) = gpu_pwr_w {
             if w >= 1.0 && w <= 150.0 {
@@ -6202,6 +6236,9 @@ pub fn trigger_spec_fetch_locked(s: &mut SharedState, state: Arc<Mutex<SharedSta
         if specs.is_laptop {
             s.watt_calc.smps_model_note = "Laptop Power Brick".to_string();
             s.watt_calc.psu_efficiency_pct = 88.0;
+            s.watt_calc.case_fan_count = 0;
+            s.watt_calc.argb_fan_count = 0;
+            s.watt_calc.cooler_type = "Laptop Internal Cooling".to_string();
         }
         s.detected_specs = specs;
         let prompt = build_ai_watt_prompt(
@@ -6797,6 +6834,282 @@ fn app_subcard_frame(ui: &egui::Ui) -> egui::Frame {
         .inner_margin(egui::Margin::symmetric(14, 10))
 }
 
+fn spec_bubble_colors(
+    dark: bool,
+    accent: egui::Color32,
+) -> (egui::Color32, egui::Color32, egui::Color32) {
+    if dark {
+        let mix_dark =
+            |c: u8, base: u8| -> u8 { ((base as f32) * 0.80 + (c as f32) * 0.20).round() as u8 };
+        let fill = egui::Color32::from_rgb(
+            mix_dark(accent.r(), 16),
+            mix_dark(accent.g(), 22),
+            mix_dark(accent.b(), 34),
+        );
+        let stroke = egui::Color32::from_rgb(
+            ((accent.r() as u16 * 3) / 4) as u8,
+            ((accent.g() as u16 * 3) / 4) as u8,
+            ((accent.b() as u16 * 3) / 4) as u8,
+        );
+        let text = egui::Color32::from_rgb(235, 242, 250);
+        (fill, stroke, text)
+    } else {
+        let mix_light = |c: u8| -> u8 { (255.0 * 0.84 + (c as f32) * 0.16).round() as u8 };
+        let fill = egui::Color32::from_rgb(
+            mix_light(accent.r()),
+            mix_light(accent.g()),
+            mix_light(accent.b()),
+        );
+        let stroke = egui::Color32::from_rgb(
+            ((accent.r() as u16 * 4) / 5) as u8,
+            ((accent.g() as u16 * 4) / 5) as u8,
+            ((accent.b() as u16 * 4) / 5) as u8,
+        );
+        let text = egui::Color32::from_rgb(20, 30, 45);
+        (fill, stroke, text)
+    }
+}
+
+fn render_core_spec_pill(
+    ui: &mut egui::Ui,
+    dark: bool,
+    cat_key: &str,
+    prefix: &str,
+    accent: egui::Color32,
+    value: &mut String,
+    edit_target: &mut Option<(String, usize)>,
+    edit_buf: &mut String,
+) -> bool {
+    let mut changed = false;
+    let (fill, stroke, text_col) = spec_bubble_colors(dark, accent);
+    let is_editing = edit_target
+        .as_ref()
+        .is_some_and(|(k, i)| k == cat_key && *i == 0);
+
+    egui::Frame::new()
+        .fill(fill)
+        .stroke(egui::Stroke::new(1.0, stroke))
+        .corner_radius(11.0)
+        .inner_margin(egui::Margin::symmetric(9, 4))
+        .show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 5.0;
+                ui.label(
+                    egui::RichText::new(format!("{}:", prefix))
+                        .strong()
+                        .size(11.5)
+                        .color(accent),
+                );
+                if is_editing {
+                    let te = ui.add(
+                        egui::TextEdit::singleline(edit_buf)
+                            .desired_width(210.0)
+                            .hint_text("Enter value..."),
+                    );
+                    let enter = te.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                    if ui.small_button("Save").clicked() || enter {
+                        let cleaned = edit_buf.trim().to_string();
+                        if !cleaned.is_empty() && *value != cleaned {
+                            *value = cleaned;
+                            changed = true;
+                        }
+                        *edit_target = None;
+                    }
+                    if ui.small_button("Cancel").clicked() {
+                        *edit_target = None;
+                    }
+                } else {
+                    let shown = if value.trim().is_empty() {
+                        "Unknown (click to edit)".to_string()
+                    } else {
+                        value.clone()
+                    };
+                    if ui
+                        .add(
+                            egui::Label::new(egui::RichText::new(shown).size(11.5).color(text_col))
+                                .sense(egui::Sense::click()),
+                        )
+                        .on_hover_text("Click to edit")
+                        .clicked()
+                    {
+                        *edit_target = Some((cat_key.to_string(), 0));
+                        *edit_buf = value.clone();
+                    }
+                }
+            });
+        });
+    changed
+}
+
+#[allow(clippy::too_many_arguments)]
+fn render_spec_bubble_category(
+    ui: &mut egui::Ui,
+    dark: bool,
+    cat_key: &str,
+    title: &str,
+    accent: egui::Color32,
+    items: &mut Vec<String>,
+    edit_target: &mut Option<(String, usize)>,
+    edit_buf: &mut String,
+    empty_hint: &str,
+    add_hint: &str,
+) -> bool {
+    let mut changed = false;
+    let (fill, stroke, text_col) = spec_bubble_colors(dark, accent);
+    let remove_col = if dark {
+        egui::Color32::from_rgb(252, 165, 165)
+    } else {
+        egui::Color32::from_rgb(185, 28, 28)
+    };
+
+    ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().item_spacing.x = 6.0;
+        ui.label(
+            egui::RichText::new(format!("{} ({})", title, items.len()))
+                .strong()
+                .size(12.0)
+                .color(accent),
+        );
+        if items.is_empty() && !edit_target.as_ref().is_some_and(|(k, _)| k == cat_key) {
+            ui.label(egui::RichText::new(empty_hint).weak().size(11.5));
+        }
+
+        let mut remove_idx: Option<usize> = None;
+        for idx in 0..items.len() {
+            let is_editing = edit_target
+                .as_ref()
+                .is_some_and(|(k, i)| k == cat_key && *i == idx);
+            egui::Frame::new()
+                .fill(fill)
+                .stroke(egui::Stroke::new(1.0, stroke))
+                .corner_radius(11.0)
+                .inner_margin(egui::Margin::symmetric(8, 3))
+                .show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.spacing_mut().item_spacing.x = 4.0;
+                        if is_editing {
+                            let te = ui.add(
+                                egui::TextEdit::singleline(edit_buf)
+                                    .desired_width(180.0)
+                                    .hint_text("Edit item..."),
+                            );
+                            let enter =
+                                te.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                            if ui.small_button("OK").clicked() || enter {
+                                let cleaned = edit_buf.trim().to_string();
+                                if cleaned.is_empty() {
+                                    remove_idx = Some(idx);
+                                } else if items[idx] != cleaned {
+                                    items[idx] = cleaned;
+                                    changed = true;
+                                }
+                                *edit_target = None;
+                            }
+                            if ui.small_button("Cancel").clicked() {
+                                *edit_target = None;
+                            }
+                        } else {
+                            if ui
+                                .add(
+                                    egui::Label::new(
+                                        egui::RichText::new(&items[idx]).size(11.5).color(text_col),
+                                    )
+                                    .sense(egui::Sense::click()),
+                                )
+                                .on_hover_text("Click to edit item")
+                                .clicked()
+                            {
+                                *edit_target = Some((cat_key.to_string(), idx));
+                                *edit_buf = items[idx].clone();
+                            }
+                            if ui
+                                .add(
+                                    egui::Button::new(
+                                        egui::RichText::new("x")
+                                            .strong()
+                                            .size(11.0)
+                                            .color(remove_col),
+                                    )
+                                    .frame(false),
+                                )
+                                .on_hover_text("Remove from list")
+                                .clicked()
+                            {
+                                remove_idx = Some(idx);
+                            }
+                        }
+                    });
+                });
+        }
+        if let Some(idx) = remove_idx {
+            if idx < items.len() {
+                items.remove(idx);
+                changed = true;
+            }
+        }
+
+        let is_adding = edit_target
+            .as_ref()
+            .is_some_and(|(k, i)| k == cat_key && *i == usize::MAX);
+        if is_adding {
+            egui::Frame::new()
+                .fill(fill)
+                .stroke(egui::Stroke::new(1.0, stroke))
+                .corner_radius(11.0)
+                .inner_margin(egui::Margin::symmetric(8, 3))
+                .show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.spacing_mut().item_spacing.x = 4.0;
+                        let te = ui.add(
+                            egui::TextEdit::singleline(edit_buf)
+                                .desired_width(175.0)
+                                .hint_text(add_hint),
+                        );
+                        let enter =
+                            te.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                        if ui.small_button("Add").clicked() || enter {
+                            let cleaned = edit_buf.trim().to_string();
+                            if !cleaned.is_empty()
+                                && !items.iter().any(|x| x.eq_ignore_ascii_case(&cleaned))
+                            {
+                                items.push(cleaned);
+                                changed = true;
+                            }
+                            edit_buf.clear();
+                            *edit_target = None;
+                        }
+                        if ui.small_button("Cancel").clicked() {
+                            edit_buf.clear();
+                            *edit_target = None;
+                        }
+                    });
+                });
+        } else if ui
+            .add(
+                egui::Button::new(
+                    egui::RichText::new("+ Add")
+                        .size(11.0)
+                        .strong()
+                        .color(accent),
+                )
+                .fill(fill)
+                .stroke(egui::Stroke::new(1.0, stroke))
+                .corner_radius(11.0),
+            )
+            .on_hover_text(format!("Add custom item to {}", title))
+            .clicked()
+        {
+            *edit_target = Some((cat_key.to_string(), usize::MAX));
+            edit_buf.clear();
+        }
+    });
+
+    if changed {
+        *items = dedupe_clean_list(std::mem::take(items));
+    }
+    changed
+}
+
 fn load_tray_icon() -> tray_icon::Icon {
     let png32_bytes = include_bytes!("../assets/icon_32.png");
     if let Ok(img) = image::load_from_memory(png32_bytes) {
@@ -7320,251 +7633,450 @@ impl eframe::App for AgentPowerGuardApp {
         let mut calc_open = s.show_watt_calc_modal;
         if calc_open {
             let state_arc = self.state.clone();
+            let modal_w = (ui.available_width() - 24.0).clamp(360.0, 840.0);
+            let modal_h = (ui.available_height() - 28.0).clamp(380.0, 740.0);
             egui::Window::new("Hardware Watt Calculator & AI Estimator")
                 .open(&mut calc_open)
                 .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
-                .default_size([740.0, 610.0])
-                .max_height(660.0)
+                .default_size([modal_w, modal_h])
+                .max_width(modal_w)
+                .max_height(modal_h)
                 .show(ui.ctx(), |ui| {
                     egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
-                        // STEP 1: Auto-Fetch System Hardware Specs
+                        ui.set_max_width(ui.available_width());
+                        let dark = ui.visuals().dark_mode;
+                        let mut any_spec_edited = false;
+
+                        // STEP 1: Auto-Fetch & Color-Coded Editable Hardware Bubbles
                         app_card_frame(ui).show(ui, |ui| {
-                            ui.horizontal(|ui| {
+                            ui.horizontal_wrapped(|ui| {
                                 icon_card_title(
                                     ui,
                                     UiIcon::Cpu,
                                     egui::Color32::from_rgb(56, 189, 248),
-                                    "Step 1: Fetch System Specs",
+                                    "Step 1: System Specs & Editable Hardware Bubbles",
                                 );
-                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                    if s.watt_calc.spec_fetch_in_progress {
-                                        ui.label("Detecting hardware...");
-                                    } else if icon_button(
-                                        ui,
-                                        UiIcon::Search,
-                                        egui::Color32::WHITE,
-                                        "Fetch System Specs",
-                                        Some(egui::Color32::from_rgb(37, 99, 235)),
-                                    )
-                                    .clicked()
-                                    {
-                                        trigger_spec_fetch_locked(&mut s, state_arc.clone());
-                                    }
-                                });
+                                ui.add_space(8.0);
+                                if s.watt_calc.spec_fetch_in_progress {
+                                    ui.label("Detecting hardware...");
+                                } else if icon_button(
+                                    ui,
+                                    UiIcon::Search,
+                                    egui::Color32::WHITE,
+                                    "Fetch System Specs",
+                                    Some(egui::Color32::from_rgb(37, 99, 235)),
+                                )
+                                .clicked()
+                                {
+                                    trigger_spec_fetch_locked(&mut s, state_arc.clone());
+                                }
                             });
-                            ui.add_space(6.0);
+                            ui.add_space(4.0);
                             if !s.detected_specs.fetched {
-                                ui.label(egui::RichText::new("Click 'Fetch System Specs' to scan motherboard, CPU, RAM sticks, physical drives, GPU, displays, Wi-Fi/LAN, Bluetooth, audio & USB devices.").weak().size(12.0));
+                                ui.label(
+                                    egui::RichText::new(
+                                        "Click 'Fetch System Specs' to scan motherboard, CPU, RAM sticks, physical drives, GPU, displays, Wi-Fi/LAN, Bluetooth, audio, RGB controllers & USB peripherals. Or click '+ Add' below anytime.",
+                                    )
+                                    .weak()
+                                    .size(11.5),
+                                );
                             } else {
-                                let mon_str = if s.detected_specs.monitors.is_empty() {
-                                    "Not auto-detected (enter in Step 2)".to_string()
-                                } else {
-                                    s.detected_specs.monitors.join(", ")
-                                };
-                                let storage_str = if !s.detected_specs.storage_drives.is_empty() {
-                                    s.detected_specs.storage_drives.join("  |  ")
-                                } else {
-                                    s.detected_specs.storage_summary.clone()
-                                };
-                                let net_str = if s.detected_specs.network_adapters.is_empty() {
-                                    "Not detected".to_string()
-                                } else {
-                                    s.detected_specs.network_adapters.join("  |  ")
-                                };
-                                let bt_audio_str = {
-                                    let mut parts = Vec::new();
-                                    if !s.detected_specs.bluetooth_devices.is_empty() {
-                                        parts.push(format!("BT: {}", s.detected_specs.bluetooth_devices.join(", ")));
-                                    }
-                                    if !s.detected_specs.audio_devices.is_empty() {
-                                        parts.push(format!("Audio: {}", s.detected_specs.audio_devices.join(", ")));
-                                    }
-                                    if parts.is_empty() {
-                                        "None detected".to_string()
-                                    } else {
-                                        parts.join("  |  ")
-                                    }
-                                };
-                                let periph_str = if s.detected_specs.usb_peripherals.is_empty() {
-                                    "Standard input devices".to_string()
-                                } else {
-                                    s.detected_specs.usb_peripherals.join(", ")
-                                };
-                                let mobo_part = if s.detected_specs.motherboard.is_empty() {
-                                    String::new()
-                                } else {
-                                    format!("  |  Board: {}", s.detected_specs.motherboard)
-                                };
-                                egui::Grid::new("specs_grid").num_columns(2).spacing([14.0, 5.0]).show(ui, |ui| {
-                                    ui.label(egui::RichText::new("OS / Board:").weak());
-                                    ui.add(egui::Label::new(format!(
-                                        "{} ({}){}",
-                                        s.detected_specs.os_name,
-                                        if s.detected_specs.is_laptop { "Laptop" } else { "Desktop" },
-                                        mobo_part
-                                    )).wrap());
-                                    ui.end_row();
-                                    ui.label(egui::RichText::new("CPU:").weak());
-                                    ui.add(egui::Label::new(format!(
-                                        "{} ({} cores / {} threads)",
-                                        s.detected_specs.cpu_brand,
-                                        s.detected_specs.cpu_cores,
-                                        s.detected_specs.cpu_logical_threads.max(s.detected_specs.cpu_cores)
-                                    )).wrap());
-                                    ui.end_row();
-                                    ui.label(egui::RichText::new("RAM:").weak());
-                                    ui.add(egui::Label::new(
-                                        if s.detected_specs.ram_details.is_empty() {
-                                            format!("{:.1} GB RAM", s.detected_specs.ram_gb)
-                                        } else {
-                                            s.detected_specs.ram_details.clone()
+                                ui.label(
+                                    egui::RichText::new(
+                                        "Click any colored bubble to edit, 'x' to remove unused items (e.g. paired phones/virtual audio), or '+ Add' to append fans, ARGB strips, speakers, or custom parts.",
+                                    )
+                                    .weak()
+                                    .size(11.0),
+                                );
+                            }
+                            ui.add_space(6.0);
+
+                            {
+                                let guard = &mut *s;
+                                let specs = &mut guard.detected_specs;
+                                let calc = &mut guard.watt_calc;
+                                let edit_target = &mut calc.spec_edit_target;
+                                let edit_buf = &mut calc.spec_edit_buf;
+
+                                if specs.fetched {
+                                    ui.horizontal_wrapped(|ui| {
+                                        ui.spacing_mut().item_spacing.x = 6.0;
+                                        ui.spacing_mut().item_spacing.y = 5.0;
+                                        let (os_fill, os_stroke, os_txt) = spec_bubble_colors(
+                                            dark,
+                                            egui::Color32::from_rgb(100, 116, 139),
+                                        );
+                                        egui::Frame::new()
+                                            .fill(os_fill)
+                                            .stroke(egui::Stroke::new(1.0, os_stroke))
+                                            .corner_radius(11.0)
+                                            .inner_margin(egui::Margin::symmetric(9, 4))
+                                            .show(ui, |ui| {
+                                                ui.label(
+                                                    egui::RichText::new(format!(
+                                                        "{} ({})",
+                                                        specs.os_name,
+                                                        if specs.is_laptop {
+                                                            "Laptop"
+                                                        } else {
+                                                            "Desktop"
+                                                        }
+                                                    ))
+                                                    .size(11.5)
+                                                    .color(os_txt),
+                                                );
+                                            });
+                                        any_spec_edited |= render_core_spec_pill(
+                                            ui,
+                                            dark,
+                                            "core:board",
+                                            "Board",
+                                            egui::Color32::from_rgb(34, 211, 238),
+                                            &mut specs.motherboard,
+                                            edit_target,
+                                            edit_buf,
+                                        );
+                                        any_spec_edited |= render_core_spec_pill(
+                                            ui,
+                                            dark,
+                                            "core:cpu",
+                                            "CPU",
+                                            egui::Color32::from_rgb(59, 130, 246),
+                                            &mut specs.cpu_brand,
+                                            edit_target,
+                                            edit_buf,
+                                        );
+                                        if specs.ram_details.is_empty() && specs.ram_gb > 0.0 {
+                                            specs.ram_details = format!("{:.1} GB", specs.ram_gb);
                                         }
-                                    ).wrap());
-                                    ui.end_row();
-                                    ui.label(egui::RichText::new("GPU:").weak());
-                                    ui.add(egui::Label::new(format!(
-                                        "{} ({:.1} GB VRAM)",
-                                        if s.detected_specs.gpu_name.is_empty() { "Integrated" } else { &s.detected_specs.gpu_name },
-                                        s.detected_specs.gpu_vram_gb
-                                    )).wrap());
-                                    ui.end_row();
-                                    ui.label(egui::RichText::new("Storage Drives:").weak());
-                                    ui.add(egui::Label::new(storage_str).wrap());
-                                    ui.end_row();
-                                    ui.label(egui::RichText::new("Displays:").weak());
-                                    ui.add(egui::Label::new(mon_str).wrap());
-                                    ui.end_row();
-                                    ui.label(egui::RichText::new("Wi-Fi / LAN:").weak());
-                                    ui.add(egui::Label::new(net_str).wrap());
-                                    ui.end_row();
-                                    ui.label(egui::RichText::new("Bluetooth / Audio:").weak());
-                                    ui.add(egui::Label::new(bt_audio_str).wrap());
-                                    ui.end_row();
-                                    ui.label(egui::RichText::new("USB & Peripherals:").weak());
-                                    ui.add(egui::Label::new(periph_str).wrap());
-                                    ui.end_row();
-                                });
+                                        any_spec_edited |= render_core_spec_pill(
+                                            ui,
+                                            dark,
+                                            "core:ram",
+                                            "RAM",
+                                            egui::Color32::from_rgb(139, 92, 246),
+                                            &mut specs.ram_details,
+                                            edit_target,
+                                            edit_buf,
+                                        );
+                                        any_spec_edited |= render_core_spec_pill(
+                                            ui,
+                                            dark,
+                                            "core:gpu",
+                                            "GPU",
+                                            egui::Color32::from_rgb(236, 72, 153),
+                                            &mut specs.gpu_name,
+                                            edit_target,
+                                            edit_buf,
+                                        );
+                                    });
+                                    ui.add_space(6.0);
+                                }
+
+                                any_spec_edited |= render_spec_bubble_category(
+                                    ui,
+                                    dark,
+                                    "storage",
+                                    "Storage Drives",
+                                    egui::Color32::from_rgb(245, 158, 11),
+                                    &mut specs.storage_drives,
+                                    edit_target,
+                                    edit_buf,
+                                    "No physical drives listed yet",
+                                    "e.g. Samsung 980 PRO 1TB NVMe",
+                                );
+                                ui.add_space(4.0);
+
+                                let mons_changed = render_spec_bubble_category(
+                                    ui,
+                                    dark,
+                                    "monitors",
+                                    "Displays",
+                                    egui::Color32::from_rgb(16, 185, 129),
+                                    &mut specs.monitors,
+                                    edit_target,
+                                    edit_buf,
+                                    "None auto-detected",
+                                    "e.g. LG 27GP850 1440p",
+                                );
+                                if mons_changed {
+                                    any_spec_edited = true;
+                                    if !specs.monitors.is_empty() {
+                                        calc.monitor_count = specs.monitors.len() as u32;
+                                        calc.monitor_models_note = specs.monitors.join(", ");
+                                    } else {
+                                        calc.monitor_models_note = "None".to_string();
+                                    }
+                                }
+                                ui.add_space(4.0);
+
+                                any_spec_edited |= render_spec_bubble_category(
+                                    ui,
+                                    dark,
+                                    "network",
+                                    "Wi-Fi / LAN",
+                                    egui::Color32::from_rgb(14, 165, 233),
+                                    &mut specs.network_adapters,
+                                    edit_target,
+                                    edit_buf,
+                                    "None detected",
+                                    "e.g. Intel AX210 Wi-Fi 6E",
+                                );
+                                ui.add_space(4.0);
+
+                                any_spec_edited |= render_spec_bubble_category(
+                                    ui,
+                                    dark,
+                                    "bluetooth",
+                                    "Bluetooth",
+                                    egui::Color32::from_rgb(99, 102, 241),
+                                    &mut specs.bluetooth_devices,
+                                    edit_target,
+                                    edit_buf,
+                                    "None detected",
+                                    "e.g. Bluetooth Adapter",
+                                );
+                                ui.add_space(4.0);
+
+                                any_spec_edited |= render_spec_bubble_category(
+                                    ui,
+                                    dark,
+                                    "audio",
+                                    "Audio / Mic / DAC",
+                                    egui::Color32::from_rgb(168, 85, 247),
+                                    &mut specs.audio_devices,
+                                    edit_target,
+                                    edit_buf,
+                                    "None detected",
+                                    "e.g. Fifine Mic / Edifier Speakers",
+                                );
+                                ui.add_space(4.0);
+
+                                any_spec_edited |= render_spec_bubble_category(
+                                    ui,
+                                    dark,
+                                    "usb",
+                                    "USB & Peripherals",
+                                    egui::Color32::from_rgb(20, 184, 166),
+                                    &mut specs.usb_peripherals,
+                                    edit_target,
+                                    edit_buf,
+                                    "Standard mouse/keyboard",
+                                    "e.g. Mechanical Keyboard / UPS",
+                                );
+                                ui.add_space(4.0);
+
+                                any_spec_edited |= render_spec_bubble_category(
+                                    ui,
+                                    dark,
+                                    "cabinet",
+                                    "Cabinet Cooling, Fans & ARGB",
+                                    egui::Color32::from_rgb(244, 63, 94),
+                                    &mut specs.cabinet_cooling,
+                                    edit_target,
+                                    edit_buf,
+                                    "Use Step 2 or + Add for case fans / ARGB / AIO",
+                                    "e.g. 3x 120mm ARGB Fans",
+                                );
                             }
                         });
 
                         ui.add_space(8.0);
 
-                        // STEP 2: Missing Hardware Inputs, Custom Watt Distribution & Tariff
+                        // STEP 2: Missing Hardware Inputs (SMPS, Fans/ARGB), Custom Watt Distribution & Tariff
                         app_card_frame(ui).show(ui, |ui| {
                             icon_card_title(
                                 ui,
                                 UiIcon::Sliders,
                                 egui::Color32::from_rgb(16, 185, 129),
-                                "Step 2: Missing Details, Watt Distribution & Electricity Price",
+                                "Step 2: Missing Details (SMPS, Case Fans / ARGB), Watt Distribution & Price",
                             );
                             ui.add_space(6.0);
-                            egui::Grid::new("watt_inputs_grid").num_columns(2).spacing([16.0, 8.0]).show(ui, |ui| {
-                                ui.label("SMPS / PSU:");
-                                ui.horizontal_wrapped(|ui| {
-                                    ui.add(egui::TextEdit::singleline(&mut s.watt_calc.smps_model_note).desired_width(230.0));
-                                    ui.horizontal(|ui| {
-                                        ui.label("Rated:");
-                                        ui.add(egui::DragValue::new(&mut s.watt_calc.psu_wattage).range(45..=2000).suffix(" W"));
-                                    });
-                                    ui.horizontal(|ui| {
-                                        ui.label("Efficiency:");
-                                        ui.add(egui::DragValue::new(&mut s.watt_calc.psu_efficiency_pct).range(60.0..=96.0).suffix("%"));
-                                    });
-                                });
-                                ui.end_row();
 
-                                ui.label("Monitors:");
-                                ui.horizontal_wrapped(|ui| {
-                                    ui.horizontal(|ui| {
-                                        ui.label("Count:");
-                                        ui.add(egui::DragValue::new(&mut s.watt_calc.monitor_count).range(1..=6));
-                                    });
-                                    ui.horizontal(|ui| {
-                                        ui.label("Models:");
-                                        ui.add(egui::TextEdit::singleline(&mut s.watt_calc.monitor_models_note).desired_width(210.0));
-                                    });
-                                    ui.horizontal(|ui| {
-                                        ui.label("Each:");
-                                        ui.add(egui::DragValue::new(&mut s.watt_calc.monitor_each_w).range(5.0..=200.0).suffix(" W"));
-                                    });
+                            ui.horizontal_wrapped(|ui| {
+                                ui.label(egui::RichText::new("SMPS / PSU:").strong().size(12.0));
+                                ui.add(egui::TextEdit::singleline(&mut s.watt_calc.smps_model_note).desired_width(210.0));
+                                ui.horizontal(|ui| {
+                                    ui.label("Rated:");
+                                    ui.add(egui::DragValue::new(&mut s.watt_calc.psu_wattage).range(45..=2000).suffix(" W"));
                                 });
-                                ui.end_row();
-
-                                ui.label("Peripherals / Meter:");
-                                ui.horizontal_wrapped(|ui| {
-                                    ui.add(egui::TextEdit::singleline(&mut s.watt_calc.extra_gear_note).desired_width(240.0));
-                                    ui.horizontal(|ui| {
-                                        ui.label("Wall Meter (0 = calc):");
-                                        ui.add(egui::DragValue::new(&mut s.watt_calc.wall_meter_override_w).range(0.0..=1500.0).suffix(" W"));
-                                    });
+                                ui.horizontal(|ui| {
+                                    ui.label("Efficiency:");
+                                    ui.add(egui::DragValue::new(&mut s.watt_calc.psu_efficiency_pct).range(60.0..=96.0).suffix("%"));
                                 });
-                                ui.end_row();
-
-                                ui.label("Component Idle (W):");
-                                ui.horizontal_wrapped(|ui| {
-                                    ui.horizontal(|ui| {
-                                        ui.label("CPU:");
-                                        ui.add(egui::DragValue::new(&mut s.watt_calc.cpu_idle_w).range(1.0..=300.0).suffix("W"));
-                                    });
-                                    ui.horizontal(|ui| {
-                                        ui.label("GPU:");
-                                        ui.add(egui::DragValue::new(&mut s.watt_calc.gpu_idle_w).range(0.0..=300.0).suffix("W"));
-                                    });
-                                    ui.horizontal(|ui| {
-                                        ui.label("Board/RAM/SSD:");
-                                        ui.add(egui::DragValue::new(&mut s.watt_calc.mobo_ram_ssd_fans_w).range(2.0..=150.0).suffix("W"));
-                                    });
-                                    ui.horizontal(|ui| {
-                                        ui.label("Extras:");
-                                        ui.add(egui::DragValue::new(&mut s.watt_calc.peripherals_w).range(0.0..=100.0).suffix("W"));
-                                    });
-                                    ui.horizontal(|ui| {
-                                        ui.label("Sleep:");
-                                        ui.add(egui::DragValue::new(&mut s.watt_calc.sleep_watts).range(0.5..=50.0).suffix("W"));
-                                    });
-                                });
-                                ui.end_row();
-
-                                ui.label("Usage & Electricity Rate:");
-                                ui.horizontal_wrapped(|ui| {
-                                    ui.horizontal(|ui| {
-                                        ui.label("Active/day:");
-                                        ui.add(egui::DragValue::new(&mut s.watt_calc.daily_active_hours).range(0.0..=24.0).speed(0.5).suffix("h"));
-                                    });
-                                    ui.horizontal(|ui| {
-                                        ui.label("Sleep/day:");
-                                        ui.add(egui::DragValue::new(&mut s.watt_calc.daily_idle_sleep_hours).range(0.0..=24.0).speed(0.5).suffix("h"));
-                                    });
-                                    ui.horizontal(|ui| {
-                                        ui.label("Currency:");
-                                        let selected_lbl = MAJOR_CURRENCIES
-                                            .iter()
-                                            .find(|c| c.symbol == s.config.currency_symbol)
-                                            .map(|c| c.code.to_string())
-                                            .unwrap_or_else(|| s.config.currency_symbol.clone());
-                                        egui::ComboBox::from_id_salt("calc_currency_combo")
-                                            .selected_text(selected_lbl)
-                                            .width(86.0)
-                                            .show_ui(ui, |ui| {
-                                                for c in MAJOR_CURRENCIES {
-                                                    if ui.selectable_label(s.config.currency_symbol == c.symbol, c.label).clicked() {
-                                                        s.config.currency_symbol = c.symbol.to_string();
-                                                        s.custom_currency_input = c.symbol.to_string();
-                                                        s.config_dirty = true;
-                                                    }
-                                                }
-                                            });
-                                    });
-                                    ui.horizontal(|ui| {
-                                        ui.label("Rate/kWh:");
-                                        let csym = s.config.currency_symbol.clone();
-                                        if ui.add(egui::DragValue::new(&mut s.config.electricity_rate_kwh).prefix(&csym).suffix("/kWh").range(0.01..=50000.0).speed(0.1)).changed() {
-                                            s.config_dirty = true;
-                                        }
-                                    });
-                                });
-                                ui.end_row();
                             });
+                            ui.add_space(5.0);
+
+                            ui.horizontal_wrapped(|ui| {
+                                ui.label(egui::RichText::new("Monitors:").strong().size(12.0));
+                                ui.horizontal(|ui| {
+                                    ui.label("Count:");
+                                    ui.add(egui::DragValue::new(&mut s.watt_calc.monitor_count).range(1..=6));
+                                });
+                                ui.horizontal(|ui| {
+                                    ui.label("Models:");
+                                    ui.add(egui::TextEdit::singleline(&mut s.watt_calc.monitor_models_note).desired_width(220.0));
+                                });
+                                ui.horizontal(|ui| {
+                                    ui.label("Each:");
+                                    ui.add(egui::DragValue::new(&mut s.watt_calc.monitor_each_w).range(5.0..=200.0).suffix(" W"));
+                                });
+                                ui.horizontal(|ui| {
+                                    ui.label("Wall Meter (0 = calc):");
+                                    ui.add(egui::DragValue::new(&mut s.watt_calc.wall_meter_override_w).range(0.0..=1500.0).suffix(" W"));
+                                });
+                            });
+                            ui.add_space(5.0);
+
+                            ui.horizontal_wrapped(|ui| {
+                                ui.label(egui::RichText::new("Cabinet Cooling & ARGB:").strong().size(12.0).color(egui::Color32::from_rgb(244, 63, 94)));
+                                ui.horizontal(|ui| {
+                                    ui.label("Case Fans:");
+                                    if ui.add(egui::DragValue::new(&mut s.watt_calc.case_fan_count).range(0..=20)).changed() {
+                                        any_spec_edited = true;
+                                    }
+                                });
+                                ui.horizontal(|ui| {
+                                    ui.label("ARGB Fans:");
+                                    if ui.add(egui::DragValue::new(&mut s.watt_calc.argb_fan_count).range(0..=20)).changed() {
+                                        any_spec_edited = true;
+                                    }
+                                });
+                                ui.horizontal(|ui| {
+                                    ui.label("Cooler:");
+                                    let cooler_selected = s.watt_calc.cooler_type.clone();
+                                    egui::ComboBox::from_id_salt("calc_cooler_combo")
+                                        .selected_text(cooler_selected)
+                                        .width(175.0)
+                                        .show_ui(ui, |ui| {
+                                            for opt in [
+                                                "Stock / Tower Air Cooler",
+                                                "Dual-Tower Air Cooler",
+                                                "120mm AIO Liquid Cooler",
+                                                "240mm AIO Liquid Cooler",
+                                                "360mm AIO Liquid Cooler",
+                                                "Custom Water Loop",
+                                                "Laptop Internal Cooling",
+                                            ] {
+                                                if ui.selectable_label(s.watt_calc.cooler_type == opt, opt).clicked() {
+                                                    s.watt_calc.cooler_type = opt.to_string();
+                                                    any_spec_edited = true;
+                                                }
+                                            }
+                                        });
+                                });
+                                if ui.checkbox(&mut s.watt_calc.has_rgb_strips_or_hub, "ARGB Hub / LED Strips").changed() {
+                                    any_spec_edited = true;
+                                }
+                            });
+                            ui.add_space(4.0);
+
+                            ui.horizontal_wrapped(|ui| {
+                                ui.label(egui::RichText::new("Quick Add:").weak().size(11.5));
+                                for (btn_lbl, target_cat, entry) in [
+                                    ("+ 3x 120mm ARGB Fans", "cabinet", "3x 120mm ARGB Case Fans"),
+                                    ("+ 240mm AIO", "cabinet", "240mm AIO Liquid Cooler"),
+                                    ("+ LED Strip / Hub", "cabinet", "ARGB Controller Hub & LED Strips"),
+                                    ("+ 2.1 Speakers", "audio", "2.1 Desktop Speakers"),
+                                    ("+ UPS Backup", "usb", "Desktop UPS Battery Backup"),
+                                ] {
+                                    if ui.small_button(btn_lbl).clicked() {
+                                        let dest = match target_cat {
+                                            "cabinet" => &mut s.detected_specs.cabinet_cooling,
+                                            "audio" => &mut s.detected_specs.audio_devices,
+                                            _ => &mut s.detected_specs.usb_peripherals,
+                                        };
+                                        if !dest.iter().any(|x| x.eq_ignore_ascii_case(entry)) {
+                                            dest.push(entry.to_string());
+                                            any_spec_edited = true;
+                                        }
+                                    }
+                                }
+                            });
+                            ui.add_space(5.0);
+
+                            ui.horizontal_wrapped(|ui| {
+                                ui.label(egui::RichText::new("Extra Notes:").strong().size(12.0));
+                                let note_w = (ui.available_width() - 95.0).clamp(180.0, 560.0);
+                                if ui.add(egui::TextEdit::singleline(&mut s.watt_calc.extra_gear_note).desired_width(note_w)).changed() {
+                                    any_spec_edited = true;
+                                }
+                            });
+                            ui.add_space(5.0);
+
+                            ui.horizontal_wrapped(|ui| {
+                                ui.label(egui::RichText::new("Component Idle (W):").strong().size(12.0));
+                                ui.horizontal(|ui| {
+                                    ui.label("CPU:");
+                                    ui.add(egui::DragValue::new(&mut s.watt_calc.cpu_idle_w).range(1.0..=300.0).suffix("W"));
+                                });
+                                ui.horizontal(|ui| {
+                                    ui.label("GPU:");
+                                    ui.add(egui::DragValue::new(&mut s.watt_calc.gpu_idle_w).range(0.0..=300.0).suffix("W"));
+                                });
+                                ui.horizontal(|ui| {
+                                    ui.label("Board/RAM/Fans:");
+                                    ui.add(egui::DragValue::new(&mut s.watt_calc.mobo_ram_ssd_fans_w).range(2.0..=150.0).suffix("W"));
+                                });
+                                ui.horizontal(|ui| {
+                                    ui.label("Extras:");
+                                    ui.add(egui::DragValue::new(&mut s.watt_calc.peripherals_w).range(0.0..=100.0).suffix("W"));
+                                });
+                                ui.horizontal(|ui| {
+                                    ui.label("Sleep:");
+                                    ui.add(egui::DragValue::new(&mut s.watt_calc.sleep_watts).range(0.5..=50.0).suffix("W"));
+                                });
+                            });
+                            ui.add_space(5.0);
+
+                            ui.horizontal_wrapped(|ui| {
+                                ui.label(egui::RichText::new("Usage & Electricity Rate:").strong().size(12.0));
+                                ui.horizontal(|ui| {
+                                    ui.label("Active/day:");
+                                    ui.add(egui::DragValue::new(&mut s.watt_calc.daily_active_hours).range(0.0..=24.0).speed(0.5).suffix("h"));
+                                });
+                                ui.horizontal(|ui| {
+                                    ui.label("Sleep/day:");
+                                    ui.add(egui::DragValue::new(&mut s.watt_calc.daily_idle_sleep_hours).range(0.0..=24.0).speed(0.5).suffix("h"));
+                                });
+                                ui.horizontal(|ui| {
+                                    ui.label("Currency:");
+                                    let selected_lbl = MAJOR_CURRENCIES
+                                        .iter()
+                                        .find(|c| c.symbol == s.config.currency_symbol)
+                                        .map(|c| c.code.to_string())
+                                        .unwrap_or_else(|| s.config.currency_symbol.clone());
+                                    egui::ComboBox::from_id_salt("calc_currency_combo")
+                                        .selected_text(selected_lbl)
+                                        .width(86.0)
+                                        .show_ui(ui, |ui| {
+                                            for c in MAJOR_CURRENCIES {
+                                                if ui.selectable_label(s.config.currency_symbol == c.symbol, c.label).clicked() {
+                                                    s.config.currency_symbol = c.symbol.to_string();
+                                                    s.custom_currency_input = c.symbol.to_string();
+                                                    s.config_dirty = true;
+                                                }
+                                            }
+                                        });
+                                });
+                                ui.horizontal(|ui| {
+                                    ui.label("Rate/kWh:");
+                                    let csym = s.config.currency_symbol.clone();
+                                    if ui.add(egui::DragValue::new(&mut s.config.electricity_rate_kwh).prefix(&csym).suffix("/kWh").range(0.01..=50000.0).speed(0.1)).changed() {
+                                        s.config_dirty = true;
+                                        any_spec_edited = true;
+                                    }
+                                });
+                            });
+
+                            if any_spec_edited && !s.watt_calc.generated_prompt.is_empty() {
+                                s.watt_calc.generated_prompt = build_ai_watt_prompt(
+                                    &s.detected_specs,
+                                    &s.watt_calc,
+                                    &s.config.currency_symbol,
+                                    s.config.electricity_rate_kwh,
+                                );
+                            }
 
                             ui.add_space(6.0);
                             let bd = s.watt_calc.compute_breakdown();
