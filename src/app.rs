@@ -24,6 +24,7 @@ use crate::intent::{
     get_info_guide_sections, BlockerInfo, MediaPromptAction, MicCamSnapshot, OperationalMode,
     PowerRequestOwner, UserIntent,
 };
+use crate::signal::SuggestedThresholds;
 
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
@@ -55,6 +56,10 @@ use windows_sys::Win32::System::SystemInformation::GetTickCount;
 use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 #[cfg(windows)]
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{GetLastInputInfo, LASTINPUTINFO};
+#[cfg(windows)]
+use windows_sys::Win32::UI::WindowsAndMessaging::{
+    SendMessageTimeoutW, HWND_BROADCAST, SC_MONITORPOWER, SMTO_ABORTIFHUNG, WM_SYSCOMMAND,
+};
 
 #[cfg(windows)]
 const CREATE_NO_WINDOW: u32 = 0x08000000;
@@ -1468,10 +1473,11 @@ pub struct SharedState {
     pub raw_pc_net_kbps: f32,
     pub top_disk_proc: String,
     pub top_disk_kbps: f32,
+    pub top_io_debug: Vec<(String, f32)>,
     pub stage1_display_off_allowed: bool,
     pub defer_display_off_for_monitor_audio: bool,
     pub monitor_off_triggered_this_idle: bool,
-    pub suggested_thresholds: Option<(f32, f32, f32)>,
+    pub suggested_thresholds: Option<SuggestedThresholds>,
     pub best_perf_locked_since: u64,
     pub last_media_prompt_notif: u64,
 
@@ -1590,6 +1596,7 @@ impl SharedState {
             raw_pc_net_kbps: 0.0,
             top_disk_proc: "None".to_string(),
             top_disk_kbps: 0.0,
+            top_io_debug: Vec::new(),
             stage1_display_off_allowed: false,
             defer_display_off_for_monitor_audio: false,
             monitor_off_triggered_this_idle: false,
@@ -2010,16 +2017,19 @@ pub fn get_idle_seconds() -> u32 {
 
 pub fn turn_off_monitors_now() {
     #[cfg(windows)]
-    {
-        let _ = Command::new("powershell")
-            .args([
-                "-NoProfile",
-                "-NonInteractive",
-                "-Command",
-                "(Add-Type -MemberDefinition '[DllImport(\"user32.dll\")] public static extern int SendMessage(int hWnd, int hMsg, int wParam, int lParam);' -Name 'Win32SendMsg' -Namespace Win32Functions -PassThru)::SendMessage(0xffff, 0x0112, 0xF170, 2) | Out-Null"
-            ])
-            .creation_flags(CREATE_NO_WINDOW)
-            .status();
+    unsafe {
+        // Native Win32 monitor power-off (SC_MONITORPOWER = 2) with abort-if-hung timeout;
+        // avoids spawning powershell + on-the-fly C# compilation under user idle.
+        let mut res: usize = 0;
+        SendMessageTimeoutW(
+            HWND_BROADCAST,
+            WM_SYSCOMMAND,
+            SC_MONITORPOWER as usize,
+            2,
+            SMTO_ABORTIFHUNG,
+            1000,
+            &mut res,
+        );
     }
 
     #[cfg(target_os = "linux")]
@@ -2640,11 +2650,12 @@ fn handle_http_client(
                     "unavailable": s.cond10_gpu.probe_unavailable.is_some(),
                     "detail": s.cond10_gpu.probe_unavailable.as_deref().unwrap_or(&s.cond10_gpu.value_text),
                 },
-                "suggested_thresholds": s.suggested_thresholds.map(|(cpu, gpu, disk)| serde_json::json!({
-                    "pc_cpu": cpu,
-                    "gpu": gpu,
-                    "disk_kbps": disk,
+                "suggested_thresholds": s.suggested_thresholds.map(|sug| serde_json::json!({
+                    "pc_cpu": sug.pc_cpu_pct,
+                    "disk_kbps": sug.disk_kbps,
+                    "net_kbps": sug.net_kbps,
                 })),
+                "top_io_debug": s.top_io_debug,
                 "cond1_pass": s.cond1_idle.is_passing,
                 "cond2_pass": s.cond2_agent_cpu.is_passing,
                 "cond3_pass": s.cond3_download.is_passing,
@@ -3890,10 +3901,12 @@ pub fn run_watchdog_loop(state: Arc<Mutex<SharedState>>, egui_ctx: Option<egui::
             s.live_download_kbps = enriched.max_dl_kbps;
             s.live_download_process_name = enriched.max_dl_proc.clone();
             s.live_pc_cpu_pct = self_adjusted_pc_cpu;
-            s.live_pc_disk_kbps = enriched.attributed_disk_kbps;
+            let effective_disk_now = enriched.attributed_disk_kbps.min(whole_pc_disk_kbps);
+            s.live_pc_disk_kbps = effective_disk_now;
             s.raw_pc_disk_kbps = whole_pc_disk_kbps;
             s.top_disk_proc = enriched.top_disk_proc.clone();
-            s.top_disk_kbps = enriched.top_disk_kbps;
+            s.top_disk_kbps = enriched.top_disk_kbps.min(whole_pc_disk_kbps);
+            s.top_io_debug = enriched.top_io_debug.clone();
             s.live_pc_net_kbps = filtered_pc_net_kbps;
             s.raw_pc_net_kbps = raw_pc_net_kbps;
             s.live_mic_active = mic_held;
@@ -3923,7 +3936,7 @@ pub fn run_watchdog_loop(state: Arc<Mutex<SharedState>>, egui_ctx: Option<egui::
             if s.history_pc_disk.len() >= HISTORY_LEN {
                 s.history_pc_disk.pop_front();
             }
-            s.history_pc_disk.push_back(enriched.attributed_disk_kbps);
+            s.history_pc_disk.push_back(effective_disk_now);
 
             if s.history_pc_net.len() >= HISTORY_LEN {
                 s.history_pc_net.pop_front();
@@ -3981,8 +3994,9 @@ pub fn run_watchdog_loop(state: Arc<Mutex<SharedState>>, egui_ctx: Option<egui::
                 gpu_power_mw: gpu_reading.power_mw,
                 gpu_health: gpu_reading.health,
                 attributed_disk_kbps: Some(enriched.attributed_disk_kbps),
+                raw_physical_disk_available: true,
                 top_disk_proc: enriched.top_disk_proc,
-                top_disk_kbps: enriched.top_disk_kbps,
+                top_disk_kbps: enriched.top_disk_kbps.min(whole_pc_disk_kbps),
                 default_route_net_kbps: Some(filtered_pc_net_kbps),
                 media: audio_reading.media,
                 mic_cam: MicCamSnapshot {
@@ -5147,10 +5161,13 @@ impl eframe::App for AgentPowerGuardApp {
 
                 if ui.button("⏱ 15s Test").clicked() {
                     s.config.idle_threshold_secs = 15;
+                    s.config.monitor_timeout_mins = 1;
+                    s.config.active_mode = PowerMode::Custom;
                     s.countdown_secs = 15;
                     s.countdown_max = 15;
                     s.config_dirty = true;
-                    s.set_toast("15-second quick test mode activated.");
+                    apply_monitor_timeout(1);
+                    s.set_toast("15s Test active (sleep 15s, display off 1m).");
                 }
 
                 if ui.button("⚙ Power Plan").clicked() {
@@ -5192,11 +5209,21 @@ impl eframe::App for AgentPowerGuardApp {
                 );
                 ui.separator();
                 let stage1_txt = if s.defer_display_off_for_monitor_audio {
-                    "Display-off: Protected (Monitor Audio)"
+                    "Display-off: Protected (Monitor Audio)".to_string()
                 } else if s.stage1_display_off_allowed {
-                    "Display-off: Allowed when idle"
+                    if !s.config.cond8_monitor_timeout_enabled {
+                        "Display-off: Disabled".to_string()
+                    } else if s.monitor_off_triggered_this_idle {
+                        "Display-off: Triggered".to_string()
+                    } else {
+                        format!(
+                            "Display-off: {}s / {}s",
+                            s.live_idle_secs,
+                            s.config.monitor_timeout_mins.saturating_mul(60)
+                        )
+                    }
                 } else {
-                    "Display-off: Held by Meeting / Active Video / Mode"
+                    "Display-off: Held by Meeting / Active Video / Mode".to_string()
                 };
                 ui.label(egui::RichText::new(stage1_txt).weak().size(11.0));
             });
@@ -5478,7 +5505,10 @@ impl eframe::App for AgentPowerGuardApp {
                                     };
                                     if ui.add(btn).clicked() {
                                         m.apply_to_config(&mut s.config);
+                                        s.countdown_secs = s.config.idle_threshold_secs;
+                                        s.countdown_max = s.config.idle_threshold_secs;
                                         s.config_dirty = true;
+                                        apply_monitor_timeout(s.config.monitor_timeout_mins);
                                         s.set_toast(format!("Activated {} Power Mode.", m.name()));
                                     }
                                 }
@@ -5557,6 +5587,7 @@ impl eframe::App for AgentPowerGuardApp {
                                     if ui.add(btn).clicked() {
                                         s.config.idle_threshold_secs = sleep_s;
                                         s.config.monitor_timeout_mins = mon_m;
+                                        s.config.active_mode = PowerMode::Custom;
                                         s.countdown_secs = sleep_s;
                                         s.countdown_max = sleep_s;
                                         s.config_dirty = true;
@@ -5737,7 +5768,7 @@ impl eframe::App for AgentPowerGuardApp {
                                 });
                             });
                             ui.label(egui::RichText::new(format!(
-                                "Attributed Disk: {:.0} KB/s (Top: {} {:.0} KB/s | Raw: {:.0} KB/s)",
+                                "Effective Disk: {:.0} KB/s (Top: {} {:.0} KB/s | Raw Physical SSD: {:.0} KB/s)",
                                 s.live_pc_disk_kbps, s.top_disk_proc, s.top_disk_kbps, s.raw_pc_disk_kbps
                             )).weak().size(11.0));
                             ui.horizontal(|ui| {
@@ -5749,6 +5780,28 @@ impl eframe::App for AgentPowerGuardApp {
                             ui.collapsing("Edit Background Disk Noise List", |ui| {
                                 if ui.text_edit_multiline(&mut s.config.disk_noise_processes).changed() {
                                     s.config_dirty = true;
+                                }
+                            });
+                            ui.collapsing("Debug: Physical Disk vs Process I/O (Top 5)", |ui| {
+                                ui.label(
+                                    egui::RichText::new(format!(
+                                        "Raw Physical SSD (IOCTL): {:.0} KB/s | Bounded Effective: {:.0} KB/s",
+                                        s.raw_pc_disk_kbps, s.live_pc_disk_kbps
+                                    ))
+                                    .size(11.0),
+                                );
+                                ui.label(
+                                    egui::RichText::new(
+                                        "Per-process GetProcessIoCounters includes pipes/IPC/network, so browsers/IDEs are bounded by physical disk I/O:",
+                                    )
+                                    .weak()
+                                    .size(10.5),
+                                );
+                                for (pname, pkbps) in &s.top_io_debug {
+                                    ui.label(
+                                        egui::RichText::new(format!("• {}: {:.0} KB/s", pname, pkbps))
+                                            .size(11.0),
+                                    );
                                 }
                             });
                         });
@@ -6248,10 +6301,10 @@ impl eframe::App for AgentPowerGuardApp {
                 ui.add_space(6.0);
 
                 // Adaptive Baseline Suggestion Banner (§8)
-                if let Some((sug_cpu, sug_gpu, sug_disk)) = s.suggested_thresholds {
-                    let needs_bump = sug_cpu > s.config.pc_cpu_threshold
-                        || sug_gpu > s.config.gpu_threshold_pct
-                        || sug_disk > s.config.pc_disk_threshold_kbps;
+                if let Some(sug) = s.suggested_thresholds {
+                    let needs_bump = sug.pc_cpu_pct > s.config.pc_cpu_threshold
+                        || sug.disk_kbps > s.config.pc_disk_threshold_kbps
+                        || sug.net_kbps > s.config.pc_net_threshold_kbps;
                     if needs_bump {
                         egui::Frame::new()
                             .fill(egui::Color32::from_rgb(23, 37, 84))
@@ -6261,17 +6314,18 @@ impl eframe::App for AgentPowerGuardApp {
                                 ui.horizontal(|ui| {
                                     ui.label(
                                         egui::RichText::new(format!(
-                                            "💡 Suggested idle floors from quiet periods: CPU {:.0}%, GPU {:.0}%, Disk {:.0} KB/s",
-                                            sug_cpu, sug_gpu, sug_disk
+                                            "💡 Suggested idle floors from quiet periods: CPU {:.0}%, Disk {:.0} KB/s, Net {:.0} KB/s",
+                                            sug.pc_cpu_pct, sug.disk_kbps, sug.net_kbps
                                         ))
                                         .color(egui::Color32::from_rgb(191, 219, 254))
                                         .size(11.5),
                                     );
                                     if ui.small_button("Apply Suggestions").clicked() {
-                                        s.config.pc_cpu_threshold = s.config.pc_cpu_threshold.max(sug_cpu);
-                                        s.config.gpu_threshold_pct = s.config.gpu_threshold_pct.max(sug_gpu);
+                                        s.config.pc_cpu_threshold = s.config.pc_cpu_threshold.max(sug.pc_cpu_pct);
                                         s.config.pc_disk_threshold_kbps =
-                                            s.config.pc_disk_threshold_kbps.max(sug_disk);
+                                            s.config.pc_disk_threshold_kbps.max(sug.disk_kbps);
+                                        s.config.pc_net_threshold_kbps =
+                                            s.config.pc_net_threshold_kbps.max(sug.net_kbps);
                                         s.config_dirty = true;
                                         s.set_toast("Applied adaptive idle baseline thresholds.");
                                     }

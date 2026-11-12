@@ -32,7 +32,7 @@ use crate::intent::{
 };
 use crate::signal::{
     AdaptiveBaselineSuggester, GpuBaselineTracker, MicSignalState, ProbeHealth, SignalFilter,
-    SignalFilterConfig, SignalState,
+    SignalFilterConfig, SignalState, SuggestedThresholds,
 };
 
 /// Plain subset of `AppConfig` needed for pure decision evaluation.
@@ -206,6 +206,7 @@ pub struct Metrics {
     // Intent-aware enriched probe inputs
     pub gpu_power_mw: Option<u32>,
     pub gpu_health: ProbeHealth,
+    pub raw_physical_disk_available: bool,
     pub attributed_disk_kbps: Option<f32>,
     pub top_disk_proc: String,
     pub top_disk_kbps: f32,
@@ -220,7 +221,11 @@ pub struct Metrics {
 
 impl Metrics {
     pub fn effective_disk_kbps(&self) -> f32 {
-        self.attributed_disk_kbps.unwrap_or(self.whole_pc_disk_kbps)
+        match self.attributed_disk_kbps {
+            Some(attr) if self.raw_physical_disk_available => attr.min(self.whole_pc_disk_kbps),
+            Some(attr) => attr,
+            None => self.whole_pc_disk_kbps,
+        }
     }
 
     pub fn effective_net_kbps(&self) -> f32 {
@@ -348,7 +353,7 @@ pub struct Decision {
     pub gpu_idle_floor_pct: f32,
 
     // Adaptive suggestion (§8)
-    pub suggested_thresholds: Option<(f32, f32, f32)>,
+    pub suggested_thresholds: Option<SuggestedThresholds>,
 
     pub cond1_idle: ConditionStatus,
     pub cond2_agent_cpu: ConditionStatus,
@@ -715,48 +720,57 @@ pub fn evaluate(config: &EvalConfig, metrics: &Metrics, state: &mut EvaluationSt
         ));
     }
 
-    // Condition 5: Attributed Disk I/O (Analog -> std_cfg, §5.2)
+    // Condition 5: Attributed Disk I/O (Physical-Disk-Bounded + Signal Filter, §5.2)
     let cond5_state = state.disk_filter.update(
         effective_disk_kbps >= config.pc_disk_threshold_kbps,
         std_cfg,
     );
     let cond5_pass = !cond5_state.is_blocking();
-    let disk_who = if !metrics.top_disk_proc.is_empty() && metrics.top_disk_proc != "None" {
+    let has_top_disk_proc = !metrics.top_disk_proc.is_empty() && metrics.top_disk_proc != "None";
+    let disk_who = if has_top_disk_proc {
         metrics.top_disk_proc.clone()
     } else {
-        "Disk Activity".to_string()
+        "Physical Disk".to_string()
     };
-    let disk_rate_str = if effective_disk_kbps >= 1024.0 {
-        format!("{:.1} MB/s", effective_disk_kbps / 1024.0)
+    let format_kbps = |kbps: f32| -> String {
+        if kbps >= 1024.0 {
+            format!("{:.1} MB/s", kbps / 1024.0)
+        } else {
+            format!("{:.0} KB/s", kbps)
+        }
+    };
+    let disk_rate_str = format_kbps(effective_disk_kbps);
+    let top_proc_rate_str = format_kbps(metrics.top_disk_kbps);
+    let blocker_value_str = if has_top_disk_proc && metrics.top_disk_kbps > 0.0 {
+        format!("{} (Disk {})", top_proc_rate_str, disk_rate_str)
     } else {
-        format!("{:.0} KB/s", effective_disk_kbps)
+        disk_rate_str.clone()
     };
     let cond5_pc_disk = ConditionStatus {
         enabled: config.cond5_pc_disk_enabled,
         is_passing: cond5_pass,
-        value_text: if metrics.attributed_disk_kbps.is_some()
-            && !metrics.top_disk_proc.is_empty()
-            && metrics.top_disk_proc != "None"
-        {
+        value_text: if metrics.attributed_disk_kbps.is_some() && has_top_disk_proc {
             format!(
-                "{} ({}) | Raw: {:.0} KB/s [{}/{}]",
+                "{} | Top: {} {} | Raw SSD: {:.0} KB/s [{}/{}]",
                 disk_rate_str,
                 disk_who,
+                top_proc_rate_str,
                 metrics.whole_pc_disk_kbps,
                 state.disk_filter.above_count(),
                 state.disk_filter.window_len()
             )
         } else {
             format!(
-                "{} [{}/{}]",
+                "{} | Raw SSD: {:.0} KB/s [{}/{}]",
                 disk_rate_str,
+                metrics.whole_pc_disk_kbps,
                 state.disk_filter.above_count(),
                 state.disk_filter.window_len()
             )
         },
         threshold_text: format!("< {:.0} KB/s", config.pc_disk_threshold_kbps),
         blocker_detail: if !cond5_pass && config.cond5_pc_disk_enabled {
-            Some(format!("Disk I/O: {} {}", disk_who, disk_rate_str))
+            Some(format!("Disk I/O: {} {}", disk_who, blocker_value_str))
         } else {
             None
         },
@@ -765,8 +779,7 @@ pub fn evaluate(config: &EvalConfig, metrics: &Metrics, state: &mut EvaluationSt
     if config.cond5_pc_disk_enabled && !cond5_pass {
         is_active_work = true;
         active_work_labels.push(format!("Disk: {}", disk_who));
-        let ignore_target = if !metrics.top_disk_proc.is_empty() && metrics.top_disk_proc != "None"
-        {
+        let ignore_target = if has_top_disk_proc {
             Some(metrics.top_disk_proc.clone())
         } else {
             None
@@ -775,10 +788,10 @@ pub fn evaluate(config: &EvalConfig, metrics: &Metrics, state: &mut EvaluationSt
             5,
             "Disk I/O",
             &disk_who,
-            &disk_rate_str,
+            &blocker_value_str,
             ignore_target,
             Some("disk_noise".to_string()),
-            format!("Blocked by disk I/O: {} {}", disk_who, disk_rate_str),
+            format!("Blocked by disk I/O: {} {}", disk_who, blocker_value_str),
         ));
     }
 
@@ -1583,7 +1596,10 @@ pub fn evaluate(config: &EvalConfig, metrics: &Metrics, state: &mut EvaluationSt
     let stage1_display_off_allowed = match mode {
         OperationalMode::BestPerformance | OperationalMode::GuardOff => false,
         OperationalMode::SmartGuard => {
-            !is_human_active && !cond9_effective_active && !defer_display_off_for_monitor_audio
+            !is_human_active
+                && !is_meeting_live
+                && !cond9_effective_active
+                && !defer_display_off_for_monitor_audio
         }
     };
     let hold_os_wake_lock = mode == OperationalMode::BestPerformance;
@@ -2147,5 +2163,70 @@ mod tests {
         );
         assert!(d.cond9_power_requests.probe_unavailable.is_some());
         assert!(d.all_conditions_pass);
+    }
+
+    /// T16: Windows GetProcessIoCounters inflated to 10.7 MB/s by non-disk IPC while real physical disk is ~184 KB/s.
+    /// Must NOT block Cond 5 or Cond 7, and Stage 1 display-off must stay allowed.
+    #[test]
+    fn replay_t16_inflated_non_disk_ipc_passes_with_low_physical_disk() {
+        let mut cfg = base_config();
+        cfg.idle_threshold_secs = 15;
+        cfg.pc_disk_threshold_kbps = 5000.0;
+        let mut st = fresh_state(&cfg, 1000);
+
+        for t in 0..30u64 {
+            let mut m = passing_metrics(1000 + t);
+            m.idle_secs = 60 + t as u32;
+            m.raw_physical_disk_available = true;
+            m.whole_pc_disk_kbps = 184.0; // real SSD physical activity
+            m.attributed_disk_kbps = Some(10864.0); // inflated pipe/IPC logical counters
+            m.top_disk_proc = "someproc.exe".to_string();
+            m.top_disk_kbps = 2966.0;
+            let d = evaluate(&cfg, &m, &mut st);
+            assert!(d.cond5_pc_disk.is_passing, "T16 failed at t={}", t);
+            assert!(d.cond7_spike_filter.is_passing);
+            assert!(d.all_conditions_pass);
+            assert!(d.stage1_display_off_allowed);
+        }
+    }
+
+    /// T17: User idle for 2 minutes with silent browser open (no active SMTC/render audio, low physical disk) -> sleeps cleanly.
+    #[test]
+    fn replay_t17_browser_open_idle_2min_sleeps_cleanly() {
+        let mut cfg = base_config();
+        cfg.idle_threshold_secs = 15;
+        let mut st = fresh_state(&cfg, 2000);
+        let mut slept = false;
+
+        for t in 0..20u64 {
+            let mut m = passing_metrics(2000 + t);
+            m.idle_secs = 120 + t as u32;
+            m.raw_physical_disk_available = true;
+            m.whole_pc_disk_kbps = 120.0;
+            m.attributed_disk_kbps = Some(0.0); // browser IPC excluded
+            m.default_route_net_kbps = Some(if t == 5 { 180.0 } else { 2.0 }); // small telemetry blip
+            let d = evaluate(&cfg, &m, &mut st);
+            assert!(d.stage1_display_off_allowed);
+            if d.trigger_sleep {
+                slept = true;
+            }
+        }
+        assert!(
+            slept,
+            "T17 must trigger sleep when idle with silent browser"
+        );
+    }
+
+    #[test]
+    fn test_stage1_blocked_during_live_meeting() {
+        let cfg = base_config();
+        let mut st = fresh_state(&cfg, 1000);
+        let mut m = passing_metrics(1000);
+        m.mic_cam.mic_held = true;
+        m.mic_cam.holder_app = "zoom.exe".to_string();
+        m.mic_cam.capture_peak = 0.08;
+        let d = evaluate(&cfg, &m, &mut st);
+        assert!(matches!(d.intent, UserIntent::MeetingLive { .. }));
+        assert!(!d.stage1_display_off_allowed);
     }
 }

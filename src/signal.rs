@@ -325,6 +325,14 @@ impl MicSignalClassifier {
     }
 }
 
+/// Named adaptive threshold suggestions (eliminates positional tuple mismatches).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SuggestedThresholds {
+    pub pc_cpu_pct: f32,
+    pub disk_kbps: f32,
+    pub net_kbps: f32,
+}
+
 /// Passive adaptive baseline suggester (§8): observes idle background levels during quiet
 /// user-idle periods and surfaces gentle threshold suggestions without silently editing config.
 #[derive(Debug, Clone, Default)]
@@ -344,18 +352,18 @@ impl AdaptiveBaselineSuggester {
         push_cap(&mut self.net_samples, net_kbps, 180);
     }
 
-    pub fn suggested_thresholds(&self) -> Option<(f32, f32, f32)> {
+    pub fn suggested_thresholds(&self) -> Option<SuggestedThresholds> {
         if self.cpu_samples.len() < 60 {
             return None;
         }
         let cpu_p90 = low_percentile_f32(&self.cpu_samples, 0.90);
         let disk_p90 = low_percentile_f32(&self.disk_samples, 0.90);
         let net_p90 = low_percentile_f32(&self.net_samples, 0.90);
-        Some((
-            (cpu_p90 + 10.0).clamp(15.0, 60.0).round(),
-            (disk_p90 + 2000.0).clamp(3000.0, 25000.0).round(),
-            (net_p90 + 150.0).clamp(150.0, 2000.0).round(),
-        ))
+        Some(SuggestedThresholds {
+            pc_cpu_pct: (cpu_p90 + 10.0).clamp(15.0, 60.0).round(),
+            disk_kbps: (disk_p90 + 2000.0).clamp(3000.0, 25000.0).round(),
+            net_kbps: (net_p90 + 150.0).clamp(150.0, 2000.0).round(),
+        })
     }
 }
 
@@ -475,5 +483,19 @@ mod tests {
             active.observe(v);
         }
         assert_eq!(active.classify_instant(), MicSignalState::Active);
+    }
+
+    #[test]
+    fn test_adaptive_baseline_suggester_named_fields() {
+        let mut suggester = AdaptiveBaselineSuggester::default();
+        for _ in 0..60 {
+            suggester.observe_idle(19.0, 11302.0, 23.0, 90);
+        }
+        let sug = suggester
+            .suggested_thresholds()
+            .expect("expected idle floor suggestions after 60 samples");
+        assert!((sug.pc_cpu_pct - 29.0).abs() < 0.1);
+        assert!((sug.disk_kbps - 13302.0).abs() < 0.1);
+        assert!((sug.net_kbps - 173.0).abs() < 0.1);
     }
 }

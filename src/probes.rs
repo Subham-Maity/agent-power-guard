@@ -1124,6 +1124,13 @@ pub struct EnrichedProcessSummary {
     pub lease_tree_disk_kbps: f32,
     pub holder_render_audio_active: bool,
     pub top_processes: Vec<ProcessSampleRow>,
+    pub top_io_debug: Vec<(String, f32)>,
+}
+
+pub fn is_ipc_browser_or_helper(lower_name: &str) -> bool {
+    crate::intent::is_browser_process(lower_name)
+        || lower_name.contains("webview")
+        || lower_name.contains("crashpad")
 }
 
 #[derive(Debug, Clone)]
@@ -1248,6 +1255,7 @@ pub fn sample_processes_enriched(
     let mut top_disk_proc = "None".to_string();
     let mut top_disk_kbps = 0.0f32;
     let mut top_processes = Vec::new();
+    let mut top_io_debug: Vec<(String, f32)> = Vec::new();
     let mut holder_render_audio_active = false;
     let holder_lower = mic_holder_app.to_lowercase();
 
@@ -1297,8 +1305,15 @@ pub fn sample_processes_enriched(
             max_dl_proc = n.raw_name.clone();
         }
 
+        // Raw per-process Read+Write counter debug list (all non-trivial I/O processes)
+        if n.disk_kbps > 0.5 {
+            top_io_debug.push((n.raw_name.clone(), n.disk_kbps));
+        }
+
         // Disk I/O Attribution (§5.2) excluding Defender / SearchIndexer / servicing noise
-        let is_disk_noise = disk_noise_keywords.iter().any(|k| n.lower.contains(k));
+        // and browsers/WebView helpers (on Windows GetProcessIoCounters counts pipe/Mojo IPC).
+        let is_disk_noise = disk_noise_keywords.iter().any(|k| n.lower.contains(k))
+            || is_ipc_browser_or_helper(&n.lower);
         if !is_disk_noise && n.disk_kbps > 0.5 {
             attributed_disk_kbps += n.disk_kbps;
             if n.disk_kbps > top_disk_kbps {
@@ -1317,6 +1332,9 @@ pub fn sample_processes_enriched(
             .unwrap_or(std::cmp::Ordering::Equal)
     });
     top_processes.truncate(8);
+
+    top_io_debug.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    top_io_debug.truncate(5);
 
     let (lease_tree_cpu, lease_tree_disk_kbps, _) = if let Some(lpid) = lease_pid {
         collect_subtree(lpid, false)
@@ -1337,12 +1355,22 @@ pub fn sample_processes_enriched(
         lease_tree_disk_kbps,
         holder_render_audio_active,
         top_processes,
+        top_io_debug,
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_browser_excluded_from_ipc_disk_attribution() {
+        assert!(is_ipc_browser_or_helper("msedge.exe"));
+        assert!(is_ipc_browser_or_helper("msedgewebview2.exe"));
+        assert!(is_ipc_browser_or_helper("chrome.exe"));
+        assert!(!is_ipc_browser_or_helper("cargo.exe"));
+        assert!(!is_ipc_browser_or_helper("rustc.exe"));
+    }
 
     #[test]
     fn test_powercfg_requests_parsing_and_elevation_detection() {
