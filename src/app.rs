@@ -8,6 +8,7 @@ pub mod intent;
 pub mod probes;
 pub mod qr;
 pub mod signal;
+pub mod watt_calc;
 
 use std::collections::VecDeque;
 use std::io::{Read, Write};
@@ -25,6 +26,10 @@ use crate::intent::{
     PowerRequestOwner, UserIntent,
 };
 use crate::signal::SuggestedThresholds;
+use crate::watt_calc::{
+    build_ai_watt_prompt, compute_power_projection, normalize_currency_input,
+    parse_ai_watt_response, DetectedSystemSpecs, WattCalculatorState, MAJOR_CURRENCIES,
+};
 
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
@@ -791,7 +796,11 @@ pub fn format_human_duration(secs: u64) -> String {
 
 pub fn is_newer_version(remote: &str, current: &str) -> bool {
     let parse_parts = |s: &str| -> Vec<u32> {
-        s.trim_start_matches('v')
+        s.trim()
+            .trim_start_matches('v')
+            .split(['-', '+'])
+            .next()
+            .unwrap_or("")
             .split('.')
             .filter_map(|p| p.parse::<u32>().ok())
             .collect()
@@ -1354,6 +1363,23 @@ pub struct ProcessCpuInfo {
     pub is_ignored: bool,
 }
 
+#[derive(Debug, Clone)]
+pub struct ReleaseAssetInfo {
+    pub name: String,
+    pub download_url: String,
+    pub size_bytes: u64,
+}
+
+#[derive(Debug, Clone)]
+pub struct ReleaseEntry {
+    pub tag: String,
+    pub name: String,
+    pub published_at: String,
+    pub body: String,
+    pub prerelease: bool,
+    pub assets: Vec<ReleaseAssetInfo>,
+}
+
 pub struct SharedState {
     pub config: AppConfig,
     pub config_dirty: bool,
@@ -1440,10 +1466,27 @@ pub struct SharedState {
     pub last_guard_paused_notif: u64,
     pub guard_paused_since: u64,
 
-    // Phase 2.3: Update Check
+    // Phase 2.3: Update Check & In-Panel Auto-Updater
     pub update_available: Option<String>,
+    pub update_latest_tag: Option<String>,
     pub update_check_in_progress: bool,
     pub update_check_status_msg: Option<String>,
+    pub available_releases: Vec<ReleaseEntry>,
+    pub update_download_in_progress: bool,
+    pub update_downloaded_path: Option<PathBuf>,
+    pub update_downloaded_version: Option<String>,
+    pub update_install_prompt_open: bool,
+
+    // Hardware Watt Calculator, AI Spec Prompt & Custom Currency
+    pub detected_specs: DetectedSystemSpecs,
+    pub watt_calc: WattCalculatorState,
+    pub show_watt_calc_modal: bool,
+    pub custom_currency_input: String,
+
+    // Built-in Uninstaller UI state
+    pub show_uninstall_modal: bool,
+    pub uninstall_wipe_data: bool,
+    pub uninstall_status_msg: Option<String>,
 
     // Phase 3: Battery & Power Status
     pub live_battery_status: BatteryStatus,
@@ -1569,8 +1612,27 @@ impl SharedState {
             guard_paused_since: now_s,
 
             update_available: None,
+            update_latest_tag: None,
             update_check_in_progress: false,
             update_check_status_msg: None,
+            available_releases: Vec::new(),
+            update_download_in_progress: false,
+            update_downloaded_path: None,
+            update_downloaded_version: None,
+            update_install_prompt_open: false,
+
+            detected_specs: DetectedSystemSpecs::default(),
+            watt_calc: WattCalculatorState {
+                monitor_each_w: config.monitor_watts,
+                sleep_watts: config.sleep_watts,
+                ..Default::default()
+            },
+            show_watt_calc_modal: false,
+            custom_currency_input: config.currency_symbol.clone(),
+
+            show_uninstall_modal: false,
+            uninstall_wipe_data: false,
+            uninstall_status_msg: None,
 
             live_battery_status: get_battery_status(),
             top_processes: Vec::new(),
@@ -2098,22 +2160,28 @@ pub fn apply_optimal_power_plan(monitor_timeout_mins: u32) {
     }
 }
 
-pub fn override_audio_browser_power_requests() {
+pub fn override_audio_browser_power_requests() -> Result<usize, String> {
     #[cfg(windows)]
     {
         let callers = [
             ("DRIVER", "High Definition Audio Device"),
             ("DRIVER", "Realtek High Definition Audio"),
+            ("DRIVER", "VB-Audio Virtual Cable (ROOT\\MEDIA\\0001)"),
+            ("DRIVER", "VB-Audio VoiceMeeter VAIO"),
+            ("DRIVER", "FxSound Audio Enhancer (ROOT\\MEDIA\\0000)"),
+            ("DRIVER", "USB Audio 2.0"),
+            ("DRIVER", "Legacy Kernel Caller"),
             ("PROCESS", "msedge.exe"),
             ("PROCESS", "chrome.exe"),
             ("PROCESS", "brave.exe"),
             ("PROCESS", "firefox.exe"),
             ("PROCESS", "IDMan.exe"),
-            ("DRIVER", "VB-Audio VoiceMeeter VAIO"),
         ];
 
+        let mut ok_count = 0usize;
+        let mut last_err = String::new();
         for (caller_type, name) in callers {
-            let _ = Command::new("powercfg")
+            match Command::new("powercfg")
                 .args([
                     "/requestsoverride",
                     caller_type,
@@ -2123,8 +2191,40 @@ pub fn override_audio_browser_power_requests() {
                     "AWAYMODE",
                 ])
                 .creation_flags(CREATE_NO_WINDOW)
-                .status();
+                .output()
+            {
+                Ok(out) if out.status.success() => ok_count += 1,
+                Ok(out) => {
+                    let msg = format!(
+                        "{} {}",
+                        String::from_utf8_lossy(&out.stderr),
+                        String::from_utf8_lossy(&out.stdout)
+                    );
+                    if !msg.trim().is_empty() {
+                        last_err = msg.trim().to_string();
+                    }
+                }
+                Err(e) => {
+                    last_err = e.to_string();
+                }
+            }
         }
+        if ok_count == 0 {
+            let low = last_err.to_lowercase();
+            if low.contains("administrator") || low.contains("access") || low.contains("denied") {
+                return Err("Access denied: Run Agent Power Guard as Administrator once to register powercfg overrides.".to_string());
+            }
+            return Err(if last_err.is_empty() {
+                "powercfg /requestsoverride failed (Administrator privileges required).".to_string()
+            } else {
+                format!("powercfg override failed: {}", last_err)
+            });
+        }
+        Ok(ok_count)
+    }
+    #[cfg(not(windows))]
+    {
+        Ok(0)
     }
 }
 
@@ -3184,9 +3284,14 @@ fn start_web_server(state: Arc<Mutex<SharedState>>, port: u16, rate_limiter: Arc
 
 fn send_cli_request(path: &str) -> Result<String, String> {
     let token = get_or_create_api_token();
-    let mut stream = TcpStream::connect("127.0.0.1:49281")
-        .map_err(|e| format!("Could not connect to running Agent Power Guard instance on 127.0.0.1:49281 (Is the app running?): {}", e))?;
-    let req = format!("GET {} HTTP/1.1\r\nHost: 127.0.0.1:49281\r\nAuthorization: Bearer {}\r\nConnection: close\r\n\r\n", path, token);
+    let port = AppConfig::load().web_server_port;
+    let addr = format!("127.0.0.1:{}", port);
+    let mut stream = TcpStream::connect(&addr)
+        .map_err(|e| format!("Could not connect to running Agent Power Guard instance on {} (Is the app running?): {}", addr, e))?;
+    let req = format!(
+        "GET {} HTTP/1.1\r\nHost: {}\r\nAuthorization: Bearer {}\r\nConnection: close\r\n\r\n",
+        path, addr, token
+    );
     stream
         .write_all(req.as_bytes())
         .map_err(|e| e.to_string())?;
@@ -3622,7 +3727,8 @@ fn handle_cli_command(args: &[String]) {
                     if let Some(pid) = v["agent_lease_pid"].as_u64() {
                         println!("Bound Process PID: {}", pid);
                     }
-                    println!("Local Web URL    : http://{}:49281", v["local_ip"]);
+                    let port = AppConfig::load().web_server_port;
+                    println!("Local Web URL    : http://{}:{}", v["local_ip"], port);
                     println!("==================================================");
                 } else {
                     println!("{}", resp);
@@ -4245,7 +4351,7 @@ pub fn run_watchdog_loop(state: Arc<Mutex<SharedState>>, egui_ctx: Option<egui::
             {
                 s.config.last_update_check_epoch_secs = now_wall;
                 s.config_dirty = true;
-                trigger_update_check(state.clone());
+                trigger_update_check_locked(&mut s, Arc::clone(&state));
             }
 
             // Auto-save configuration if dirty
@@ -4267,13 +4373,21 @@ pub fn run_watchdog_loop(state: Arc<Mutex<SharedState>>, egui_ctx: Option<egui::
             turn_off_monitors_now();
         }
 
-        // Execute sleep outside of mutex lock
+        // Execute sleep outside of mutex lock, measuring real wall-clock sleep duration
         if trigger_sleep {
+            let before_sleep = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
             let ok = sleep_now();
+            let after_sleep = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
             let mut s = state.lock().unwrap();
             if ok {
-                let idle_dur = s.config.idle_threshold_secs as u64;
-                s.log_energy_event("sleep", idle_dur);
+                let slept_secs = after_sleep.saturating_sub(before_sleep).max(60);
+                s.log_energy_event("sleep", slept_secs);
             } else {
                 s.set_toast(
                     "Sleep trigger returned false (Check OS sleep permissions / powercfg).",
@@ -4304,10 +4418,10 @@ pub fn run_headless_daemon() {
     if config.run_at_startup {
         set_startup_task(true);
     }
+    let port = config.web_server_port;
     let state = Arc::new(Mutex::new(SharedState::new(config)));
     let rate_limiter = Arc::new(RateLimiter::new());
 
-    let port = 49281;
     start_web_server(Arc::clone(&state), port, rate_limiter);
     let token = get_or_create_api_token();
     println!("Watchdog daemon active.");
@@ -4438,9 +4552,13 @@ pub fn uninstall_service() {
 }
 
 pub fn service_status() {
+    let port = AppConfig::load().web_server_port;
     match send_cli_request("/api/status") {
         Ok(_) => {
-            println!("Agent Power Guard Background Watchdog: ACTIVE (Running on port 49281)");
+            println!(
+                "Agent Power Guard Background Watchdog: ACTIVE (Running on port {})",
+                port
+            );
         }
         Err(_) => {
             println!("Agent Power Guard Background Watchdog: STOPPED / NOT RUNNING");
@@ -4599,66 +4717,716 @@ pub fn open_url(url: &str) {
     let _ = Command::new("open").arg(url).status();
 }
 
-pub fn trigger_update_check(state: Arc<Mutex<SharedState>>) {
-    {
-        let mut s = state.lock().unwrap();
-        if s.update_check_in_progress {
-            return;
-        }
-        s.update_check_in_progress = true;
-        s.update_check_status_msg = Some("Checking GitHub Releases...".to_string());
+pub fn parse_releases_json(raw: &[u8]) -> Result<Vec<ReleaseEntry>, String> {
+    let val: serde_json::Value = serde_json::from_slice(raw)
+        .map_err(|e| format!("Failed to parse GitHub releases JSON: {}", e))?;
+
+    if let Some(msg) = val.get("message").and_then(|m| m.as_str()) {
+        return Err(format!("GitHub API: {}", msg));
     }
 
-    std::thread::spawn(move || {
-        let mut cmd = Command::new("curl");
-        #[cfg(windows)]
-        cmd.creation_flags(CREATE_NO_WINDOW);
-        cmd.args([
-            "-s",
-            "--max-time",
-            "10",
-            "--connect-timeout",
-            "5",
-            "-H",
-            &format!("User-Agent: AgentPowerGuard/{}", env!("CARGO_PKG_VERSION")),
-            "https://api.github.com/repos/Subham-Maity/agent-power-guard/releases/latest",
-        ]);
+    let items: Vec<serde_json::Value> = if let Some(arr) = val.as_array() {
+        arr.clone()
+    } else if val.get("tag_name").is_some() {
+        vec![val]
+    } else {
+        return Err("Unexpected GitHub Releases response format.".to_string());
+    };
 
-        let res = cmd.output();
+    let mut releases = Vec::new();
+    for item in items {
+        if item.get("draft").and_then(|d| d.as_bool()).unwrap_or(false) {
+            continue;
+        }
+        let Some(tag) = item.get("tag_name").and_then(|t| t.as_str()) else {
+            continue;
+        };
+        let prerelease = item
+            .get("prerelease")
+            .and_then(|p| p.as_bool())
+            .unwrap_or(false);
+        let name = item
+            .get("name")
+            .and_then(|n| n.as_str())
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or(tag)
+            .to_string();
+        let published_at = item
+            .get("published_at")
+            .and_then(|p| p.as_str())
+            .map(|s| s.chars().take(10).collect::<String>())
+            .unwrap_or_default();
+        let body = item
+            .get("body")
+            .and_then(|b| b.as_str())
+            .unwrap_or("")
+            .to_string();
+
+        let mut assets = Vec::new();
+        if let Some(arr) = item.get("assets").and_then(|a| a.as_array()) {
+            for a in arr {
+                if let (Some(aname), Some(url)) = (
+                    a.get("name").and_then(|n| n.as_str()),
+                    a.get("browser_download_url").and_then(|u| u.as_str()),
+                ) {
+                    assets.push(ReleaseAssetInfo {
+                        name: aname.to_string(),
+                        download_url: url.to_string(),
+                        size_bytes: a.get("size").and_then(|s| s.as_u64()).unwrap_or(0),
+                    });
+                }
+            }
+        }
+
+        releases.push(ReleaseEntry {
+            tag: tag.to_string(),
+            name,
+            published_at,
+            body,
+            prerelease,
+            assets,
+        });
+    }
+
+    // Sort highest version first; non-prerelease takes precedence on equal base versions.
+    releases.sort_by(|a, b| {
+        if is_newer_version(&a.tag, &b.tag) {
+            std::cmp::Ordering::Less
+        } else if is_newer_version(&b.tag, &a.tag) {
+            std::cmp::Ordering::Greater
+        } else {
+            a.prerelease.cmp(&b.prerelease)
+        }
+    });
+
+    Ok(releases)
+}
+
+pub fn pick_latest_release(releases: &[ReleaseEntry]) -> Option<&ReleaseEntry> {
+    releases
+        .iter()
+        .find(|r| !r.prerelease)
+        .or_else(|| releases.first())
+}
+
+pub fn select_platform_asset(
+    release: &ReleaseEntry,
+    running_in_program_files: bool,
+) -> Option<&ReleaseAssetInfo> {
+    #[cfg(windows)]
+    {
+        if running_in_program_files {
+            if let Some(msi) = release
+                .assets
+                .iter()
+                .find(|a| a.name.to_lowercase().ends_with(".msi"))
+            {
+                return Some(msi);
+            }
+        }
+        if let Some(exe) = release
+            .assets
+            .iter()
+            .find(|a| a.name.to_lowercase().ends_with(".exe"))
+        {
+            return Some(exe);
+        }
+        release
+            .assets
+            .iter()
+            .find(|a| a.name.to_lowercase().ends_with(".msi"))
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let _ = running_in_program_files;
+        release
+            .assets
+            .iter()
+            .find(|a| a.name.contains("linux") && a.name.ends_with(".tar.gz"))
+            .or_else(|| release.assets.iter().find(|a| a.name.ends_with(".deb")))
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let _ = running_in_program_files;
+        let arch_key = if cfg!(target_arch = "aarch64") {
+            "aarch64"
+        } else {
+            "x86_64"
+        };
+        release
+            .assets
+            .iter()
+            .find(|a| {
+                a.name.contains("macos") && a.name.contains(arch_key) && a.name.ends_with(".tar.gz")
+            })
+            .or_else(|| release.assets.iter().find(|a| a.name.ends_with(".zip")))
+    }
+}
+
+pub fn cleanup_old_update_backup() {
+    if let Ok(exe) = std::env::current_exe() {
+        let old = exe.with_extension("exe.old");
+        if old.exists() {
+            let _ = std::fs::remove_file(&old);
+        }
+        let old_unix = exe.with_extension("old");
+        if old_unix.exists() {
+            let _ = std::fs::remove_file(&old_unix);
+        }
+    }
+}
+
+fn fetch_github_releases_blocking() -> Result<Vec<ReleaseEntry>, String> {
+    let mut cmd = Command::new("curl");
+    #[cfg(windows)]
+    cmd.creation_flags(CREATE_NO_WINDOW);
+    cmd.args([
+        "-sL",
+        "--max-time",
+        "12",
+        "--connect-timeout",
+        "6",
+        "-H",
+        "Accept: application/vnd.github+json",
+        "-H",
+        &format!("User-Agent: AgentPowerGuard/{}", env!("CARGO_PKG_VERSION")),
+        "https://api.github.com/repos/Subham-Maity/agent-power-guard/releases?per_page=20",
+    ]);
+
+    let output = cmd.output().map_err(|e| format!("curl failed: {}", e))?;
+    if !output.status.success() {
+        return Err(format!(
+            "GitHub API request failed (exit {:?})",
+            output.status.code()
+        ));
+    }
+    parse_releases_json(&output.stdout)
+}
+
+pub fn trigger_update_check(state: Arc<Mutex<SharedState>>) {
+    let mut s = state.lock().unwrap();
+    trigger_update_check_locked(&mut s, Arc::clone(&state));
+}
+
+pub fn trigger_update_check_locked(s: &mut SharedState, state: Arc<Mutex<SharedState>>) {
+    if s.update_check_in_progress {
+        return;
+    }
+    s.update_check_in_progress = true;
+    s.update_check_status_msg = Some("Fetching all releases from GitHub...".to_string());
+
+    std::thread::spawn(move || {
+        let res = fetch_github_releases_blocking();
         let mut s = state.lock().unwrap();
         s.update_check_in_progress = false;
 
         match res {
-            Ok(output) if output.status.success() => {
-                if let Ok(val) = serde_json::from_slice::<serde_json::Value>(&output.stdout) {
-                    if let Some(tag) = val["tag_name"].as_str() {
-                        let clean = tag.trim_start_matches('v');
-                        let current = env!("CARGO_PKG_VERSION");
-                        if is_newer_version(clean, current) {
-                            s.update_available = Some(tag.to_string());
-                            s.update_check_status_msg =
-                                Some(format!("New release available: {}", tag));
-                        } else {
-                            s.update_available = None;
-                            s.update_check_status_msg = Some(format!("Up to date (v{})", current));
-                        }
+            Ok(releases) => {
+                let current = env!("CARGO_PKG_VERSION");
+                if let Some(latest) = pick_latest_release(&releases).cloned() {
+                    let clean = latest.tag.trim_start_matches('v');
+                    s.update_latest_tag = Some(latest.tag.clone());
+                    if is_newer_version(clean, current) {
+                        s.update_available = Some(latest.tag.clone());
+                        s.update_check_status_msg = Some(format!(
+                            "Update available: {} (Installed: v{}, {} releases found)",
+                            latest.tag,
+                            current,
+                            releases.len()
+                        ));
                     } else {
-                        s.update_check_status_msg = Some("No release tag found.".to_string());
+                        s.update_available = None;
+                        s.update_check_status_msg = Some(format!(
+                            "Up to date — Latest: {} (Installed: v{})",
+                            latest.tag, current
+                        ));
                     }
                 } else {
-                    s.update_check_status_msg =
-                        Some("Failed to parse release response.".to_string());
+                    s.update_check_status_msg = Some("No published releases found.".to_string());
                 }
+                s.available_releases = releases;
             }
-            Ok(_) => {
-                s.update_check_status_msg =
-                    Some("Update check received non-200 response.".to_string());
-            }
-            Err(e) => {
-                s.update_check_status_msg = Some(format!("Update check failed: {}", e));
+            Err(err) => {
+                s.update_check_status_msg = Some(err);
             }
         }
     });
+}
+
+pub fn trigger_update_download_locked(
+    s: &mut SharedState,
+    state: Arc<Mutex<SharedState>>,
+    requested_tag: Option<String>,
+) {
+    if s.update_download_in_progress {
+        return;
+    }
+    s.update_download_in_progress = true;
+    s.update_downloaded_path = None;
+    s.update_downloaded_version = None;
+    s.update_install_prompt_open = false;
+    s.update_check_status_msg = Some("Preparing background download...".to_string());
+    let existing_releases = s.available_releases.clone();
+
+    std::thread::spawn(move || {
+        let releases = if existing_releases.is_empty() {
+            match fetch_github_releases_blocking() {
+                Ok(list) => list,
+                Err(e) => {
+                    let mut s = state.lock().unwrap();
+                    s.update_download_in_progress = false;
+                    s.update_check_status_msg = Some(format!("Download failed: {}", e));
+                    return;
+                }
+            }
+        } else {
+            existing_releases
+        };
+
+        let target = if let Some(ref tag) = requested_tag {
+            releases.iter().find(|r| &r.tag == tag).cloned()
+        } else {
+            pick_latest_release(&releases).cloned()
+        };
+
+        let Some(release) = target else {
+            let mut s = state.lock().unwrap();
+            s.update_download_in_progress = false;
+            s.update_check_status_msg = Some("Target release not found on GitHub.".to_string());
+            return;
+        };
+
+        let in_prog_files = std::env::current_exe()
+            .ok()
+            .map(|p| p.to_string_lossy().to_lowercase().contains("program files"))
+            .unwrap_or(false);
+
+        let Some(asset) = select_platform_asset(&release, in_prog_files).cloned() else {
+            let mut s = state.lock().unwrap();
+            s.update_download_in_progress = false;
+            s.update_check_status_msg = Some(format!(
+                "No downloadable asset found for this OS in {}.",
+                release.tag
+            ));
+            return;
+        };
+
+        {
+            let mut s = state.lock().unwrap();
+            s.available_releases = releases;
+            s.update_check_status_msg =
+                Some(format!("Downloading {} ({})...", release.tag, asset.name));
+        }
+
+        let dir = std::env::temp_dir().join("agent-power-guard-updates");
+        let _ = std::fs::create_dir_all(&dir);
+        let dest = dir.join(&asset.name);
+        let dest_str = dest.to_string_lossy().to_string();
+
+        let mut cmd = Command::new("curl");
+        #[cfg(windows)]
+        cmd.creation_flags(CREATE_NO_WINDOW);
+        cmd.args([
+            "-fSL",
+            "--max-time",
+            "180",
+            "--connect-timeout",
+            "10",
+            "-o",
+            &dest_str,
+            &asset.download_url,
+        ]);
+
+        let ok_dl = match cmd.output() {
+            Ok(out) if out.status.success() => std::fs::metadata(&dest)
+                .map(|m| m.len() > 100_000)
+                .unwrap_or(false),
+            _ => false,
+        };
+
+        let mut s = state.lock().unwrap();
+        s.update_download_in_progress = false;
+        if ok_dl {
+            s.update_downloaded_path = Some(dest);
+            s.update_downloaded_version = Some(release.tag.clone());
+            s.update_install_prompt_open = true;
+            s.update_check_status_msg = Some(format!(
+                "Downloaded {} ({}) — click Install Now to finish updating.",
+                release.tag, asset.name
+            ));
+        } else {
+            s.update_check_status_msg = Some(format!(
+                "Failed to download {}. Note: Windows Defender / SmartScreen may block unsigned binaries.",
+                asset.name
+            ));
+        }
+    });
+}
+
+pub fn install_downloaded_update(downloaded: &PathBuf) -> Result<(), String> {
+    if !downloaded.exists() {
+        return Err("Downloaded installer file no longer exists.".to_string());
+    }
+    let name_lower = downloaded
+        .file_name()
+        .map(|n| n.to_string_lossy().to_lowercase())
+        .unwrap_or_default();
+
+    #[cfg(windows)]
+    {
+        if name_lower.ends_with(".msi") {
+            Command::new("msiexec")
+                .args(["/i", &downloaded.to_string_lossy(), "/passive"])
+                .spawn()
+                .map_err(|e| format!("Failed to launch MSI installer: {}", e))?;
+            std::process::exit(0);
+        }
+
+        let current_exe = std::env::current_exe().map_err(|e| e.to_string())?;
+        let backup_exe = current_exe.with_extension("exe.old");
+        let _ = std::fs::remove_file(&backup_exe);
+
+        if std::fs::rename(&current_exe, &backup_exe).is_ok() {
+            if std::fs::copy(downloaded, &current_exe).is_ok() {
+                let _ = Command::new(&current_exe).spawn();
+                std::process::exit(0);
+            } else {
+                // Rollback if copy failed
+                let _ = std::fs::rename(&backup_exe, &current_exe);
+            }
+        }
+
+        // Fallback if installed folder needs elevation: elevated PowerShell swap & relaunch
+        let ps_cmd = format!(
+            "Start-Sleep -Seconds 1; Move-Item -LiteralPath '{}' -Destination '{}' -Force; Start-Process -FilePath '{}'",
+            downloaded.to_string_lossy().replace('\'', "''"),
+            current_exe.to_string_lossy().replace('\'', "''"),
+            current_exe.to_string_lossy().replace('\'', "''"),
+        );
+        Command::new("powershell")
+            .args([
+                "-NoProfile",
+                "-Command",
+                &format!(
+                    "Start-Process powershell -Verb RunAs -ArgumentList '-NoProfile','-WindowStyle','Hidden','-Command',\"{}\"",
+                    ps_cmd.replace('"', "`\"")
+                ),
+            ])
+            .creation_flags(CREATE_NO_WINDOW)
+            .spawn()
+            .map_err(|e| format!("Failed to apply update: {}", e))?;
+        std::process::exit(0);
+    }
+
+    #[cfg(not(windows))]
+    {
+        if name_lower.ends_with(".tar.gz") {
+            let extract_dir = std::env::temp_dir().join("apg-extract");
+            let _ = std::fs::remove_dir_all(&extract_dir);
+            let _ = std::fs::create_dir_all(&extract_dir);
+            let status = Command::new("tar")
+                .args([
+                    "-xzf",
+                    &downloaded.to_string_lossy(),
+                    "-C",
+                    &extract_dir.to_string_lossy(),
+                ])
+                .status()
+                .map_err(|e| format!("tar failed: {}", e))?;
+            if !status.success() {
+                return Err("Failed to extract update archive.".to_string());
+            }
+            let cand1 = extract_dir
+                .join("agent-power-guard")
+                .join("agent-power-guard");
+            let cand2 = extract_dir.join("agent-power-guard");
+            let new_bin = if cand1.is_file() { cand1 } else { cand2 };
+            if !new_bin.is_file() {
+                return Err("Updated binary not found inside extracted archive.".to_string());
+            }
+            let current_exe = std::env::current_exe().map_err(|e| e.to_string())?;
+            let backup_exe = current_exe.with_extension("old");
+            let _ = std::fs::remove_file(&backup_exe);
+            let _ = std::fs::rename(&current_exe, &backup_exe);
+            std::fs::copy(&new_bin, &current_exe).map_err(|e| e.to_string())?;
+            let _ = Command::new("chmod")
+                .args(["+x", &current_exe.to_string_lossy()])
+                .status();
+            let _ = Command::new(&current_exe).spawn();
+            std::process::exit(0);
+        } else {
+            open_url(&downloaded.to_string_lossy());
+            Ok(())
+        }
+    }
+}
+
+pub fn trigger_spec_fetch_locked(s: &mut SharedState, state: Arc<Mutex<SharedState>>) {
+    if s.watt_calc.spec_fetch_in_progress {
+        return;
+    }
+    s.watt_calc.spec_fetch_in_progress = true;
+    let gpu_pwr_w = s.gpu_power_mw.map(|mw| mw as f32 / 1000.0);
+
+    std::thread::spawn(move || {
+        let (cpu_brand, cpu_cores, ram_gb) = match System::new() {
+            Ok(mut sys) => {
+                sys.refresh_cpu_list(sysinfo::CpuRefreshKind::everything());
+                sys.refresh_memory();
+                let brand = sys
+                    .cpus()
+                    .first()
+                    .map(|c| c.brand().trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or_else(|| "Unknown CPU".to_string());
+                let cores = System::physical_core_count()
+                    .ok()
+                    .unwrap_or_else(|| sys.cpus().len().max(1));
+                let ram = (sys.total_memory() as f64 / (1024.0 * 1024.0 * 1024.0)) as f32;
+                (brand, cores, ram)
+            }
+            Err(_) => (
+                "Unknown CPU".to_string(),
+                System::physical_core_count().unwrap_or(1),
+                0.0,
+            ),
+        };
+        let os_name = System::long_os_version()
+            .ok()
+            .unwrap_or_else(|| std::env::consts::OS.to_string());
+
+        let storage_summary = match Disks::new_with_refreshed_list() {
+            Ok(disks) => {
+                let disk_count = disks.list().len();
+                let total_disk_gb: u64 = disks.list().iter().map(|d| d.total_space()).sum::<u64>()
+                    / (1024 * 1024 * 1024);
+                format!("{} volume(s) (~{} GB total)", disk_count, total_disk_gb)
+            }
+            Err(_) => "Unknown".to_string(),
+        };
+
+        #[allow(unused_mut)]
+        let mut gpu_name = String::new();
+        #[allow(unused_mut)]
+        let mut gpu_vram_gb = 0.0f32;
+        let mut monitors: Vec<String> = Vec::new();
+        #[allow(unused_mut)]
+        let mut is_laptop = get_battery_status().has_battery;
+
+        #[cfg(windows)]
+        {
+            let ps = r#"
+$gpus = @(Get-CimInstance Win32_VideoController | ForEach-Object { @{ name = $_.Name; vram = [math]::Round(($_.AdapterRAM / 1GB), 1) } })
+$mons = @(Get-CimInstance -Namespace root\wmi WmiMonitorID -ErrorAction SilentlyContinue | ForEach-Object {
+    $n = ($_.UserFriendlyName | Where-Object { $_ -ne 0 } | ForEach-Object { [char]$_ }) -join ''
+    if ([string]::IsNullOrWhiteSpace($n)) { $n = 'Display' }
+    $n
+})
+if ($mons.Count -eq 0) {
+    $mons = @(Get-CimInstance Win32_DesktopMonitor -ErrorAction SilentlyContinue | ForEach-Object { $_.Name })
+}
+$ch = (Get-CimInstance Win32_SystemEnclosure -ErrorAction SilentlyContinue | Select-Object -First 1 -ExpandProperty ChassisTypes)
+@{ gpus = $gpus; mons = $mons; chassis = @($ch) } | ConvertTo-Json -Compress
+"#;
+            if let Ok(out) = Command::new("powershell")
+                .args(["-NoProfile", "-NonInteractive", "-Command", ps])
+                .creation_flags(CREATE_NO_WINDOW)
+                .output()
+            {
+                if out.status.success() {
+                    if let Ok(v) = serde_json::from_slice::<serde_json::Value>(&out.stdout) {
+                        if let Some(arr) = v.get("gpus").and_then(|g| g.as_array()) {
+                            let names: Vec<String> = arr
+                                .iter()
+                                .filter_map(|g| {
+                                    g.get("name")
+                                        .and_then(|n| n.as_str())
+                                        .map(|s| s.to_string())
+                                })
+                                .collect();
+                            gpu_name = names.join(" + ");
+                            gpu_vram_gb = arr
+                                .iter()
+                                .filter_map(|g| g.get("vram").and_then(|x| x.as_f64()))
+                                .map(|x| x as f32)
+                                .fold(0.0, f32::max);
+                        }
+                        if let Some(arr) = v.get("mons").and_then(|m| m.as_array()) {
+                            monitors = arr
+                                .iter()
+                                .filter_map(|m| m.as_str().map(|s| s.trim().to_string()))
+                                .filter(|s| !s.is_empty())
+                                .collect();
+                        }
+                        if let Some(arr) = v.get("chassis").and_then(|c| c.as_array()) {
+                            for c in arr {
+                                if let Some(code) = c.as_u64() {
+                                    if matches!(code, 8 | 9 | 10 | 14 | 30 | 31 | 32) {
+                                        is_laptop = true;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        #[cfg(target_os = "linux")]
+        {
+            if let Ok(out) = Command::new("xrandr").arg("--listmonitors").output() {
+                if out.status.success() {
+                    let txt = String::from_utf8_lossy(&out.stdout);
+                    for line in txt.lines().skip(1) {
+                        let t = line.trim();
+                        if !t.is_empty() {
+                            monitors.push(t.to_string());
+                        }
+                    }
+                }
+            }
+        }
+
+        #[cfg(target_os = "macos")]
+        {
+            if let Ok(out) = Command::new("system_profiler")
+                .args(["SPDisplaysDataType", "-json"])
+                .output()
+            {
+                if out.status.success() {
+                    if let Ok(v) = serde_json::from_slice::<serde_json::Value>(&out.stdout) {
+                        if let Some(arr) = v.get("SPDisplaysDataType").and_then(|d| d.as_array()) {
+                            if let Some(first) = arr.first() {
+                                gpu_name = first
+                                    .get("sppci_model")
+                                    .and_then(|m| m.as_str())
+                                    .unwrap_or("")
+                                    .to_string();
+                                if let Some(ndrvs) =
+                                    first.get("spdisplays_ndrvs").and_then(|d| d.as_array())
+                                {
+                                    for d in ndrvs {
+                                        if let Some(n) = d.get("_name").and_then(|x| x.as_str()) {
+                                            monitors.push(n.to_string());
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        let specs = DetectedSystemSpecs {
+            fetched: true,
+            os_name,
+            cpu_brand,
+            cpu_cores,
+            ram_gb,
+            gpu_name,
+            gpu_vram_gb,
+            gpu_live_power_w: gpu_pwr_w,
+            storage_summary,
+            monitors,
+            is_laptop,
+        };
+
+        let mut s = state.lock().unwrap();
+        s.watt_calc.spec_fetch_in_progress = false;
+        if !specs.monitors.is_empty() {
+            s.watt_calc.monitor_count = specs.monitors.len() as u32;
+            s.watt_calc.monitor_models_note = specs.monitors.join(", ");
+        }
+        if let Some(w) = gpu_pwr_w {
+            if w >= 1.0 && w <= 150.0 {
+                s.watt_calc.gpu_idle_w = w.round();
+            }
+        }
+        if specs.is_laptop {
+            s.watt_calc.smps_model_note = "Laptop Power Brick".to_string();
+            s.watt_calc.psu_efficiency_pct = 88.0;
+        }
+        s.detected_specs = specs;
+        let prompt = build_ai_watt_prompt(
+            &s.detected_specs,
+            &s.watt_calc,
+            &s.config.currency_symbol,
+            s.config.electricity_rate_kwh,
+        );
+        s.watt_calc.generated_prompt = prompt;
+        s.set_toast("System hardware specs fetched for Watt Calculator.");
+    });
+}
+
+pub fn execute_software_uninstall(wipe_data: bool) -> Result<(), String> {
+    set_startup_task(false);
+    uninstall_service();
+
+    if wipe_data {
+        if let Some(dir) = get_energy_history_path().parent() {
+            let _ = std::fs::remove_dir_all(dir);
+        }
+    }
+
+    #[cfg(windows)]
+    {
+        // Check Windows MSI Uninstall registry first
+        let ps = r#"
+$paths = @(
+  'HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*',
+  'HKLM:\Software\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*',
+  'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*'
+)
+$item = Get-ItemProperty $paths -ErrorAction SilentlyContinue | Where-Object { $_.DisplayName -like '*Agent Power Guard*' } | Select-Object -First 1
+if ($item -and $item.PSChildName -match '^\{[0-9A-Fa-f-]+\}$') { Write-Output $item.PSChildName }
+"#;
+        if let Ok(out) = Command::new("powershell")
+            .args(["-NoProfile", "-NonInteractive", "-Command", ps])
+            .creation_flags(CREATE_NO_WINDOW)
+            .output()
+        {
+            let guid = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            if guid.starts_with('{') && guid.ends_with('}') {
+                Command::new("msiexec")
+                    .args(["/x", &guid])
+                    .spawn()
+                    .map_err(|e| format!("Failed to start Windows Uninstaller: {}", e))?;
+                std::process::exit(0);
+            }
+        }
+
+        // Portable EXE self-delete after process exits
+        let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+        Command::new("cmd")
+            .args([
+                "/C",
+                &format!(
+                    "ping 127.0.0.1 -n 3 > nul & del /f /q \"{}\"",
+                    exe.to_string_lossy()
+                ),
+            ])
+            .creation_flags(CREATE_NO_WINDOW)
+            .spawn()
+            .map_err(|e| format!("Failed to schedule binary cleanup: {}", e))?;
+        std::process::exit(0);
+    }
+
+    #[cfg(not(windows))]
+    {
+        let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+        #[cfg(target_os = "macos")]
+        {
+            let s = exe.to_string_lossy();
+            if let Some(idx) = s.find(".app/Contents/MacOS/") {
+                let bundle = &s[..idx + 4];
+                let _ = std::fs::remove_dir_all(bundle);
+                std::process::exit(0);
+            }
+        }
+        let _ = std::fs::remove_file(&exe);
+        std::process::exit(0);
+    }
 }
 
 fn format_time_compact(secs: u32) -> String {
@@ -4712,6 +5480,7 @@ pub struct AgentPowerGuardApp {
 
 impl AgentPowerGuardApp {
     pub fn new(cc: &eframe::CreationContext<'_>, state: Arc<Mutex<SharedState>>) -> Self {
+        cleanup_old_update_backup();
         let dark_mode = {
             let s = state.lock().unwrap();
             s.config.dark_mode
@@ -4805,7 +5574,8 @@ impl AgentPowerGuardApp {
 
         // Launch embedded Web Server & Remote API with Rate Limiting
         let rate_limiter = Arc::new(RateLimiter::new());
-        start_web_server(Arc::clone(&state), 49281, rate_limiter);
+        let web_port = state.lock().unwrap().config.web_server_port;
+        start_web_server(Arc::clone(&state), web_port, rate_limiter);
 
         // Launch background watchdog thread
         start_watchdog_thread(Arc::clone(&state), Some(cc.egui_ctx.clone()));
@@ -5054,6 +5824,360 @@ impl eframe::App for AgentPowerGuardApp {
                     });
                 });
             s.show_info_guide = guide_open;
+        }
+
+        // Modal: Update Ready to Install Prompt
+        let mut install_open = s.update_install_prompt_open;
+        if install_open {
+            let dl_ver = s
+                .update_downloaded_version
+                .clone()
+                .unwrap_or_else(|| "Latest".to_string());
+            let dl_path_opt = s.update_downloaded_path.clone();
+            egui::Window::new("🚀 Update Ready to Install")
+                .open(&mut install_open)
+                .collapsible(false)
+                .resizable(false)
+                .default_size([430.0, 170.0])
+                .show(ui.ctx(), |ui| {
+                    ui.label(
+                        egui::RichText::new(format!(
+                            "Agent Power Guard {} has finished downloading in the background.",
+                            dl_ver
+                        ))
+                        .strong(),
+                    );
+                    if let Some(ref p) = dl_path_opt {
+                        ui.label(
+                            egui::RichText::new(format!("File: {}", p.display()))
+                                .weak()
+                                .size(11.0),
+                        );
+                    }
+                    ui.add_space(6.0);
+                    ui.label("Install now and restart the app? Once restarted, the header and Updates tab will display the new version.");
+                    ui.add_space(10.0);
+                    ui.horizontal(|ui| {
+                        if ui
+                            .button(egui::RichText::new("✅ Install & Restart Now").strong())
+                            .clicked()
+                        {
+                            if let Some(ref p) = dl_path_opt {
+                                match install_downloaded_update(p) {
+                                    Ok(()) => {}
+                                    Err(err) => {
+                                        s.update_check_status_msg = Some(err.clone());
+                                        s.set_toast(err);
+                                    }
+                                }
+                            }
+                        }
+                        if ui.button("Later").clicked() {
+                            s.update_install_prompt_open = false;
+                        }
+                    });
+                });
+            if !install_open {
+                s.update_install_prompt_open = false;
+            }
+        }
+
+        // Modal: Uninstall Software Confirmation
+        let mut uninstall_open = s.show_uninstall_modal;
+        if uninstall_open {
+            egui::Window::new("🗑 Uninstall Agent Power Guard")
+                .open(&mut uninstall_open)
+                .collapsible(false)
+                .resizable(false)
+                .default_size([430.0, 190.0])
+                .show(ui.ctx(), |ui| {
+                    ui.label(
+                        egui::RichText::new("Are you sure you want to uninstall Agent Power Guard?")
+                            .strong(),
+                    );
+                    ui.label("This will disable auto-startup, remove any background service task, and launch the uninstaller (or remove the portable binary).");
+                    ui.add_space(6.0);
+                    ui.checkbox(
+                        &mut s.uninstall_wipe_data,
+                        "Also delete saved configuration, API token, energy history, and block history",
+                    );
+                    if let Some(ref msg) = s.uninstall_status_msg {
+                        ui.label(egui::RichText::new(msg).color(egui::Color32::RED));
+                    }
+                    ui.add_space(10.0);
+                    ui.horizontal(|ui| {
+                        if ui
+                            .button(
+                                egui::RichText::new("Confirm Uninstall")
+                                    .strong()
+                                    .color(egui::Color32::RED),
+                            )
+                            .clicked()
+                        {
+                            if let Err(err) = execute_software_uninstall(s.uninstall_wipe_data) {
+                                s.uninstall_status_msg = Some(err);
+                            }
+                        }
+                        if ui.button("Cancel").clicked() {
+                            s.show_uninstall_modal = false;
+                        }
+                    });
+                });
+            if !uninstall_open {
+                s.show_uninstall_modal = false;
+            }
+        }
+
+        // Modal: Custom Hardware Watt Calculator & AI Spec Estimator
+        let mut calc_open = s.show_watt_calc_modal;
+        if calc_open {
+            let state_arc = self.state.clone();
+            egui::Window::new("⚡ Hardware Watt Calculator & AI Estimator")
+                .open(&mut calc_open)
+                .default_size([680.0, 580.0])
+                .show(ui.ctx(), |ui| {
+                    egui::ScrollArea::vertical().show(ui, |ui| {
+                        // Step 1: System Spec Fetcher
+                        ui.horizontal(|ui| {
+                            if s.watt_calc.spec_fetch_in_progress {
+                                ui.label("⏳ Fetching local system specs...");
+                            } else if ui.button("🔍 Fetch System Specs").clicked() {
+                                trigger_spec_fetch_locked(&mut s, state_arc.clone());
+                            }
+                            if ui.button("📋 Generate & Copy AI Prompt").clicked() {
+                                let prompt = build_ai_watt_prompt(
+                                    &s.detected_specs,
+                                    &s.watt_calc,
+                                    &s.config.currency_symbol,
+                                    s.config.electricity_rate_kwh,
+                                );
+                                ui.ctx().copy_text(prompt.clone());
+                                s.watt_calc.generated_prompt = prompt;
+                                s.set_toast("Hardware wattage AI prompt copied to clipboard.");
+                            }
+                        });
+
+                        ui.add_space(6.0);
+                        egui::Frame::new()
+                            .fill(egui::Color32::from_rgb(22, 29, 39))
+                            .corner_radius(6.0)
+                            .inner_margin(egui::Margin::symmetric(10, 8))
+                            .show(ui, |ui| {
+                                ui.label(egui::RichText::new("1. Auto-Detected Hardware Specs").strong());
+                                if !s.detected_specs.fetched {
+                                    ui.label(egui::RichText::new("Click 'Fetch System Specs' above to detect your CPU, RAM, GPU, storage, and monitors.").weak().size(11.5));
+                                } else {
+                                    let mon_str = if s.detected_specs.monitors.is_empty() {
+                                        "Not auto-detected (enter manually below)".to_string()
+                                    } else {
+                                        s.detected_specs.monitors.join(", ")
+                                    };
+                                    ui.label(format!(
+                                        "OS: {} ({}) | CPU: {} ({} cores) | RAM: {:.1} GB",
+                                        s.detected_specs.os_name,
+                                        if s.detected_specs.is_laptop { "Laptop" } else { "Desktop" },
+                                        s.detected_specs.cpu_brand,
+                                        s.detected_specs.cpu_cores,
+                                        s.detected_specs.ram_gb
+                                    ));
+                                    ui.label(format!(
+                                        "GPU: {} ({:.1} GB VRAM) | Storage: {} | Monitors: {}",
+                                        if s.detected_specs.gpu_name.is_empty() { "Integrated" } else { &s.detected_specs.gpu_name },
+                                        s.detected_specs.gpu_vram_gb,
+                                        s.detected_specs.storage_summary,
+                                        mon_str
+                                    ));
+                                }
+                            });
+
+                        ui.add_space(6.0);
+
+                        // Step 2: Manual Hardware Inputs (SMPS, monitors, extras)
+                        egui::Frame::new()
+                            .fill(egui::Color32::from_rgb(22, 29, 39))
+                            .corner_radius(6.0)
+                            .inner_margin(egui::Margin::symmetric(10, 8))
+                            .show(ui, |ui| {
+                                ui.label(egui::RichText::new("2. Manual Hardware Inputs & Custom Watt Distribution").strong());
+                                ui.horizontal(|ui| {
+                                    ui.label("SMPS / PSU:");
+                                    ui.add(egui::TextEdit::singleline(&mut s.watt_calc.smps_model_note).desired_width(180.0));
+                                    ui.label("Rated W:");
+                                    ui.add(egui::DragValue::new(&mut s.watt_calc.psu_wattage).range(45..=2000).suffix("W"));
+                                    ui.label("Efficiency:");
+                                    ui.add(egui::DragValue::new(&mut s.watt_calc.psu_efficiency_pct).range(60.0..=96.0).suffix("%"));
+                                });
+                                ui.horizontal(|ui| {
+                                    ui.label("Monitors:");
+                                    ui.add(egui::DragValue::new(&mut s.watt_calc.monitor_count).range(1..=6));
+                                    ui.label("Models:");
+                                    ui.add(egui::TextEdit::singleline(&mut s.watt_calc.monitor_models_note).desired_width(220.0));
+                                    ui.label("W/monitor:");
+                                    ui.add(egui::DragValue::new(&mut s.watt_calc.monitor_each_w).range(5.0..=200.0).suffix("W"));
+                                });
+                                ui.horizontal(|ui| {
+                                    ui.label("Peripherals:");
+                                    ui.add(egui::TextEdit::singleline(&mut s.watt_calc.extra_gear_note).desired_width(220.0));
+                                    ui.label("Wall Meter Override (0 = off):");
+                                    ui.add(egui::DragValue::new(&mut s.watt_calc.wall_meter_override_w).range(0.0..=1500.0).suffix("W"));
+                                });
+                                ui.separator();
+                                ui.horizontal(|ui| {
+                                    ui.label("CPU Idle:");
+                                    ui.add(egui::DragValue::new(&mut s.watt_calc.cpu_idle_w).range(1.0..=300.0).suffix("W"));
+                                    ui.label("GPU Idle:");
+                                    ui.add(egui::DragValue::new(&mut s.watt_calc.gpu_idle_w).range(0.0..=300.0).suffix("W"));
+                                    ui.label("Board/RAM/Fans:");
+                                    ui.add(egui::DragValue::new(&mut s.watt_calc.mobo_ram_ssd_fans_w).range(2.0..=150.0).suffix("W"));
+                                    ui.label("Extras:");
+                                    ui.add(egui::DragValue::new(&mut s.watt_calc.peripherals_w).range(0.0..=100.0).suffix("W"));
+                                    ui.label("Sleep:");
+                                    ui.add(egui::DragValue::new(&mut s.watt_calc.sleep_watts).range(0.5..=50.0).suffix("W"));
+                                });
+                                ui.horizontal(|ui| {
+                                    ui.label("Daily Usage Schedule:");
+                                    ui.add(egui::DragValue::new(&mut s.watt_calc.daily_active_hours).range(0.0..=24.0).speed(0.5).suffix("h active"));
+                                    ui.add(egui::DragValue::new(&mut s.watt_calc.daily_idle_sleep_hours).range(0.0..=24.0).speed(0.5).suffix("h saved sleep"));
+                                });
+
+                                let bd = s.watt_calc.compute_breakdown();
+                                let cur = s.config.currency_symbol.clone();
+                                let co2_kg = get_carbon_factor_kg(&s.config);
+                                let proj = compute_power_projection(
+                                    bd.total_active_watts,
+                                    bd.total_monitor_watts,
+                                    bd.sleep_watts,
+                                    s.config.electricity_rate_kwh,
+                                    co2_kg,
+                                    s.watt_calc.daily_active_hours,
+                                    s.watt_calc.daily_idle_sleep_hours,
+                                );
+                                ui.add_space(4.0);
+                                ui.label(
+                                    egui::RichText::new(format!(
+                                        "Calculated -> Active Total: {:.0}W (PC Wall {:.0}W + Monitors {:.0}W) | Display Off: {:.0}W | Sleep: {:.1}W",
+                                        bd.total_active_watts, bd.wall_pc_watts, bd.total_monitor_watts, proj.display_off_watts, bd.sleep_watts
+                                    ))
+                                    .strong()
+                                    .color(egui::Color32::from_rgb(52, 211, 153)),
+                                );
+                                ui.label(
+                                    egui::RichText::new(format!(
+                                        "Daily Cost w/ Guard: {}{:.2}/day | Savings: {}{:.2}/day ({:.2} kWh/day) · {}{:.2}/month · {}{:.0}/year",
+                                        cur, proj.daily_guard_cost, cur, proj.daily_saved_cost, proj.daily_saved_kwh, cur, proj.monthly_saved_cost, cur, proj.yearly_saved_cost
+                                    ))
+                                    .size(11.5)
+                                    .color(egui::Color32::from_rgb(147, 197, 253)),
+                                );
+                                if ui.button("✅ Apply Calculated Watts to Energy Dashboard").clicked() {
+                                    s.config.active_watts = bd.total_active_watts.max(20.0);
+                                    s.config.monitor_watts = bd.total_monitor_watts.max(0.0);
+                                    s.config.sleep_watts = bd.sleep_watts.max(0.5);
+                                    s.config_dirty = true;
+                                    s.set_toast("Applied custom wattage distribution to Energy Dashboard.");
+                                }
+                            });
+
+                        ui.add_space(6.0);
+
+                        // Step 3: Prompt Preview & Direct AI JSON Response Paste Importer
+                        egui::Frame::new()
+                            .fill(egui::Color32::from_rgb(22, 29, 39))
+                            .corner_radius(6.0)
+                            .inner_margin(egui::Margin::symmetric(10, 8))
+                            .show(ui, |ui| {
+                                ui.label(egui::RichText::new("3. Paste AI Response (JSON from ChatGPT / Claude / Gemini — No API Required)").strong());
+                                ui.label(egui::RichText::new("Click 'Generate & Copy AI Prompt' above, paste it into any AI chat, then paste the AI's JSON response below and click Apply.").weak().size(11.0));
+                                ui.collapsing("View Generated Prompt", |ui| {
+                                    if s.watt_calc.generated_prompt.is_empty() {
+                                        s.watt_calc.generated_prompt = build_ai_watt_prompt(
+                                            &s.detected_specs,
+                                            &s.watt_calc,
+                                            &s.config.currency_symbol,
+                                            s.config.electricity_rate_kwh,
+                                        );
+                                    }
+                                    ui.add(
+                                        egui::TextEdit::multiline(&mut s.watt_calc.generated_prompt)
+                                            .desired_rows(6)
+                                            .desired_width(f32::INFINITY),
+                                    );
+                                });
+                                ui.add(
+                                    egui::TextEdit::multiline(&mut s.watt_calc.ai_response_input)
+                                        .desired_rows(5)
+                                        .desired_width(f32::INFINITY)
+                                        .hint_text("Paste AI JSON response here, e.g. {\"active_watts\": 115, \"monitor_watts\": 25, \"sleep_watts\": 3, \"currency_symbol\": \"₹\", \"electricity_rate_kwh\": 9.0}"),
+                                );
+                                ui.horizontal(|ui| {
+                                    if ui.button("⚡ Parse & Apply AI Response").clicked() {
+                                        let raw = s.watt_calc.ai_response_input.clone();
+                                        match parse_ai_watt_response(&raw) {
+                                            Ok(parsed) => {
+                                                if let Some(v) = parsed.cpu_idle_w {
+                                                    s.watt_calc.cpu_idle_w = v;
+                                                }
+                                                if let Some(v) = parsed.gpu_idle_w {
+                                                    s.watt_calc.gpu_idle_w = v;
+                                                }
+                                                if let Some(v) = parsed.mobo_ram_ssd_fans_w {
+                                                    s.watt_calc.mobo_ram_ssd_fans_w = v;
+                                                }
+                                                if let Some(v) = parsed.peripherals_w {
+                                                    s.watt_calc.peripherals_w = v;
+                                                }
+                                                if let Some(v) = parsed.psu_efficiency_pct {
+                                                    s.watt_calc.psu_efficiency_pct = v;
+                                                }
+                                                if let Some(v) = parsed.active_watts {
+                                                    s.config.active_watts = v;
+                                                }
+                                                if let Some(v) = parsed.monitor_watts {
+                                                    s.config.monitor_watts = v;
+                                                    let cnt = s.watt_calc.monitor_count.max(1) as f32;
+                                                    s.watt_calc.monitor_each_w = v / cnt;
+                                                }
+                                                if let Some(v) = parsed.sleep_watts {
+                                                    s.config.sleep_watts = v;
+                                                    s.watt_calc.sleep_watts = v;
+                                                }
+                                                if let Some(sym) = parsed.currency_symbol {
+                                                    s.config.currency_symbol = normalize_currency_input(&sym);
+                                                    s.custom_currency_input = s.config.currency_symbol.clone();
+                                                }
+                                                if let Some(rate) = parsed.electricity_rate_kwh {
+                                                    s.config.electricity_rate_kwh = rate;
+                                                }
+                                                if let Some(notes) = parsed.notes {
+                                                    s.watt_calc.ai_notes = notes;
+                                                }
+                                                s.config_dirty = true;
+                                                s.watt_calc.ai_parse_status = Some(format!(
+                                                    "Applied! Active: {:.0}W, Monitor: {:.0}W, Sleep: {:.1}W, Rate: {}{:.2}/kWh",
+                                                    s.config.active_watts,
+                                                    s.config.monitor_watts,
+                                                    s.config.sleep_watts,
+                                                    s.config.currency_symbol,
+                                                    s.config.electricity_rate_kwh
+                                                ));
+                                                s.set_toast("AI power estimate imported and applied.");
+                                            }
+                                            Err(err) => {
+                                                s.watt_calc.ai_parse_status = Some(format!("Error: {}", err));
+                                            }
+                                        }
+                                    }
+                                    if !s.watt_calc.ai_notes.is_empty() {
+                                        ui.label(egui::RichText::new(&s.watt_calc.ai_notes).weak().size(11.0));
+                                    }
+                                });
+                                if let Some(ref st) = s.watt_calc.ai_parse_status {
+                                    ui.label(egui::RichText::new(st).color(egui::Color32::from_rgb(147, 197, 253)).size(11.5));
+                                }
+                            });
+                    });
+                });
+            s.show_watt_calc_modal = calc_open;
         }
 
         // ====================================================================
@@ -5312,7 +6436,13 @@ impl eframe::App for AgentPowerGuardApp {
             ui.add_space(4.0);
 
             // Phase 2.3: Update Available Banner
-            if let Some(new_ver) = &s.update_available {
+            if let Some(new_ver) = s.update_available.clone() {
+                let state_arc = self.state.clone();
+                let dl_ready = s.update_downloaded_version.as_deref() == Some(new_ver.as_str())
+                    && s.update_downloaded_path.is_some();
+                let dl_path = s.update_downloaded_path.clone();
+                let dl_busy = s.update_download_in_progress;
+
                 egui::Frame::new()
                     .fill(egui::Color32::from_rgb(30, 58, 138))
                     .corner_radius(6.0)
@@ -5321,14 +6451,30 @@ impl eframe::App for AgentPowerGuardApp {
                         ui.horizontal(|ui| {
                             ui.label(
                                 egui::RichText::new(format!(
-                                    "🚀 New release available: {} (Current: v{})",
+                                    "🚀 New release available: {} (Installed: v{})",
                                     new_ver,
                                     env!("CARGO_PKG_VERSION")
                                 ))
                                 .strong()
                                 .color(egui::Color32::from_rgb(147, 197, 253)),
                             );
-                            if ui.button("View on GitHub").clicked() {
+                            if dl_ready {
+                                if ui.button("✅ Install & Restart Now").clicked() {
+                                    if let Some(ref p) = dl_path {
+                                        if let Err(err) = install_downloaded_update(p) {
+                                            s.set_toast(err);
+                                        }
+                                    }
+                                }
+                            } else if dl_busy {
+                                ui.label(
+                                    egui::RichText::new("⏳ Downloading in background...")
+                                        .color(egui::Color32::from_rgb(191, 219, 254)),
+                                );
+                            } else if ui.button("⬇ Update Now").clicked() {
+                                trigger_update_download_locked(&mut s, state_arc, Some(new_ver));
+                            }
+                            if ui.button("View Releases").clicked() {
                                 open_url(
                                     "https://github.com/Subham-Maity/agent-power-guard/releases",
                                 );
@@ -5929,8 +7075,13 @@ impl eframe::App for AgentPowerGuardApp {
                                 }
                             });
                             if ui.button("Override Audio/Browser Locks").clicked() {
-                                override_audio_browser_power_requests();
-                                s.set_toast("Powercfg overrides registered for Audio and Browsers.");
+                                match override_audio_browser_power_requests() {
+                                    Ok(count) => s.set_toast(format!(
+                                        "Registered {} powercfg audio/browser overrides.",
+                                        count
+                                    )),
+                                    Err(err) => s.set_toast(err),
+                                }
                             }
                         });
 
@@ -6569,11 +7720,54 @@ impl eframe::App for AgentPowerGuardApp {
                         });
                     };
 
-                    let cur = &s.config.currency_symbol;
+                    let cur = s.config.currency_symbol.clone();
                     stat_card(ui, "Money Saved", format!("{}{:.2}", cur, total_cost), egui::Color32::from_rgb(16, 185, 129));
                     stat_card(ui, "Electricity Saved", format!("{:.1} kWh", total_kwh), egui::Color32::from_rgb(59, 130, 246));
                     stat_card(ui, "Standby Hours", format!("{:.1} hrs", total_secs as f64 / 3600.0), egui::Color32::from_rgb(245, 158, 11));
                     stat_card(ui, "CO₂ Avoided", format!("{:.1} kg", total_co2_kg), egui::Color32::from_rgb(168, 85, 247));
+                });
+
+                ui.add_space(6.0);
+
+                // Daily Power Projection Strip (Active vs Display-Off vs Sleep + Daily/Monthly/Yearly Savings)
+                let proj = compute_power_projection(
+                    s.config.active_watts,
+                    s.config.monitor_watts,
+                    s.config.sleep_watts,
+                    s.config.electricity_rate_kwh,
+                    co2_factor,
+                    s.watt_calc.daily_active_hours,
+                    s.watt_calc.daily_idle_sleep_hours,
+                );
+                let cur_proj = s.config.currency_symbol.clone();
+                egui::Frame::new().fill(egui::Color32::from_rgb(15, 23, 42)).corner_radius(8.0).inner_margin(egui::Margin::symmetric(14, 8)).show(ui, |ui| {
+                    ui.horizontal_wrapped(|ui| {
+                        ui.label(egui::RichText::new(format!(
+                            "📊 Power Profile: Active {:.0}W | Display Off {:.0}W | Sleep {:.1}W",
+                            proj.active_watts, proj.display_off_watts, proj.sleep_watts
+                        )).strong().size(11.5));
+                        ui.separator();
+                        ui.label(egui::RichText::new(format!(
+                            "Daily Usage ({:.0}h active / {:.0}h sleep): {}{:.2}/day ({:.2} kWh)",
+                            s.watt_calc.daily_active_hours,
+                            s.watt_calc.daily_idle_sleep_hours,
+                            cur_proj,
+                            proj.daily_guard_cost,
+                            proj.daily_with_guard_kwh
+                        )).size(11.5));
+                        ui.separator();
+                        ui.label(egui::RichText::new(format!(
+                            "Est. Savings: {}{:.2}/day · {}{:.1}/mo · {}{:.0}/yr ({:.0} kWh, {:.0} kg CO₂/yr)",
+                            cur_proj,
+                            proj.daily_saved_cost,
+                            cur_proj,
+                            proj.monthly_saved_cost,
+                            cur_proj,
+                            proj.yearly_saved_cost,
+                            proj.yearly_saved_kwh,
+                            proj.yearly_co2_kg
+                        )).strong().color(egui::Color32::from_rgb(52, 211, 153)).size(11.5));
+                    });
                 });
 
                 ui.add_space(8.0);
@@ -6608,37 +7802,73 @@ impl eframe::App for AgentPowerGuardApp {
 
                 ui.add_space(8.0);
 
-                // 3. Wattage & Cost Settings + Filters & Deletion
-                ui.horizontal(|ui| {
+                // 3. Wattage & Cost Settings + Watt Calculator Launcher
+                ui.horizontal_wrapped(|ui| {
                     if ui.checkbox(&mut s.config.record_energy_data, "Record Energy Data").changed() {
                         s.config_dirty = true;
                     }
                     ui.separator();
                     ui.label("Active Power:");
-                    if ui.add(egui::DragValue::new(&mut s.config.active_watts).suffix("W").range(20.0..=1000.0)).changed() {
+                    if ui.add(egui::DragValue::new(&mut s.config.active_watts).suffix("W").range(10.0..=2000.0)).changed() {
                         s.config_dirty = true;
                     }
                     ui.label("Monitor Power:");
-                    if ui.add(egui::DragValue::new(&mut s.config.monitor_watts).suffix("W").range(5.0..=300.0)).changed() {
+                    if ui.add(egui::DragValue::new(&mut s.config.monitor_watts).suffix("W").range(0.0..=500.0)).changed() {
+                        s.config_dirty = true;
+                    }
+                    ui.label("Sleep Power:");
+                    if ui.add(egui::DragValue::new(&mut s.config.sleep_watts).suffix("W").range(0.5..=100.0).speed(0.5)).changed() {
                         s.config_dirty = true;
                     }
                     ui.label("Electricity Rate:");
                     let cur_str = s.config.currency_symbol.clone();
-                    if ui.add(egui::DragValue::new(&mut s.config.electricity_rate_kwh).prefix(&cur_str).suffix("/kWh").range(0.01..=2.0).speed(0.01)).changed() {
+                    if ui.add(egui::DragValue::new(&mut s.config.electricity_rate_kwh).prefix(&cur_str).suffix("/kWh").range(0.01..=50000.0).speed(0.1)).changed() {
                         s.config_dirty = true;
+                    }
+                    if ui.button("⚡ Watt Calculator & AI Estimator").clicked() {
+                        s.show_watt_calc_modal = true;
+                        if !s.detected_specs.fetched && !s.watt_calc.spec_fetch_in_progress {
+                            trigger_spec_fetch_locked(&mut s, self.state.clone());
+                        }
                     }
                 });
 
                 ui.add_space(4.0);
 
-                // Phase 3.4: Currency & Regional Grid Intensity
-                ui.horizontal(|ui| {
-                    ui.label("Currency Symbol:");
-                    let currencies = ["$", "€", "£", "₹", "¥", "C$", "A$"];
-                    for &sym in &currencies {
+                // Phase 3.4: 26 Major Currencies + Custom Symbol + Regional Grid Intensity
+                ui.horizontal_wrapped(|ui| {
+                    ui.label("Currency:");
+                    let selected_label = MAJOR_CURRENCIES
+                        .iter()
+                        .find(|c| c.symbol == s.config.currency_symbol)
+                        .map(|c| c.label.to_string())
+                        .unwrap_or_else(|| format!("Custom ({})", s.config.currency_symbol));
+                    egui::ComboBox::from_id_salt("currency_combo")
+                        .selected_text(selected_label)
+                        .show_ui(ui, |ui| {
+                            for c in MAJOR_CURRENCIES {
+                                if ui.selectable_label(s.config.currency_symbol == c.symbol, c.label).clicked() {
+                                    s.config.currency_symbol = c.symbol.to_string();
+                                    s.custom_currency_input = c.symbol.to_string();
+                                    s.config_dirty = true;
+                                }
+                            }
+                        });
+                    for &sym in &["₹", "$", "€", "£", "¥", "C$", "A$"] {
                         if ui.selectable_label(s.config.currency_symbol == sym, sym).clicked() {
                             s.config.currency_symbol = sym.to_string();
+                            s.custom_currency_input = sym.to_string();
                             s.config_dirty = true;
+                        }
+                    }
+                    ui.label("Custom:");
+                    ui.add(egui::TextEdit::singleline(&mut s.custom_currency_input).desired_width(48.0));
+                    if ui.small_button("Set").clicked() {
+                        let cleaned = normalize_currency_input(&s.custom_currency_input);
+                        if !cleaned.is_empty() {
+                            s.config.currency_symbol = cleaned;
+                            s.config_dirty = true;
+                            s.set_toast("Custom currency applied.");
                         }
                     }
                 });
@@ -6711,6 +7941,7 @@ impl eframe::App for AgentPowerGuardApp {
                         ui.add_space(20.0);
                         ui.label(egui::RichText::new("No energy events recorded for this period yet. Leave the guard running to automatically accumulate power savings!").weak());
                     } else {
+                        let table_cur = s.config.currency_symbol.clone();
                         egui::Grid::new("energy_table")
                             .striped(true)
                             .min_col_width(100.0)
@@ -6730,7 +7961,7 @@ impl eframe::App for AgentPowerGuardApp {
                                     ui.label(format_time_compact(record.duration_secs as u32));
                                     ui.label(format!("{:.0} W", record.watts_saved_avg));
                                     ui.label(format!("{:.3} kWh", record.kwh_saved));
-                                    ui.label(format!("${:.3}", record.cost_saved));
+                                    ui.label(format!("{}{:.2}", table_cur, record.cost_saved));
                                     ui.end_row();
                                 }
                             });
@@ -6849,28 +8080,126 @@ impl eframe::App for AgentPowerGuardApp {
 
                 ui.add_space(10.0);
 
-                // Section 3: Opt-in Update Check
+                // Section 3: Opt-in Update Check & In-Panel Updater (GitHub Public Releases API)
+                let state_arc = self.state.clone();
                 egui::Frame::new().fill(egui::Color32::from_rgb(22, 29, 39)).corner_radius(8.0).inner_margin(egui::Margin::symmetric(14, 10)).show(ui, |ui| {
-                    ui.label(egui::RichText::new("🚀 Software Updates").strong().size(14.0));
-                    ui.add_space(6.0);
+                    ui.label(egui::RichText::new("🚀 Software Updates (In-Panel Auto-Updater)").strong().size(14.0));
+                    ui.add_space(4.0);
+                    let latest_label = s
+                        .update_latest_tag
+                        .as_deref()
+                        .unwrap_or("Not fetched yet");
+                    ui.label(
+                        egui::RichText::new(format!(
+                            "Installed Version: v{} | Latest Release on GitHub: {}",
+                            env!("CARGO_PKG_VERSION"),
+                            latest_label
+                        ))
+                        .size(12.0),
+                    );
+                    ui.add_space(4.0);
 
-                    ui.horizontal(|ui| {
-                        if ui.checkbox(&mut s.config.check_for_updates, "Check for updates automatically (daily check via GitHub Releases API)").changed() {
+                    let dl_ready_path = s.update_downloaded_path.clone();
+                    let dl_ready_ver = s.update_downloaded_version.clone();
+                    let dl_busy = s.update_download_in_progress;
+                    let chk_busy = s.update_check_in_progress;
+                    let upd_avail = s.update_available.clone();
+
+                    ui.horizontal_wrapped(|ui| {
+                        if ui.checkbox(&mut s.config.check_for_updates, "Check for updates automatically (daily via GitHub Releases API)").changed() {
                             s.config_dirty = true;
                         }
 
-                        if ui.button("🔍 Check Now").clicked() {
-                            let state_clone = self.state.clone();
-                            trigger_update_check(state_clone);
+                        if chk_busy {
+                            ui.label("⏳ Checking...");
+                        } else if ui.button("🔍 Check & List All Releases").clicked() {
+                            trigger_update_check_locked(&mut s, state_arc.clone());
+                        }
+
+                        if let Some(ref p) = dl_ready_path {
+                            let ver_lbl = dl_ready_ver.as_deref().unwrap_or("Update");
+                            if ui.button(format!("✅ Install {} & Restart", ver_lbl)).clicked() {
+                                if let Err(err) = install_downloaded_update(p) {
+                                    s.set_toast(err);
+                                }
+                            }
+                        } else if dl_busy {
+                            ui.label("⏳ Downloading update in background...");
+                        } else if let Some(ref new_ver) = upd_avail {
+                            if ui.button(format!("⬇ Update Now ({})", new_ver)).clicked() {
+                                trigger_update_download_locked(&mut s, state_arc.clone(), Some(new_ver.clone()));
+                            }
                         }
                     });
 
                     ui.add_space(4.0);
                     if let Some(msg) = &s.update_check_status_msg {
                         ui.label(egui::RichText::new(format!("Update Status: {}", msg)).color(egui::Color32::from_rgb(147, 197, 253)));
-                    } else {
-                        ui.label(egui::RichText::new(format!("Current Version: v{}", env!("CARGO_PKG_VERSION"))).weak());
                     }
+                    ui.label(
+                        egui::RichText::new("Note: Release binaries are unsigned. If Windows Defender / SmartScreen prompts when downloading manually, click Keep -> Show more -> Keep anyway (or More info -> Run anyway).")
+                            .weak()
+                            .size(11.0),
+                    );
+
+                    if !s.available_releases.is_empty() {
+                        ui.add_space(6.0);
+                        ui.collapsing(format!("📦 All GitHub Releases ({} versions)", s.available_releases.len()), |ui| {
+                            let latest_tag = s.update_latest_tag.clone();
+                            let current_clean = env!("CARGO_PKG_VERSION");
+                            let releases_snapshot = s.available_releases.clone();
+                            let mut download_tag_req: Option<String> = None;
+
+                            egui::ScrollArea::vertical().max_height(210.0).show(ui, |ui| {
+                                for rel in &releases_snapshot {
+                                    let is_latest = latest_tag.as_deref() == Some(rel.tag.as_str());
+                                    let is_installed = rel.tag.trim_start_matches('v') == current_clean;
+                                    ui.horizontal(|ui| {
+                                        ui.label(egui::RichText::new(&rel.tag).strong());
+                                        if is_latest {
+                                            ui.label(egui::RichText::new("[LATEST]").color(egui::Color32::from_rgb(52, 211, 153)).strong().size(11.0));
+                                        }
+                                        if is_installed {
+                                            ui.label(egui::RichText::new("[INSTALLED]").color(egui::Color32::from_rgb(96, 165, 250)).strong().size(11.0));
+                                        }
+                                        if !rel.published_at.is_empty() {
+                                            ui.label(egui::RichText::new(&rel.published_at).weak().size(11.0));
+                                        }
+                                        if !is_installed && !dl_busy && ui.small_button("Download & Install").clicked() {
+                                            download_tag_req = Some(rel.tag.clone());
+                                        }
+                                    });
+                                    let first_line = rel
+                                        .body
+                                        .lines()
+                                        .find(|l| !l.trim().is_empty() && !l.trim().starts_with("---"))
+                                        .unwrap_or(&rel.name);
+                                    ui.label(egui::RichText::new(first_line).weak().size(11.0));
+                                    ui.add_space(3.0);
+                                }
+                            });
+
+                            if let Some(tag_req) = download_tag_req {
+                                trigger_update_download_locked(&mut s, state_arc.clone(), Some(tag_req));
+                            }
+                        });
+                    }
+                });
+
+                ui.add_space(10.0);
+
+                // Section 4: Software Management & Uninstall
+                egui::Frame::new().fill(egui::Color32::from_rgb(22, 29, 39)).corner_radius(8.0).inner_margin(egui::Margin::symmetric(14, 10)).show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.label(egui::RichText::new("🗑 Software Management").strong().size(14.0));
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if ui.button(egui::RichText::new("Uninstall Software...").color(egui::Color32::from_rgb(248, 113, 113))).clicked() {
+                                s.uninstall_status_msg = None;
+                                s.show_uninstall_modal = true;
+                            }
+                        });
+                    });
+                    ui.label(egui::RichText::new("Cleanly remove startup tasks, background daemon registration, and uninstall Agent Power Guard (with optional removal of saved config/history).").weak().size(11.5));
                 });
             });
         }
@@ -7567,6 +8896,37 @@ mod tests {
         assert!(!is_newer_version("v1.1.0", "1.1.0"));
         assert!(!is_newer_version("1.0.9", "1.1.0"));
         assert!(!is_newer_version("0.9.0", "1.0.0"));
+        assert!(is_newer_version("v1.2.4-rc1", "1.2.3"));
+    }
+
+    #[test]
+    fn test_parse_releases_json_picks_highest_version_and_asset() {
+        let json = br#"[
+            {"tag_name": "v1.2.2", "name": "v1.2.2", "draft": false, "prerelease": false, "published_at": "2026-11-11T10:00:00Z", "body": "old", "assets": []},
+            {"tag_name": "v1.2.5-rc1", "name": "rc", "draft": true, "prerelease": true, "published_at": "2026-11-12T12:00:00Z", "body": "draft", "assets": []},
+            {"tag_name": "v1.2.4", "name": "Release v1.2.4", "draft": false, "prerelease": false, "published_at": "2026-11-12T15:00:00Z", "body": "latest", "assets": [
+                {"name": "AgentPowerGuard-windows-x64.msi", "browser_download_url": "https://example.com/app.msi", "size": 5000000},
+                {"name": "agent-power-guard-windows-x64.exe", "browser_download_url": "https://example.com/app.exe", "size": 4500000},
+                {"name": "agent-power-guard-linux-x86_64.tar.gz", "browser_download_url": "https://example.com/linux.tar.gz", "size": 4000000},
+                {"name": "agent-power-guard-macos-aarch64.tar.gz", "browser_download_url": "https://example.com/mac-arm.tar.gz", "size": 4000000},
+                {"name": "agent-power-guard-macos-x86_64.tar.gz", "browser_download_url": "https://example.com/mac-x64.tar.gz", "size": 4000000}
+            ]}
+        ]"#;
+        let list = parse_releases_json(json).expect("releases json");
+        assert_eq!(list.len(), 2);
+        let latest = pick_latest_release(&list).expect("latest release");
+        assert_eq!(latest.tag, "v1.2.4");
+        #[cfg(windows)]
+        {
+            assert_eq!(
+                select_platform_asset(latest, false).unwrap().name,
+                "agent-power-guard-windows-x64.exe"
+            );
+            assert_eq!(
+                select_platform_asset(latest, true).unwrap().name,
+                "AgentPowerGuard-windows-x64.msi"
+            );
+        }
     }
 
     #[test]

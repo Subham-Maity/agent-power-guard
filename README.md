@@ -334,6 +334,8 @@ Run the `.msi`, then start **Agent Power Guard** from the Start Menu. Silent ins
 msiexec /i AgentPowerGuard-windows-x64.msi /qn
 ```
 
+> **Windows Defender / SmartScreen note:** Release binaries are currently unsigned. When downloading manually in Chrome/Edge, Windows Defender may warn before saving the `.exe` or `.msi` — click **`...` → Keep → Show more → Keep anyway**, and if Windows SmartScreen prompts on first launch, click **More info → Run anyway** (see [Troubleshooting](#troubleshooting) for antivirus folder exclusions).
+
 The executable embeds an application manifest for standard-user execution (`ExecutionLevel::AsInvoker`). The GUI, CLI subcommands (`status`, `lease`, `wol`, `run`, `mcp`, `postpone`) and the background `daemon` all run **without UAC prompts**. `SeShutdownPrivilege` is acquired at runtime when an interactive session triggers sleep.
 
 ### Linux
@@ -659,10 +661,16 @@ In service mode, closing the GUI does not stop the watchdog; protection persists
 
 ## <img src="assets/icons/leaf.svg" width="22" height="22" align="absmiddle" alt="" /> Energy tracking
 
-The **Energy & Cost Savings** tab estimates what suspend and display-off saved you: sleep sessions, monitor-off events, active versus sleep hours, kWh, money and CO₂. Filter by today, 7 days, this month, this year or all time.
+The **Energy & Cost Savings** tab measures real wall-clock standby durations (`before_sleep` to `after_sleep`) and calculates saved electricity, money and CO₂ across sleep sessions and monitor-off events. Filter by today, 7 days, this month, this year or all time.
 
-- Defaults: 150 W active system, 50 W display, 3 W sleep (at `$0.15`/kWh). Wattage and tariff are configurable.
-- Recording can be turned off at any time. Data is plain local JSON (`energy_history.json`) that you can inspect, back up or delete. Nothing is sent anywhere.
+- **Configurable wattage & high tariff range:** Active Power (`W`), Monitor Power (`W`), Sleep Power (`W`) and Electricity Rate (`0.01` to `50,000` per kWh, supporting `₹9/kWh`+ and high-unit currencies).
+- **26 built-in currencies + Custom symbol:** Supports `INR (₹)`, `USD ($)`, `EUR (€)`, `GBP (£)`, `JPY (¥)`, `CAD (C$)`, `AUD (A$)`, `CHF`, `CNY`, `KRW`, `SGD`, `HKD`, `NZD`, `SEK`, `NOK`, `PLN`, `BRL`, `MXN`, `ZAR`, `AED`, `SAR`, `TRY`, `PHP`, `THB`, `VND`, `IDR`, plus any user-entered custom currency symbol or code.
+- **Daily Power Projections:** Shows live active vs display-off vs sleep draw, daily protected usage cost, and estimated daily / monthly / yearly savings right on the dashboard.
+- **Hardware Watt Calculator & AI Prompt Estimator:**
+  1. **Fetch System Specs:** Automatically detects OS, CPU model/cores, RAM, GPU/VRAM, storage volumes and monitors.
+  2. **Manual Inputs & Custom Distribution:** Enter unknown hardware (SMPS/PSU wattage & 80+ efficiency, monitor count & models, peripherals, optional wall-meter override, daily active/idle hours) and customize component watts (`CPU`, `GPU`, `Board/RAM/SSD/Fans`, `Peripherals`, `Monitor`, `Sleep`).
+  3. **Zero-API AI Prompt Workflow:** Generates a copy-ready hardware prompt you can paste into any AI chat (ChatGPT, Claude, Gemini); paste the returned JSON reply directly into the app's input field to auto-apply watts, currency and electricity rate.
+- **Local storage:** Defaults start at 150 W active, 50 W display, 3 W sleep (`$0.15`/kWh). Recording can be toggled off anytime; data stays in local `energy_history.json`.
 
 **Regional carbon intensity.** Select a grid profile or enter a custom g/kWh value:
 
@@ -680,7 +688,7 @@ The **Energy & Cost Savings** tab estimates what suspend and display-off saved y
 | Global Average | 436 |
 | Custom | user-defined |
 
-Currency symbols: `$`, `€`, `£`, `₹`, `¥`, `C$`, `A$`. The desktop app and the remote dashboard both use the `co2_saved` value computed from the configured factor.
+The desktop app and the remote dashboard both display savings and `co2_saved` using your configured currency symbol and grid factor.
 
 ---
 
@@ -696,9 +704,9 @@ The **Block History** tab shows what prevented sleep:
 
 ---
 
-## <img src="assets/icons/bell.svg" width="22" height="22" align="absmiddle" alt="" /> Alerts and update checks
+## <img src="assets/icons/bell.svg" width="22" height="22" align="absmiddle" alt="" /> Alerts, in-panel updates and uninstall
 
-The **Alerts & Updates** tab configures notifications. **No notification channels are configured by default** (`ntfy`, Telegram and webhook fields start empty), and outbound requests go only to destinations you configure. Network calls run on a dedicated worker thread so the 1 Hz watchdog is never delayed.
+The **Alerts & Updates** tab configures notifications, in-app software updates and uninstallation. **No notification channels are configured by default** (`ntfy`, Telegram and webhook fields start empty), and outbound requests go only to destinations you configure. Network calls run on a dedicated worker thread so the 1 Hz watchdog is never delayed.
 
 | Channel | Configuration |
 |---|---|
@@ -716,7 +724,9 @@ The **Alerts & Updates** tab configures notifications. **No notification channel
 
 `POST /api/notify/test` sends a test notification to all configured channels.
 
-**Update check (opt-in).** When enabled, the app checks GitHub Releases once per 24 hours. No machine identifiers or analytics are sent. A newer release shows a banner in the top bar linking to the release notes.
+**In-panel updates (GitHub Releases API).** Uses GitHub's public `/releases` route to list all published versions with `[LATEST]` and `[INSTALLED]` badges. Clicking **Update Now** downloads the matching platform binary or installer in the background, prompts to **Install & Restart Now**, swaps portable executables cleanly (or runs the MSI installer) and updates the displayed version automatically — no manual browser download needed. Opt-in 24-hour background checking is also supported.
+
+**Built-in uninstaller.** Under **Software Management → Uninstall Software...**, you can cleanly disable startup tasks, remove the registered background service, optionally delete saved config/token/history files, and run the Windows MSI uninstaller or remove the portable binary.
 
 ---
 
@@ -771,6 +781,7 @@ Agent Power Guard needs **zero mandatory environment variables**. All watchdog s
 │   ├── evaluator.rs           pure intent-aware decision evaluator and scenario replay tests
 │   ├── probes.rs              OS probes (CoreAudio/SMTC worker, wake-lock thread, wake classifier, NVML, NICs, tree sampler)
 │   ├── qr.rs                  dependency-free QR encoder (versions 1-10, EC L/M)
+│   ├── watt_calc.rs           custom watt distribution, 26 currencies, AI prompt generator & JSON parser
 │   └── main.rs                legacy single-module reference (superseded by src/app.rs)
 ├── assets/
 │   ├── dashboard.html         remote dashboard (single static file)
@@ -830,7 +841,7 @@ cargo test --target <target>
 cargo build --release --target <target>
 ```
 
-Unit tests cover the pure signal-conditioning filters (`src/signal.rs`), intent classification (`src/intent.rs`), scenario-replay tests and evaluator edge cases (`src/evaluator.rs`, `src/app.rs`), OS request/NIC/IPC-browser parsers (`src/probes.rs`) and QR encoding (`src/qr.rs`). CI does not build the Intel macOS target, run `clippy` or check formatting.
+Unit tests cover the pure signal-conditioning filters (`src/signal.rs`), intent classification (`src/intent.rs`), scenario-replay tests and evaluator edge cases (`src/evaluator.rs`, `src/app.rs`), OS request/NIC/IPC-browser parsers (`src/probes.rs`), watt/currency/AI JSON helpers (`src/watt_calc.rs`) and QR encoding (`src/qr.rs`). CI does not build the Intel macOS target, run `clippy` or check formatting.
 
 **Releases.** Pushing a tag matching `v*`, or running the workflow manually with `tag_name`, triggers `.github/workflows/release.yml`. It builds the Windows MSI and portable EXE, the Linux `.tar.gz` and `.deb`, and the macOS `aarch64` and `x86_64` archives plus the universal `.app` zip. It then generates `SHA256SUMS.txt` and publishes a GitHub Release. A code-signing step exists as a placeholder and does not sign anything yet.
 
@@ -839,7 +850,7 @@ Unit tests cover the pure signal-conditioning filters (`src/signal.rs`), intent 
 
 <br/>
 
-The version string is duplicated in `Cargo.toml`, `wix/main.wxs` (`Version="x.y.z.0"`), `packaging/macos/Info.plist`, `packaging/build-deb.sh`, and the winget, Scoop, Chocolatey, Homebrew and AUR manifests. `build-msi.ps1` reads `Cargo.toml` and falls back to `1.2.3`. Package-manager manifests also need real SHA-256 values after release checksums are published.
+The version string is duplicated in `Cargo.toml`, `wix/main.wxs` (`Version="x.y.z.0"`), `packaging/macos/Info.plist`, `packaging/build-deb.sh`, and the winget, Scoop, Chocolatey, Homebrew and AUR manifests. `build-msi.ps1` reads `Cargo.toml` and falls back to `1.2.4`. Package-manager manifests also need real SHA-256 values after release checksums are published.
 
 </details>
 
