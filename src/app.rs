@@ -27,8 +27,9 @@ use crate::intent::{
 };
 use crate::signal::SuggestedThresholds;
 use crate::watt_calc::{
-    build_ai_watt_prompt, compute_power_projection, normalize_currency_input,
-    parse_ai_watt_response, DetectedSystemSpecs, WattCalculatorState, MAJOR_CURRENCIES,
+    build_ai_watt_prompt, compute_power_projection, dedupe_clean_list, format_ram_sticks_summary,
+    normalize_currency_input, parse_ai_watt_response, DetectedSystemSpecs, WattCalculatorState,
+    MAJOR_CURRENCIES,
 };
 
 #[cfg(windows)]
@@ -5164,6 +5165,924 @@ pub fn install_downloaded_update(downloaded: &PathBuf) -> Result<(), String> {
     }
 }
 
+#[derive(Default)]
+struct PlatformHwDetails {
+    motherboard: String,
+    ram_details: String,
+    gpu_name: String,
+    gpu_vram_gb: f32,
+    storage_drives: Vec<String>,
+    monitors: Vec<String>,
+    network_adapters: Vec<String>,
+    bluetooth_devices: Vec<String>,
+    audio_devices: Vec<String>,
+    usb_peripherals: Vec<String>,
+    is_laptop_override: Option<bool>,
+}
+
+#[cfg(windows)]
+fn fetch_platform_hw_details(ram_gb: f32) -> PlatformHwDetails {
+    let mut hw = PlatformHwDetails::default();
+    let ps = r#"
+$ErrorActionPreference = 'SilentlyContinue'
+$out = [ordered]@{}
+
+$bb = Get-CimInstance Win32_BaseBoard | Select-Object -First 1 Manufacturer, Product
+if ($bb) {
+    $out.motherboard = ("$($bb.Manufacturer) $($bb.Product)").Trim()
+}
+
+$ddrMap = @{
+    20 = 'DDR'; 21 = 'DDR2'; 22 = 'DDR2'; 24 = 'DDR3';
+    26 = 'DDR4'; 27 = 'LPDDR'; 28 = 'LPDDR2'; 29 = 'LPDDR3';
+    30 = 'LPDDR4'; 34 = 'DDR5'; 35 = 'LPDDR5'
+}
+$out.ram_sticks = @(Get-CimInstance Win32_PhysicalMemory | ForEach-Object {
+    $gb = [math]::Round([double]$_.Capacity / 1GB, 1)
+    $spd = if ($_.ConfiguredClockSpeed -gt 0) { [int]$_.ConfiguredClockSpeed } else { [int]$_.Speed }
+    $gen = $ddrMap[[int]$_.SMBIOSMemoryType]
+    if (-not $gen) { $gen = '' }
+    [ordered]@{
+        gb = $gb
+        gen = $gen
+        speed = $spd
+        mfg = ("$($_.Manufacturer)").Trim()
+        part = ("$($_.PartNumber)").Trim()
+    }
+})
+
+$busMap = @{ 7='USB'; 8='RAID'; 11='SATA'; 12='SAS'; 17='NVMe' }
+$mediaMap = @{ 3='HDD'; 4='SSD'; 5='SCM' }
+$disks = @()
+try {
+    $pd = @(Get-CimInstance -Namespace root\Microsoft\Windows\Storage -ClassName MSFT_PhysicalDisk)
+    foreach ($d in $pd) {
+        $gb = [math]::Round([double]$d.Size / 1GB, 0)
+        $bus = $busMap[[int]$d.BusType]
+        $med = $mediaMap[[int]$d.MediaType]
+        $kindStr = (@($bus, $med) | Where-Object { $_ }) -join ' '
+        $name = ("$($d.FriendlyName)").Trim()
+        if ($name -and $gb -gt 0 -and $name -notmatch 'Virtual Disk|Msft Virtual') {
+            if ($kindStr) { $disks += "$name ($kindStr, $gb GB)" } else { $disks += "$name ($gb GB)" }
+        }
+    }
+} catch {}
+if ($disks.Count -eq 0) {
+    foreach ($d in @(Get-CimInstance Win32_DiskDrive)) {
+        $gb = [math]::Round([double]$d.Size / 1GB, 0)
+        $name = ("$($d.Model)").Trim()
+        $iface = ("$($d.InterfaceType)").Trim()
+        if ($name -and $gb -gt 0 -and $name -notmatch 'Virtual Disk|Msft Virtual') {
+            if ($iface) { $disks += "$name ($iface, $gb GB)" } else { $disks += "$name ($gb GB)" }
+        }
+    }
+}
+$out.storage_drives = @($disks | Select-Object -Unique)
+
+$regVram = @{}
+Get-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\Class\{4d36e968-e325-11ce-bfc1-08002be10318}\0*' -ErrorAction SilentlyContinue | ForEach-Object {
+    $desc = "$($_.'DriverDesc')".Trim()
+    $qw = $_.'HardwareInformation.qwMemorySize'
+    if ($desc -and $qw -is [System.ValueType] -and [double]$qw -gt 0) {
+        $regVram[$desc] = [math]::Round([double]$qw / 1GB, 1)
+    }
+}
+$out.gpus = @(Get-CimInstance Win32_VideoController | ForEach-Object {
+    $gname = "$($_.Name)".Trim()
+    $vgb = if ($regVram.ContainsKey($gname)) { $regVram[$gname] } else { [math]::Round([double]$_.AdapterRAM / 1GB, 1) }
+    [ordered]@{ name = $gname; vram = $vgb }
+})
+
+$mons = @()
+try {
+    foreach ($m in @(Get-CimInstance -Namespace root\wmi -ClassName WmiMonitorID)) {
+        $n = ($m.UserFriendlyName | Where-Object { $_ -ne 0 } | ForEach-Object { [char]$_ }) -join ''
+        if ($n.Trim()) { $mons += $n.Trim() }
+    }
+} catch {}
+if ($mons.Count -eq 0) {
+    $mons = @(Get-CimInstance Win32_DesktopMonitor | ForEach-Object { "$($_.Name)".Trim() } | Where-Object { $_ })
+}
+$out.monitors = @($mons | Select-Object -Unique)
+
+$ch = (Get-CimInstance Win32_SystemEnclosure | Select-Object -First 1 -ExpandProperty ChassisTypes)
+$out.chassis = @($ch)
+
+$nets = @()
+Get-CimInstance Win32_NetworkAdapter | Where-Object {
+    $_.PhysicalAdapter -eq $true -and $_.Name -notmatch 'Virtual|Hyper-V|TAP|VPN|WAN Miniport|Bluetooth|Loopback|Kernel Debug'
+} | ForEach-Object {
+    $kind = if ($_.Name -match 'Wi-Fi|WiFi|Wireless|802\.11|WLAN|AX\d{3}|BE\d{3}' -or $_.NetConnectionID -match 'Wi-Fi|WLAN') { 'Wi-Fi' } else { 'LAN' }
+    $st = if ($_.NetConnectionStatus -eq 2) { 'Connected' } else { 'Idle' }
+    if ($_.Name) { $nets += "${kind}: $($_.Name.Trim()) [$st]" }
+}
+$out.network = @($nets | Select-Object -Unique)
+
+$bt = @()
+Get-CimInstance Win32_PnPEntity | Where-Object {
+    $_.Present -eq $true -and ($_.PNPClass -eq 'Bluetooth' -or $_.Service -match 'BTH|RFCOMM') -and
+    $_.Name -notmatch 'Enumerator|Transport|Protocol|Service|Profile|Device Identification|Avrcp|A2dp|Hands-Free|Standard Serial over Bluetooth|RFCOMM'
+} | ForEach-Object {
+    if ($_.Name) { $bt += $_.Name.Trim() }
+}
+$out.bluetooth = @($bt | Select-Object -Unique)
+
+$aud = @()
+Get-CimInstance Win32_SoundDevice | Where-Object { $_.Status -eq 'OK' } | ForEach-Object {
+    if ($_.Name -and $_.Name -notmatch 'Virtual|VB-Audio|^High Definition Audio Device$|^USB Audio 2\.0$') { $aud += $_.Name.Trim() }
+}
+Get-CimInstance Win32_PnPEntity | Where-Object {
+    $_.Present -eq $true -and $_.PNPClass -eq 'AudioEndpoint' -and $_.Name -notmatch 'VB-Audio'
+} | ForEach-Object {
+    if ($_.Name) { $aud += $_.Name.Trim() }
+}
+$out.audio = @($aud | Select-Object -Unique)
+
+$periph = @()
+Get-CimInstance Win32_PointingDevice | ForEach-Object {
+    if ($_.Name -and $_.Name -notmatch 'HID-compliant mouse|PS/2|USB Input Device') { $periph += "Mouse: $($_.Name.Trim())" }
+}
+Get-CimInstance Win32_Keyboard | ForEach-Object {
+    if ($_.Name -and $_.Name -notmatch 'Enhanced \(101|HID Keyboard Device|Standard PS/2') { $periph += "Keyboard: $($_.Name.Trim())" }
+}
+$usbParents = @(Get-PnpDevice -PresentOnly | Where-Object { $_.InstanceId -match '^USB\\VID_' -and $_.InstanceId -notmatch '&MI_' })
+$usbIds = @($usbParents | ForEach-Object { $_.InstanceId })
+if ($usbIds.Count -gt 0) {
+    Get-PnpDeviceProperty -InstanceId $usbIds -KeyName 'DEVPKEY_Device_BusReportedDeviceDesc' | ForEach-Object {
+        if ($_.Data) {
+            $d = "$($_.Data)".Trim()
+            if ($d -and $d -notmatch 'USB Mass Storage|USB Composite|Generic USB|Root Hub|Input Device|UASP') {
+                $periph += $d
+            }
+        }
+    }
+}
+Get-CimInstance Win32_PnPEntity | Where-Object {
+    $_.Present -eq $true -and ($_.PNPClass -eq 'Camera' -or $_.PNPClass -eq 'Image')
+} | ForEach-Object {
+    if ($_.Name) { $periph += "Camera: $($_.Name.Trim())" }
+}
+$out.peripherals = @($periph | Select-Object -Unique)
+
+$out | ConvertTo-Json -Depth 4 -Compress
+"#;
+
+    let json_arr_str = |v: &serde_json::Value, key: &str| -> Vec<String> {
+        dedupe_clean_list(
+            v.get(key)
+                .and_then(|a| a.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|x| x.as_str().map(|s| s.to_string()))
+                        .collect()
+                })
+                .unwrap_or_default(),
+        )
+    };
+
+    if let Ok(out) = Command::new("powershell")
+        .args(["-NoProfile", "-NonInteractive", "-Command", ps])
+        .creation_flags(CREATE_NO_WINDOW)
+        .output()
+    {
+        if out.status.success() {
+            if let Ok(v) = serde_json::from_slice::<serde_json::Value>(&out.stdout) {
+                if let Some(mb) = v.get("motherboard").and_then(|x| x.as_str()) {
+                    hw.motherboard = mb.trim().to_string();
+                }
+                if let Some(arr) = v.get("ram_sticks").and_then(|x| x.as_array()) {
+                    let mut sticks = Vec::new();
+                    for st in arr {
+                        let gb = st.get("gb").and_then(|x| x.as_f64()).unwrap_or(0.0) as f32;
+                        if gb <= 0.0 {
+                            continue;
+                        }
+                        let gen = st
+                            .get("gen")
+                            .and_then(|x| x.as_str())
+                            .unwrap_or("")
+                            .to_string();
+                        let speed = st.get("speed").and_then(|x| x.as_u64()).unwrap_or(0) as u32;
+                        let part = st
+                            .get("part")
+                            .and_then(|x| x.as_str())
+                            .map(|s| s.trim())
+                            .filter(|s| !s.is_empty() && !s.eq_ignore_ascii_case("unknown"))
+                            .map(|s| s.to_string())
+                            .or_else(|| {
+                                st.get("mfg")
+                                    .and_then(|x| x.as_str())
+                                    .map(|s| s.trim())
+                                    .filter(|s| !s.is_empty() && !s.eq_ignore_ascii_case("unknown"))
+                                    .map(|s| s.to_string())
+                            })
+                            .unwrap_or_default();
+                        sticks.push((gb, gen, speed, part));
+                    }
+                    hw.ram_details = format_ram_sticks_summary(ram_gb, &sticks);
+                }
+                if let Some(arr) = v.get("gpus").and_then(|g| g.as_array()) {
+                    let names: Vec<String> = arr
+                        .iter()
+                        .filter_map(|g| g.get("name").and_then(|n| n.as_str()).map(str::to_string))
+                        .collect();
+                    hw.gpu_name = names.join(" + ");
+                    hw.gpu_vram_gb = arr
+                        .iter()
+                        .filter_map(|g| g.get("vram").and_then(|x| x.as_f64()))
+                        .map(|x| x as f32)
+                        .fold(0.0, f32::max);
+                }
+                hw.storage_drives = json_arr_str(&v, "storage_drives");
+                hw.monitors = json_arr_str(&v, "monitors");
+                hw.network_adapters = json_arr_str(&v, "network");
+                hw.bluetooth_devices = json_arr_str(&v, "bluetooth");
+                hw.audio_devices = json_arr_str(&v, "audio");
+                hw.usb_peripherals = json_arr_str(&v, "peripherals");
+                if let Some(arr) = v.get("chassis").and_then(|c| c.as_array()) {
+                    for c in arr {
+                        if let Some(code) = c.as_u64() {
+                            if matches!(code, 8 | 9 | 10 | 14 | 30 | 31 | 32) {
+                                hw.is_laptop_override = Some(true);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    hw
+}
+
+#[cfg(target_os = "linux")]
+fn fetch_platform_hw_details(ram_gb: f32) -> PlatformHwDetails {
+    let mut hw = PlatformHwDetails::default();
+    let read_trim = |p: &str| -> String {
+        std::fs::read_to_string(p)
+            .unwrap_or_default()
+            .trim()
+            .to_string()
+    };
+
+    // Motherboard / System model + chassis form factor
+    let b_vendor = read_trim("/sys/class/dmi/id/board_vendor");
+    let b_name = read_trim("/sys/class/dmi/id/board_name");
+    let board = format!("{} {}", b_vendor, b_name).trim().to_string();
+    if !board.is_empty() {
+        hw.motherboard = board;
+    } else {
+        let s_vendor = read_trim("/sys/class/dmi/id/sys_vendor");
+        let p_name = read_trim("/sys/class/dmi/id/product_name");
+        hw.motherboard = format!("{} {}", s_vendor, p_name).trim().to_string();
+    }
+    if let Ok(ct) = read_trim("/sys/class/dmi/id/chassis_type").parse::<u64>() {
+        if matches!(ct, 8 | 9 | 10 | 14 | 30 | 31 | 32) {
+            hw.is_laptop_override = Some(true);
+        }
+    }
+
+    // RAM summary (checks optional non-root lshw if installed, otherwise clear total)
+    let mut ram_sticks: Vec<(f32, String, u32, String)> = Vec::new();
+    if let Ok(out) = Command::new("lshw")
+        .args(["-C", "memory", "-json", "-quiet"])
+        .output()
+    {
+        if out.status.success() {
+            if let Ok(val) = serde_json::from_slice::<serde_json::Value>(&out.stdout) {
+                fn collect_lshw_dimms(
+                    v: &serde_json::Value,
+                    out: &mut Vec<(f32, String, u32, String)>,
+                ) {
+                    if let Some(arr) = v.as_array() {
+                        for item in arr {
+                            collect_lshw_dimms(item, out);
+                        }
+                        return;
+                    }
+                    let id = v.get("id").and_then(|x| x.as_str()).unwrap_or("");
+                    if id.starts_with("bank") {
+                        let size_bytes = v.get("size").and_then(|x| x.as_u64()).unwrap_or(0);
+                        if size_bytes > 0 {
+                            let gb = (size_bytes as f64 / (1024.0 * 1024.0 * 1024.0)) as f32;
+                            let desc = v.get("description").and_then(|x| x.as_str()).unwrap_or("");
+                            let gen = ["DDR5", "DDR4", "DDR3", "LPDDR5", "LPDDR4"]
+                                .iter()
+                                .find(|g| desc.to_ascii_uppercase().contains(*g))
+                                .unwrap_or(&"")
+                                .to_string();
+                            let clock_hz = v.get("clock").and_then(|x| x.as_u64()).unwrap_or(0);
+                            let mhz = if clock_hz > 1_000_000 {
+                                (clock_hz / 1_000_000) as u32
+                            } else {
+                                0
+                            };
+                            let part = v
+                                .get("product")
+                                .or_else(|| v.get("vendor"))
+                                .and_then(|x| x.as_str())
+                                .unwrap_or("")
+                                .to_string();
+                            out.push((gb, gen, mhz, part));
+                        }
+                    }
+                    if let Some(children) = v.get("children") {
+                        collect_lshw_dimms(children, out);
+                    }
+                }
+                collect_lshw_dimms(&val, &mut ram_sticks);
+            }
+        }
+    }
+    hw.ram_details = format_ram_sticks_summary(ram_gb, &ram_sticks);
+
+    // Physical Storage Drives via lsblk -J (never mounted partitions)
+    let mut drives = Vec::new();
+    if let Ok(out) = Command::new("lsblk")
+        .args(["-J", "-b", "-o", "NAME,MODEL,SIZE,ROTA,TYPE,TRAN"])
+        .output()
+    {
+        if out.status.success() {
+            if let Ok(v) = serde_json::from_slice::<serde_json::Value>(&out.stdout) {
+                if let Some(arr) = v.get("blockdevices").and_then(|b| b.as_array()) {
+                    for dev in arr {
+                        let dtype = dev.get("type").and_then(|x| x.as_str()).unwrap_or("");
+                        if dtype != "disk" {
+                            continue;
+                        }
+                        let name = dev.get("name").and_then(|x| x.as_str()).unwrap_or("");
+                        let size_b = dev
+                            .get("size")
+                            .and_then(|x| x.as_u64().or_else(|| x.as_str()?.parse().ok()))
+                            .unwrap_or(0);
+                        if size_b < 1_000_000_000 {
+                            continue;
+                        }
+                        let gb = (size_b as f64 / 1_000_000_000.0).round() as u64;
+                        let model = dev
+                            .get("model")
+                            .and_then(|x| x.as_str())
+                            .map(str::trim)
+                            .filter(|s| !s.is_empty())
+                            .unwrap_or(name);
+                        let tran = dev
+                            .get("tran")
+                            .and_then(|x| x.as_str())
+                            .unwrap_or("")
+                            .trim()
+                            .to_ascii_uppercase();
+                        let rota = dev.get("rota").and_then(|x| x.as_bool());
+                        let media = match rota {
+                            Some(false) => "SSD",
+                            Some(true) => "HDD",
+                            None => "",
+                        };
+                        let kind = [tran.as_str(), media]
+                            .into_iter()
+                            .filter(|s| !s.is_empty())
+                            .collect::<Vec<_>>()
+                            .join(" ");
+                        if kind.is_empty() {
+                            drives.push(format!("{} ({} GB)", model, gb));
+                        } else {
+                            drives.push(format!("{} ({}, {} GB)", model, kind, gb));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    if drives.is_empty() {
+        if let Ok(entries) = std::fs::read_dir("/sys/block") {
+            for entry in entries.flatten() {
+                let bname = entry.file_name().to_string_lossy().to_string();
+                if bname.starts_with("loop")
+                    || bname.starts_with("ram")
+                    || bname.starts_with("zram")
+                {
+                    continue;
+                }
+                let base = entry.path();
+                let sectors: u64 = std::fs::read_to_string(base.join("size"))
+                    .ok()
+                    .and_then(|s| s.trim().parse().ok())
+                    .unwrap_or(0);
+                let gb = (sectors * 512) / 1_000_000_000;
+                if gb == 0 {
+                    continue;
+                }
+                let model = std::fs::read_to_string(base.join("device/model"))
+                    .unwrap_or_default()
+                    .trim()
+                    .to_string();
+                let rota = std::fs::read_to_string(base.join("queue/rotational"))
+                    .unwrap_or_default()
+                    .trim()
+                    .to_string();
+                let media = if bname.starts_with("nvme") {
+                    "NVMe SSD"
+                } else if rota == "0" {
+                    "SSD"
+                } else if rota == "1" {
+                    "HDD"
+                } else {
+                    "Disk"
+                };
+                let label = if model.is_empty() { &bname } else { &model };
+                drives.push(format!("{} ({}, {} GB)", label, media, gb));
+            }
+        }
+    }
+    hw.storage_drives = dedupe_clean_list(drives);
+
+    // GPU + optional VRAM via nvidia-smi / AMD sysfs
+    let mut gpus = Vec::new();
+    if let Ok(out) = Command::new("lspci").arg("-mm").output() {
+        if out.status.success() {
+            let txt = String::from_utf8_lossy(&out.stdout);
+            for line in txt.lines() {
+                if line.contains("VGA compatible controller")
+                    || line.contains("3D controller")
+                    || line.contains("Display controller")
+                {
+                    let fields: Vec<&str> = line.split('"').collect();
+                    if fields.len() >= 6 {
+                        gpus.push(format!("{} {}", fields[3], fields[5]).trim().to_string());
+                    } else {
+                        gpus.push(line.to_string());
+                    }
+                }
+            }
+        }
+    }
+    hw.gpu_name = dedupe_clean_list(gpus).join(" + ");
+    if let Ok(out) = Command::new("nvidia-smi")
+        .args(["--query-gpu=memory.total", "--format=csv,noheader,nounits"])
+        .output()
+    {
+        if out.status.success() {
+            if let Some(mb) = String::from_utf8_lossy(&out.stdout)
+                .lines()
+                .next()
+                .and_then(|l| l.trim().parse::<f32>().ok())
+            {
+                hw.gpu_vram_gb = (mb / 1024.0 * 10.0).round() / 10.0;
+            }
+        }
+    }
+    if hw.gpu_vram_gb <= 0.0 {
+        if let Ok(entries) = std::fs::read_dir("/sys/class/drm") {
+            for e in entries.flatten() {
+                let p = e.path().join("device/mem_info_vram_total");
+                if let Ok(bytes_str) = std::fs::read_to_string(p) {
+                    if let Ok(b) = bytes_str.trim().parse::<f64>() {
+                        hw.gpu_vram_gb = hw.gpu_vram_gb.max((b / 1073741824.0) as f32);
+                    }
+                }
+            }
+        }
+    }
+
+    // Monitors (xrandr + DRM sysfs fallback for Wayland)
+    let mut mons = Vec::new();
+    if let Ok(out) = Command::new("xrandr").arg("--listmonitors").output() {
+        if out.status.success() {
+            let txt = String::from_utf8_lossy(&out.stdout);
+            for line in txt.lines().skip(1) {
+                let t = line.trim();
+                if !t.is_empty() {
+                    mons.push(t.to_string());
+                }
+            }
+        }
+    }
+    if mons.is_empty() {
+        if let Ok(entries) = std::fs::read_dir("/sys/class/drm") {
+            for e in entries.flatten() {
+                let p = e.path();
+                if read_trim(&p.join("status").to_string_lossy()) == "connected" {
+                    let name = e.file_name().to_string_lossy().to_string();
+                    mons.push(name);
+                }
+            }
+        }
+    }
+    hw.monitors = dedupe_clean_list(mons);
+
+    // Network (Wi-Fi / LAN)
+    let mut nets = Vec::new();
+    if let Ok(entries) = std::fs::read_dir("/sys/class/net") {
+        for e in entries.flatten() {
+            let ifname = e.file_name().to_string_lossy().to_string();
+            if ifname == "lo"
+                || ifname.starts_with("docker")
+                || ifname.starts_with("veth")
+                || ifname.starts_with("br-")
+                || ifname.starts_with("virbr")
+                || ifname.starts_with("tun")
+                || ifname.starts_with("tap")
+                || ifname.starts_with("wg")
+            {
+                continue;
+            }
+            let base = e.path();
+            let is_wifi = base.join("wireless").exists();
+            let dev_type = read_trim(&base.join("type").to_string_lossy());
+            if !is_wifi && dev_type != "1" {
+                continue;
+            }
+            let kind = if is_wifi { "Wi-Fi" } else { "LAN" };
+            let state = if read_trim(&base.join("operstate").to_string_lossy()) == "up" {
+                "Connected"
+            } else {
+                "Idle"
+            };
+            let driver = std::fs::read_to_string(base.join("device/uevent"))
+                .ok()
+                .and_then(|u| {
+                    u.lines()
+                        .find_map(|l| l.strip_prefix("DRIVER="))
+                        .map(|s| s.to_string())
+                })
+                .unwrap_or_default();
+            if driver.is_empty() {
+                nets.push(format!("{}: {} [{}]", kind, ifname, state));
+            } else {
+                nets.push(format!("{}: {} ({}) [{}]", kind, ifname, driver, state));
+            }
+        }
+    }
+    hw.network_adapters = dedupe_clean_list(nets);
+
+    // Bluetooth
+    let mut bt = Vec::new();
+    if let Ok(entries) = std::fs::read_dir("/sys/class/bluetooth") {
+        for e in entries.flatten() {
+            let name = e.file_name().to_string_lossy().to_string();
+            if !name.contains(':') {
+                bt.push(format!("Bluetooth Adapter ({})", name));
+            }
+        }
+    }
+    if let Ok(out) = Command::new("bluetoothctl")
+        .args(["devices", "Connected"])
+        .output()
+    {
+        if out.status.success() {
+            for line in String::from_utf8_lossy(&out.stdout).lines() {
+                if let Some(rest) = line.strip_prefix("Device ") {
+                    if let Some((_, dev_name)) = rest.split_once(' ') {
+                        bt.push(dev_name.trim().to_string());
+                    }
+                }
+            }
+        }
+    }
+    hw.bluetooth_devices = dedupe_clean_list(bt);
+
+    // Audio / Mic
+    let mut aud = Vec::new();
+    if let Ok(cards) = std::fs::read_to_string("/proc/asound/cards") {
+        for line in cards.lines() {
+            let t = line.trim();
+            if t.starts_with(|c: char| c.is_ascii_digit()) {
+                if let Some((_, desc)) = t.split_once("]: ") {
+                    aud.push(desc.trim().to_string());
+                }
+            }
+        }
+    }
+    hw.audio_devices = dedupe_clean_list(aud);
+
+    // USB Peripherals, Mice & Keyboards
+    let mut periph = Vec::new();
+    if let Ok(out) = Command::new("lsusb").output() {
+        if out.status.success() {
+            for line in String::from_utf8_lossy(&out.stdout).lines() {
+                let lower = line.to_ascii_lowercase();
+                if lower.contains("root hub") || lower.contains("linux foundation") {
+                    continue;
+                }
+                if let Some(idx) = line.find("ID ") {
+                    let after = &line[idx + 3..];
+                    if let Some((_, name)) = after.split_once(' ') {
+                        periph.push(name.trim().to_string());
+                    }
+                }
+            }
+        }
+    }
+    if let Ok(entries) = std::fs::read_dir("/sys/class/input") {
+        for e in entries.flatten() {
+            let name_path = e.path().join("device/name");
+            if let Ok(n) = std::fs::read_to_string(name_path) {
+                let t = n.trim();
+                let tl = t.to_ascii_lowercase();
+                if t.is_empty()
+                    || tl.contains("power button")
+                    || tl.contains("sleep button")
+                    || tl.contains("video bus")
+                    || tl.contains("pc speaker")
+                    || tl.contains("hda ")
+                {
+                    continue;
+                }
+                if tl.contains("mouse")
+                    || tl.contains("keyboard")
+                    || tl.contains("trackpad")
+                    || tl.contains("touchpad")
+                {
+                    periph.push(t.to_string());
+                }
+            }
+        }
+    }
+    hw.usb_peripherals = dedupe_clean_list(periph);
+    hw
+}
+
+#[cfg(target_os = "macos")]
+fn fetch_platform_hw_details(ram_gb: f32) -> PlatformHwDetails {
+    let mut hw = PlatformHwDetails::default();
+    let out = match Command::new("system_profiler")
+        .args([
+            "SPHardwareDataType",
+            "SPMemoryDataType",
+            "SPNVMeDataType",
+            "SPSerialATADataType",
+            "SPDisplaysDataType",
+            "SPAudioDataType",
+            "SPAirPortDataType",
+            "SPEthernetDataType",
+            "SPBluetoothDataType",
+            "SPUSBDataType",
+            "-json",
+        ])
+        .output()
+    {
+        Ok(o) if o.status.success() => o,
+        _ => return hw,
+    };
+
+    let v: serde_json::Value = match serde_json::from_slice(&out.stdout) {
+        Ok(val) => val,
+        Err(_) => return hw,
+    };
+
+    if let Some(first) = v
+        .get("SPHardwareDataType")
+        .and_then(|x| x.as_array())
+        .and_then(|a| a.first())
+    {
+        let mname = first
+            .get("machine_name")
+            .and_then(|x| x.as_str())
+            .unwrap_or("");
+        let mmodel = first
+            .get("machine_model")
+            .and_then(|x| x.as_str())
+            .unwrap_or("");
+        hw.motherboard = format!("{} ({})", mname, mmodel)
+            .trim()
+            .trim_end_matches("()")
+            .trim()
+            .to_string();
+        if mname.to_ascii_lowercase().contains("book")
+            || mmodel.to_ascii_lowercase().contains("book")
+        {
+            hw.is_laptop_override = Some(true);
+        }
+    }
+
+    // RAM / Unified Memory
+    let mut ram_sticks = Vec::new();
+    let mut unified_desc = String::new();
+    if let Some(arr) = v.get("SPMemoryDataType").and_then(|x| x.as_array()) {
+        for item in arr {
+            if let Some(dimms) = item.get("_items").and_then(|x| x.as_array()) {
+                for d in dimms {
+                    let size_s = d.get("dimm_size").and_then(|x| x.as_str()).unwrap_or("");
+                    let gb: f32 = size_s
+                        .split_whitespace()
+                        .next()
+                        .and_then(|n| n.parse().ok())
+                        .unwrap_or(0.0);
+                    if gb <= 0.0 {
+                        continue;
+                    }
+                    let gen = d
+                        .get("dimm_type")
+                        .and_then(|x| x.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    let spd_s = d.get("dimm_speed").and_then(|x| x.as_str()).unwrap_or("");
+                    let mhz: u32 = spd_s
+                        .split_whitespace()
+                        .next()
+                        .and_then(|n| n.parse().ok())
+                        .unwrap_or(0);
+                    let mfg = d
+                        .get("dimm_manufacturer")
+                        .and_then(|x| x.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    ram_sticks.push((gb, gen, mhz, mfg));
+                }
+            } else if let Some(d_type) = item.get("dimm_type").and_then(|x| x.as_str()) {
+                let mfg = item
+                    .get("dimm_manufacturer")
+                    .and_then(|x| x.as_str())
+                    .unwrap_or("");
+                unified_desc = format!("{:.1} GB ({} {})", ram_gb, mfg, d_type)
+                    .trim()
+                    .to_string();
+            }
+        }
+    }
+    hw.ram_details = if !ram_sticks.is_empty() {
+        format_ram_sticks_summary(ram_gb, &ram_sticks)
+    } else if !unified_desc.is_empty() {
+        unified_desc
+    } else {
+        format!("{:.1} GB", ram_gb)
+    };
+
+    // Physical Storage Drives (NVMe + SATA)
+    let mut drives = Vec::new();
+    for (section_key, bus_lbl) in [("SPNVMeDataType", "NVMe"), ("SPSerialATADataType", "SATA")] {
+        if let Some(controllers) = v.get(section_key).and_then(|x| x.as_array()) {
+            for ctrl in controllers {
+                if let Some(items) = ctrl.get("_items").and_then(|x| x.as_array()) {
+                    for d in items {
+                        let name = d
+                            .get("device_model")
+                            .or_else(|| d.get("_name"))
+                            .and_then(|x| x.as_str())
+                            .unwrap_or("")
+                            .trim();
+                        if name.is_empty() {
+                            continue;
+                        }
+                        let size = d.get("size").and_then(|x| x.as_str()).unwrap_or("");
+                        if size.is_empty() {
+                            drives.push(format!("{} ({})", name, bus_lbl));
+                        } else {
+                            drives.push(format!("{} ({}, {})", name, bus_lbl, size));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    hw.storage_drives = dedupe_clean_list(drives);
+
+    // GPUs & Monitors
+    if let Some(arr) = v.get("SPDisplaysDataType").and_then(|d| d.as_array()) {
+        let mut gpus = Vec::new();
+        let mut mons = Vec::new();
+        for card in arr {
+            if let Some(m) = card.get("sppci_model").and_then(|x| x.as_str()) {
+                gpus.push(m.to_string());
+            }
+            if let Some(vram_s) = card
+                .get("_spdisplays_vram")
+                .or_else(|| card.get("spdisplays_vram"))
+                .and_then(|x| x.as_str())
+            {
+                if let Some(num) = vram_s
+                    .split_whitespace()
+                    .next()
+                    .and_then(|n| n.parse::<f32>().ok())
+                {
+                    let gb = if vram_s.contains("MB") {
+                        num / 1024.0
+                    } else {
+                        num
+                    };
+                    hw.gpu_vram_gb = hw.gpu_vram_gb.max(gb);
+                }
+            }
+            if let Some(ndrvs) = card.get("spdisplays_ndrvs").and_then(|d| d.as_array()) {
+                for d in ndrvs {
+                    if let Some(n) = d.get("_name").and_then(|x| x.as_str()) {
+                        mons.push(n.to_string());
+                    }
+                }
+            }
+        }
+        hw.gpu_name = dedupe_clean_list(gpus).join(" + ");
+        hw.monitors = dedupe_clean_list(mons);
+    }
+
+    // Network (Wi-Fi & Ethernet LAN)
+    let mut nets = Vec::new();
+    if let Some(arr) = v.get("SPAirPortDataType").and_then(|x| x.as_array()) {
+        for item in arr {
+            if let Some(ifaces) = item
+                .get("spairport_airport_interfaces")
+                .and_then(|x| x.as_array())
+            {
+                for iface in ifaces {
+                    let name = iface.get("_name").and_then(|x| x.as_str()).unwrap_or("en0");
+                    let card_t = iface
+                        .get("spairport_wireless_card_type")
+                        .and_then(|x| x.as_str())
+                        .unwrap_or("Wi-Fi");
+                    nets.push(format!("Wi-Fi: {} ({})", card_t, name));
+                }
+            }
+        }
+    }
+    if let Some(arr) = v.get("SPEthernetDataType").and_then(|x| x.as_array()) {
+        for item in arr {
+            if let Some(cards) = item.get("ethernet_cards").and_then(|x| x.as_array()) {
+                for c in cards {
+                    let name = c
+                        .get("spethernet_device-name")
+                        .or_else(|| c.get("_name"))
+                        .and_then(|x| x.as_str())
+                        .unwrap_or("Ethernet");
+                    nets.push(format!("LAN: {}", name));
+                }
+            } else if let Some(name) = item.get("_name").and_then(|x| x.as_str()) {
+                nets.push(format!("LAN: {}", name));
+            }
+        }
+    }
+    hw.network_adapters = dedupe_clean_list(nets);
+
+    // Bluetooth
+    let mut bt = Vec::new();
+    if let Some(arr) = v.get("SPBluetoothDataType").and_then(|x| x.as_array()) {
+        for item in arr {
+            if let Some(chip) = item
+                .get("controller_properties")
+                .and_then(|c| c.get("controller_chipset"))
+                .and_then(|x| x.as_str())
+            {
+                bt.push(chip.to_string());
+            }
+            if let Some(devs) = item.get("device_connected").and_then(|x| x.as_array()) {
+                for dev in devs {
+                    if let Some(obj) = dev.as_object() {
+                        for k in obj.keys() {
+                            bt.push(k.clone());
+                        }
+                    }
+                }
+            }
+        }
+    }
+    hw.bluetooth_devices = dedupe_clean_list(bt);
+
+    // Audio / Mic
+    let mut aud = Vec::new();
+    if let Some(arr) = v.get("SPAudioDataType").and_then(|x| x.as_array()) {
+        for item in arr {
+            if let Some(devs) = item.get("_items").and_then(|x| x.as_array()) {
+                for d in devs {
+                    if let Some(n) = d.get("_name").and_then(|x| x.as_str()) {
+                        aud.push(n.to_string());
+                    }
+                }
+            }
+        }
+    }
+    hw.audio_devices = dedupe_clean_list(aud);
+
+    // USB Peripherals (recursive walk through nested hubs)
+    let mut usb = Vec::new();
+    fn walk_mac_usb(val: &serde_json::Value, out: &mut Vec<String>) {
+        if let Some(arr) = val.as_array() {
+            for item in arr {
+                walk_mac_usb(item, out);
+            }
+            return;
+        }
+        if let Some(name) = val.get("_name").and_then(|x| x.as_str()) {
+            let nl = name.to_ascii_lowercase();
+            if !nl.contains("bus") && !nl.contains("root hub") && nl != "hub" {
+                out.push(name.to_string());
+            }
+        }
+        if let Some(children) = val.get("_items") {
+            walk_mac_usb(children, out);
+        }
+    }
+    if let Some(arr) = v.get("SPUSBDataType") {
+        walk_mac_usb(arr, &mut usb);
+    }
+    hw.usb_peripherals = dedupe_clean_list(usb);
+    hw
+}
+
+#[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
+fn fetch_platform_hw_details(ram_gb: f32) -> PlatformHwDetails {
+    PlatformHwDetails {
+        ram_details: format!("{:.1} GB", ram_gb),
+        ..Default::default()
+    }
+}
+
 pub fn trigger_spec_fetch_locked(s: &mut SharedState, state: Arc<Mutex<SharedState>>) {
     if s.watt_calc.spec_fetch_in_progress {
         return;
@@ -5172,7 +6091,7 @@ pub fn trigger_spec_fetch_locked(s: &mut SharedState, state: Arc<Mutex<SharedSta
     let gpu_pwr_w = s.gpu_power_mw.map(|mw| mw as f32 / 1000.0);
 
     std::thread::spawn(move || {
-        let (cpu_brand, cpu_cores, ram_gb) = match System::new() {
+        let (cpu_brand, cpu_cores, cpu_logical_threads, ram_gb) = match System::new() {
             Ok(mut sys) => {
                 sys.refresh_cpu_list(sysinfo::CpuRefreshKind::everything());
                 sys.refresh_memory();
@@ -5182,17 +6101,15 @@ pub fn trigger_spec_fetch_locked(s: &mut SharedState, state: Arc<Mutex<SharedSta
                     .map(|c| c.brand().trim().to_string())
                     .filter(|s| !s.is_empty())
                     .unwrap_or_else(|| "Unknown CPU".to_string());
-                let cores = System::physical_core_count()
-                    .ok()
-                    .unwrap_or_else(|| sys.cpus().len().max(1));
+                let threads = sys.cpus().len().max(1);
+                let cores = System::physical_core_count().ok().unwrap_or(threads);
                 let ram = (sys.total_memory() as f64 / (1024.0 * 1024.0 * 1024.0)) as f32;
-                (brand, cores, ram)
+                (brand, cores, threads.max(cores), ram)
             }
-            Err(_) => (
-                "Unknown CPU".to_string(),
-                System::physical_core_count().unwrap_or(1),
-                0.0,
-            ),
+            Err(_) => {
+                let cores = System::physical_core_count().unwrap_or(1);
+                ("Unknown CPU".to_string(), cores, cores, 0.0)
+            }
         };
         let os_name = System::long_os_version()
             .ok()
@@ -5208,138 +6125,74 @@ pub fn trigger_spec_fetch_locked(s: &mut SharedState, state: Arc<Mutex<SharedSta
             Err(_) => "Unknown".to_string(),
         };
 
-        #[allow(unused_mut)]
-        let mut gpu_name = String::new();
-        #[allow(unused_mut)]
-        let mut gpu_vram_gb = 0.0f32;
-        let mut monitors: Vec<String> = Vec::new();
-        #[allow(unused_mut)]
-        let mut is_laptop = get_battery_status().has_battery;
-
-        #[cfg(windows)]
-        {
-            let ps = r#"
-$gpus = @(Get-CimInstance Win32_VideoController | ForEach-Object { @{ name = $_.Name; vram = [math]::Round(($_.AdapterRAM / 1GB), 1) } })
-$mons = @(Get-CimInstance -Namespace root\wmi WmiMonitorID -ErrorAction SilentlyContinue | ForEach-Object {
-    $n = ($_.UserFriendlyName | Where-Object { $_ -ne 0 } | ForEach-Object { [char]$_ }) -join ''
-    if ([string]::IsNullOrWhiteSpace($n)) { $n = 'Display' }
-    $n
-})
-if ($mons.Count -eq 0) {
-    $mons = @(Get-CimInstance Win32_DesktopMonitor -ErrorAction SilentlyContinue | ForEach-Object { $_.Name })
-}
-$ch = (Get-CimInstance Win32_SystemEnclosure -ErrorAction SilentlyContinue | Select-Object -First 1 -ExpandProperty ChassisTypes)
-@{ gpus = $gpus; mons = $mons; chassis = @($ch) } | ConvertTo-Json -Compress
-"#;
-            if let Ok(out) = Command::new("powershell")
-                .args(["-NoProfile", "-NonInteractive", "-Command", ps])
-                .creation_flags(CREATE_NO_WINDOW)
-                .output()
-            {
-                if out.status.success() {
-                    if let Ok(v) = serde_json::from_slice::<serde_json::Value>(&out.stdout) {
-                        if let Some(arr) = v.get("gpus").and_then(|g| g.as_array()) {
-                            let names: Vec<String> = arr
-                                .iter()
-                                .filter_map(|g| {
-                                    g.get("name")
-                                        .and_then(|n| n.as_str())
-                                        .map(|s| s.to_string())
-                                })
-                                .collect();
-                            gpu_name = names.join(" + ");
-                            gpu_vram_gb = arr
-                                .iter()
-                                .filter_map(|g| g.get("vram").and_then(|x| x.as_f64()))
-                                .map(|x| x as f32)
-                                .fold(0.0, f32::max);
-                        }
-                        if let Some(arr) = v.get("mons").and_then(|m| m.as_array()) {
-                            monitors = arr
-                                .iter()
-                                .filter_map(|m| m.as_str().map(|s| s.trim().to_string()))
-                                .filter(|s| !s.is_empty())
-                                .collect();
-                        }
-                        if let Some(arr) = v.get("chassis").and_then(|c| c.as_array()) {
-                            for c in arr {
-                                if let Some(code) = c.as_u64() {
-                                    if matches!(code, 8 | 9 | 10 | 14 | 30 | 31 | 32) {
-                                        is_laptop = true;
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        #[cfg(target_os = "linux")]
-        {
-            if let Ok(out) = Command::new("xrandr").arg("--listmonitors").output() {
-                if out.status.success() {
-                    let txt = String::from_utf8_lossy(&out.stdout);
-                    for line in txt.lines().skip(1) {
-                        let t = line.trim();
-                        if !t.is_empty() {
-                            monitors.push(t.to_string());
-                        }
-                    }
-                }
-            }
-        }
-
-        #[cfg(target_os = "macos")]
-        {
-            if let Ok(out) = Command::new("system_profiler")
-                .args(["SPDisplaysDataType", "-json"])
-                .output()
-            {
-                if out.status.success() {
-                    if let Ok(v) = serde_json::from_slice::<serde_json::Value>(&out.stdout) {
-                        if let Some(arr) = v.get("SPDisplaysDataType").and_then(|d| d.as_array()) {
-                            if let Some(first) = arr.first() {
-                                gpu_name = first
-                                    .get("sppci_model")
-                                    .and_then(|m| m.as_str())
-                                    .unwrap_or("")
-                                    .to_string();
-                                if let Some(ndrvs) =
-                                    first.get("spdisplays_ndrvs").and_then(|d| d.as_array())
-                                {
-                                    for d in ndrvs {
-                                        if let Some(n) = d.get("_name").and_then(|x| x.as_str()) {
-                                            monitors.push(n.to_string());
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
+        let hw = fetch_platform_hw_details(ram_gb);
+        let is_laptop = hw
+            .is_laptop_override
+            .unwrap_or_else(|| get_battery_status().has_battery);
+        let ram_details = if hw.ram_details.is_empty() {
+            format!("{:.1} GB", ram_gb)
+        } else {
+            hw.ram_details
+        };
 
         let specs = DetectedSystemSpecs {
             fetched: true,
             os_name,
+            motherboard: hw.motherboard,
             cpu_brand,
             cpu_cores,
+            cpu_logical_threads,
             ram_gb,
-            gpu_name,
-            gpu_vram_gb,
+            ram_details,
+            gpu_name: hw.gpu_name,
+            gpu_vram_gb: hw.gpu_vram_gb,
             gpu_live_power_w: gpu_pwr_w,
             storage_summary,
-            monitors,
+            storage_drives: hw.storage_drives,
+            monitors: hw.monitors,
+            network_adapters: hw.network_adapters,
+            bluetooth_devices: hw.bluetooth_devices,
+            audio_devices: hw.audio_devices,
+            usb_peripherals: hw.usb_peripherals,
             is_laptop,
         };
 
         let mut s = state.lock().unwrap();
         s.watt_calc.spec_fetch_in_progress = false;
         if !specs.monitors.is_empty() {
-            s.watt_calc.monitor_count = specs.monitors.len() as u32;
+            let new_count = specs.monitors.len() as u32;
+            if !s.detected_specs.fetched
+                && s.watt_calc.monitor_count <= 1
+                && new_count > 1
+                && s.watt_calc.monitor_each_w > 55.0
+            {
+                // Initial monitor_each_w came from config.monitor_watts (total across monitors);
+                // split evenly across newly discovered displays instead of multiplying total by N.
+                s.watt_calc.monitor_each_w = (s.watt_calc.monitor_each_w / new_count as f32)
+                    .round()
+                    .clamp(5.0, 200.0);
+            }
+            s.watt_calc.monitor_count = new_count;
             s.watt_calc.monitor_models_note = specs.monitors.join(", ");
+        }
+        if s.watt_calc.extra_gear_note == WattCalculatorState::default().extra_gear_note {
+            let mut gear: Vec<String> = Vec::new();
+            for item in specs
+                .usb_peripherals
+                .iter()
+                .chain(specs.audio_devices.iter())
+                .chain(specs.bluetooth_devices.iter())
+            {
+                if gear.len() >= 6 {
+                    break;
+                }
+                if !gear.iter().any(|g| g.eq_ignore_ascii_case(item)) {
+                    gear.push(item.clone());
+                }
+            }
+            if !gear.is_empty() {
+                s.watt_calc.extra_gear_note = gear.join(", ");
+            }
         }
         if let Some(w) = gpu_pwr_w {
             if w >= 1.0 && w <= 150.0 {
@@ -5358,7 +6211,7 @@ $ch = (Get-CimInstance Win32_SystemEnclosure -ErrorAction SilentlyContinue | Sel
             s.config.electricity_rate_kwh,
         );
         s.watt_calc.generated_prompt = prompt;
-        s.set_toast("System hardware specs fetched for Watt Calculator.");
+        s.set_toast("Detailed hardware specs, drives, RAM, network & peripherals fetched.");
     });
 }
 
@@ -6501,28 +7354,94 @@ impl eframe::App for AgentPowerGuardApp {
                             });
                             ui.add_space(6.0);
                             if !s.detected_specs.fetched {
-                                ui.label(egui::RichText::new("Click 'Fetch System Specs' to scan CPU, RAM, GPU, storage, and connected monitors.").weak().size(12.0));
+                                ui.label(egui::RichText::new("Click 'Fetch System Specs' to scan motherboard, CPU, RAM sticks, physical drives, GPU, displays, Wi-Fi/LAN, Bluetooth, audio & USB devices.").weak().size(12.0));
                             } else {
                                 let mon_str = if s.detected_specs.monitors.is_empty() {
                                     "Not auto-detected (enter in Step 2)".to_string()
                                 } else {
                                     s.detected_specs.monitors.join(", ")
                                 };
-                                egui::Grid::new("specs_grid").num_columns(2).spacing([14.0, 4.0]).show(ui, |ui| {
-                                    ui.label(egui::RichText::new("OS / Type:").weak());
-                                    ui.label(format!("{} ({})", s.detected_specs.os_name, if s.detected_specs.is_laptop { "Laptop" } else { "Desktop" }));
+                                let storage_str = if !s.detected_specs.storage_drives.is_empty() {
+                                    s.detected_specs.storage_drives.join("  |  ")
+                                } else {
+                                    s.detected_specs.storage_summary.clone()
+                                };
+                                let net_str = if s.detected_specs.network_adapters.is_empty() {
+                                    "Not detected".to_string()
+                                } else {
+                                    s.detected_specs.network_adapters.join("  |  ")
+                                };
+                                let bt_audio_str = {
+                                    let mut parts = Vec::new();
+                                    if !s.detected_specs.bluetooth_devices.is_empty() {
+                                        parts.push(format!("BT: {}", s.detected_specs.bluetooth_devices.join(", ")));
+                                    }
+                                    if !s.detected_specs.audio_devices.is_empty() {
+                                        parts.push(format!("Audio: {}", s.detected_specs.audio_devices.join(", ")));
+                                    }
+                                    if parts.is_empty() {
+                                        "None detected".to_string()
+                                    } else {
+                                        parts.join("  |  ")
+                                    }
+                                };
+                                let periph_str = if s.detected_specs.usb_peripherals.is_empty() {
+                                    "Standard input devices".to_string()
+                                } else {
+                                    s.detected_specs.usb_peripherals.join(", ")
+                                };
+                                let mobo_part = if s.detected_specs.motherboard.is_empty() {
+                                    String::new()
+                                } else {
+                                    format!("  |  Board: {}", s.detected_specs.motherboard)
+                                };
+                                egui::Grid::new("specs_grid").num_columns(2).spacing([14.0, 5.0]).show(ui, |ui| {
+                                    ui.label(egui::RichText::new("OS / Board:").weak());
+                                    ui.add(egui::Label::new(format!(
+                                        "{} ({}){}",
+                                        s.detected_specs.os_name,
+                                        if s.detected_specs.is_laptop { "Laptop" } else { "Desktop" },
+                                        mobo_part
+                                    )).wrap());
                                     ui.end_row();
                                     ui.label(egui::RichText::new("CPU:").weak());
-                                    ui.label(format!("{} ({} cores)", s.detected_specs.cpu_brand, s.detected_specs.cpu_cores));
+                                    ui.add(egui::Label::new(format!(
+                                        "{} ({} cores / {} threads)",
+                                        s.detected_specs.cpu_brand,
+                                        s.detected_specs.cpu_cores,
+                                        s.detected_specs.cpu_logical_threads.max(s.detected_specs.cpu_cores)
+                                    )).wrap());
                                     ui.end_row();
-                                    ui.label(egui::RichText::new("Memory & Storage:").weak());
-                                    ui.label(format!("{:.1} GB RAM | {}", s.detected_specs.ram_gb, s.detected_specs.storage_summary));
+                                    ui.label(egui::RichText::new("RAM:").weak());
+                                    ui.add(egui::Label::new(
+                                        if s.detected_specs.ram_details.is_empty() {
+                                            format!("{:.1} GB RAM", s.detected_specs.ram_gb)
+                                        } else {
+                                            s.detected_specs.ram_details.clone()
+                                        }
+                                    ).wrap());
                                     ui.end_row();
                                     ui.label(egui::RichText::new("GPU:").weak());
-                                    ui.label(format!("{} ({:.1} GB VRAM)", if s.detected_specs.gpu_name.is_empty() { "Integrated" } else { &s.detected_specs.gpu_name }, s.detected_specs.gpu_vram_gb));
+                                    ui.add(egui::Label::new(format!(
+                                        "{} ({:.1} GB VRAM)",
+                                        if s.detected_specs.gpu_name.is_empty() { "Integrated" } else { &s.detected_specs.gpu_name },
+                                        s.detected_specs.gpu_vram_gb
+                                    )).wrap());
                                     ui.end_row();
-                                    ui.label(egui::RichText::new("Detected Displays:").weak());
-                                    ui.label(mon_str);
+                                    ui.label(egui::RichText::new("Storage Drives:").weak());
+                                    ui.add(egui::Label::new(storage_str).wrap());
+                                    ui.end_row();
+                                    ui.label(egui::RichText::new("Displays:").weak());
+                                    ui.add(egui::Label::new(mon_str).wrap());
+                                    ui.end_row();
+                                    ui.label(egui::RichText::new("Wi-Fi / LAN:").weak());
+                                    ui.add(egui::Label::new(net_str).wrap());
+                                    ui.end_row();
+                                    ui.label(egui::RichText::new("Bluetooth / Audio:").weak());
+                                    ui.add(egui::Label::new(bt_audio_str).wrap());
+                                    ui.end_row();
+                                    ui.label(egui::RichText::new("USB & Peripherals:").weak());
+                                    ui.add(egui::Label::new(periph_str).wrap());
                                     ui.end_row();
                                 });
                             }
@@ -6542,77 +7461,107 @@ impl eframe::App for AgentPowerGuardApp {
                             egui::Grid::new("watt_inputs_grid").num_columns(2).spacing([16.0, 8.0]).show(ui, |ui| {
                                 ui.label("SMPS / PSU:");
                                 ui.horizontal_wrapped(|ui| {
-                                    ui.add(egui::TextEdit::singleline(&mut s.watt_calc.smps_model_note).desired_width(240.0));
-                                    ui.label("Rated:");
-                                    ui.add(egui::DragValue::new(&mut s.watt_calc.psu_wattage).range(45..=2000).suffix(" W"));
-                                    ui.label("Efficiency:");
-                                    ui.add(egui::DragValue::new(&mut s.watt_calc.psu_efficiency_pct).range(60.0..=96.0).suffix("%"));
+                                    ui.add(egui::TextEdit::singleline(&mut s.watt_calc.smps_model_note).desired_width(230.0));
+                                    ui.horizontal(|ui| {
+                                        ui.label("Rated:");
+                                        ui.add(egui::DragValue::new(&mut s.watt_calc.psu_wattage).range(45..=2000).suffix(" W"));
+                                    });
+                                    ui.horizontal(|ui| {
+                                        ui.label("Efficiency:");
+                                        ui.add(egui::DragValue::new(&mut s.watt_calc.psu_efficiency_pct).range(60.0..=96.0).suffix("%"));
+                                    });
                                 });
                                 ui.end_row();
 
                                 ui.label("Monitors:");
                                 ui.horizontal_wrapped(|ui| {
-                                    ui.label("Count:");
-                                    ui.add(egui::DragValue::new(&mut s.watt_calc.monitor_count).range(1..=6));
-                                    ui.label("Models:");
-                                    ui.add(egui::TextEdit::singleline(&mut s.watt_calc.monitor_models_note).desired_width(220.0));
-                                    ui.label("Each:");
-                                    ui.add(egui::DragValue::new(&mut s.watt_calc.monitor_each_w).range(5.0..=200.0).suffix(" W"));
+                                    ui.horizontal(|ui| {
+                                        ui.label("Count:");
+                                        ui.add(egui::DragValue::new(&mut s.watt_calc.monitor_count).range(1..=6));
+                                    });
+                                    ui.horizontal(|ui| {
+                                        ui.label("Models:");
+                                        ui.add(egui::TextEdit::singleline(&mut s.watt_calc.monitor_models_note).desired_width(210.0));
+                                    });
+                                    ui.horizontal(|ui| {
+                                        ui.label("Each:");
+                                        ui.add(egui::DragValue::new(&mut s.watt_calc.monitor_each_w).range(5.0..=200.0).suffix(" W"));
+                                    });
                                 });
                                 ui.end_row();
 
                                 ui.label("Peripherals / Meter:");
                                 ui.horizontal_wrapped(|ui| {
                                     ui.add(egui::TextEdit::singleline(&mut s.watt_calc.extra_gear_note).desired_width(240.0));
-                                    ui.label("Wall Meter (0 = calc):");
-                                    ui.add(egui::DragValue::new(&mut s.watt_calc.wall_meter_override_w).range(0.0..=1500.0).suffix(" W"));
+                                    ui.horizontal(|ui| {
+                                        ui.label("Wall Meter (0 = calc):");
+                                        ui.add(egui::DragValue::new(&mut s.watt_calc.wall_meter_override_w).range(0.0..=1500.0).suffix(" W"));
+                                    });
                                 });
                                 ui.end_row();
 
                                 ui.label("Component Idle (W):");
                                 ui.horizontal_wrapped(|ui| {
-                                    ui.label("CPU:");
-                                    ui.add(egui::DragValue::new(&mut s.watt_calc.cpu_idle_w).range(1.0..=300.0).suffix("W"));
-                                    ui.label("GPU:");
-                                    ui.add(egui::DragValue::new(&mut s.watt_calc.gpu_idle_w).range(0.0..=300.0).suffix("W"));
-                                    ui.label("Board/RAM/SSD:");
-                                    ui.add(egui::DragValue::new(&mut s.watt_calc.mobo_ram_ssd_fans_w).range(2.0..=150.0).suffix("W"));
-                                    ui.label("Extras:");
-                                    ui.add(egui::DragValue::new(&mut s.watt_calc.peripherals_w).range(0.0..=100.0).suffix("W"));
-                                    ui.label("Sleep:");
-                                    ui.add(egui::DragValue::new(&mut s.watt_calc.sleep_watts).range(0.5..=50.0).suffix("W"));
+                                    ui.horizontal(|ui| {
+                                        ui.label("CPU:");
+                                        ui.add(egui::DragValue::new(&mut s.watt_calc.cpu_idle_w).range(1.0..=300.0).suffix("W"));
+                                    });
+                                    ui.horizontal(|ui| {
+                                        ui.label("GPU:");
+                                        ui.add(egui::DragValue::new(&mut s.watt_calc.gpu_idle_w).range(0.0..=300.0).suffix("W"));
+                                    });
+                                    ui.horizontal(|ui| {
+                                        ui.label("Board/RAM/SSD:");
+                                        ui.add(egui::DragValue::new(&mut s.watt_calc.mobo_ram_ssd_fans_w).range(2.0..=150.0).suffix("W"));
+                                    });
+                                    ui.horizontal(|ui| {
+                                        ui.label("Extras:");
+                                        ui.add(egui::DragValue::new(&mut s.watt_calc.peripherals_w).range(0.0..=100.0).suffix("W"));
+                                    });
+                                    ui.horizontal(|ui| {
+                                        ui.label("Sleep:");
+                                        ui.add(egui::DragValue::new(&mut s.watt_calc.sleep_watts).range(0.5..=50.0).suffix("W"));
+                                    });
                                 });
                                 ui.end_row();
 
                                 ui.label("Usage & Electricity Rate:");
                                 ui.horizontal_wrapped(|ui| {
-                                    ui.label("Active/day:");
-                                    ui.add(egui::DragValue::new(&mut s.watt_calc.daily_active_hours).range(0.0..=24.0).speed(0.5).suffix("h"));
-                                    ui.label("Sleep/day:");
-                                    ui.add(egui::DragValue::new(&mut s.watt_calc.daily_idle_sleep_hours).range(0.0..=24.0).speed(0.5).suffix("h"));
-                                    ui.label("Currency:");
-                                    let selected_lbl = MAJOR_CURRENCIES
-                                        .iter()
-                                        .find(|c| c.symbol == s.config.currency_symbol)
-                                        .map(|c| c.code.to_string())
-                                        .unwrap_or_else(|| s.config.currency_symbol.clone());
-                                    egui::ComboBox::from_id_salt("calc_currency_combo")
-                                        .selected_text(selected_lbl)
-                                        .width(86.0)
-                                        .show_ui(ui, |ui| {
-                                            for c in MAJOR_CURRENCIES {
-                                                if ui.selectable_label(s.config.currency_symbol == c.symbol, c.label).clicked() {
-                                                    s.config.currency_symbol = c.symbol.to_string();
-                                                    s.custom_currency_input = c.symbol.to_string();
-                                                    s.config_dirty = true;
+                                    ui.horizontal(|ui| {
+                                        ui.label("Active/day:");
+                                        ui.add(egui::DragValue::new(&mut s.watt_calc.daily_active_hours).range(0.0..=24.0).speed(0.5).suffix("h"));
+                                    });
+                                    ui.horizontal(|ui| {
+                                        ui.label("Sleep/day:");
+                                        ui.add(egui::DragValue::new(&mut s.watt_calc.daily_idle_sleep_hours).range(0.0..=24.0).speed(0.5).suffix("h"));
+                                    });
+                                    ui.horizontal(|ui| {
+                                        ui.label("Currency:");
+                                        let selected_lbl = MAJOR_CURRENCIES
+                                            .iter()
+                                            .find(|c| c.symbol == s.config.currency_symbol)
+                                            .map(|c| c.code.to_string())
+                                            .unwrap_or_else(|| s.config.currency_symbol.clone());
+                                        egui::ComboBox::from_id_salt("calc_currency_combo")
+                                            .selected_text(selected_lbl)
+                                            .width(86.0)
+                                            .show_ui(ui, |ui| {
+                                                for c in MAJOR_CURRENCIES {
+                                                    if ui.selectable_label(s.config.currency_symbol == c.symbol, c.label).clicked() {
+                                                        s.config.currency_symbol = c.symbol.to_string();
+                                                        s.custom_currency_input = c.symbol.to_string();
+                                                        s.config_dirty = true;
+                                                    }
                                                 }
-                                            }
-                                        });
-                                    ui.label("Rate/kWh:");
-                                    let csym = s.config.currency_symbol.clone();
-                                    if ui.add(egui::DragValue::new(&mut s.config.electricity_rate_kwh).prefix(&csym).suffix("/kWh").range(0.01..=50000.0).speed(0.1)).changed() {
-                                        s.config_dirty = true;
-                                    }
+                                            });
+                                    });
+                                    ui.horizontal(|ui| {
+                                        ui.label("Rate/kWh:");
+                                        let csym = s.config.currency_symbol.clone();
+                                        if ui.add(egui::DragValue::new(&mut s.config.electricity_rate_kwh).prefix(&csym).suffix("/kWh").range(0.01..=50000.0).speed(0.1)).changed() {
+                                            s.config_dirty = true;
+                                        }
+                                    });
                                 });
                                 ui.end_row();
                             });

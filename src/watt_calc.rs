@@ -145,15 +145,99 @@ pub const MAJOR_CURRENCIES: &[CurrencyOption] = &[
 pub struct DetectedSystemSpecs {
     pub fetched: bool,
     pub os_name: String,
+    pub motherboard: String,
     pub cpu_brand: String,
     pub cpu_cores: usize,
+    pub cpu_logical_threads: usize,
     pub ram_gb: f32,
+    pub ram_details: String,
     pub gpu_name: String,
     pub gpu_vram_gb: f32,
     pub gpu_live_power_w: Option<f32>,
     pub storage_summary: String,
+    pub storage_drives: Vec<String>,
     pub monitors: Vec<String>,
+    pub network_adapters: Vec<String>,
+    pub bluetooth_devices: Vec<String>,
+    pub audio_devices: Vec<String>,
+    pub usb_peripherals: Vec<String>,
     pub is_laptop: bool,
+}
+
+/// Trim entries, remove blanks, and deduplicate case-insensitively while preserving order.
+pub fn dedupe_clean_list(items: Vec<String>) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut seen = Vec::new();
+    for item in items {
+        let trimmed = item.split_whitespace().collect::<Vec<_>>().join(" ");
+        if trimmed.is_empty() {
+            continue;
+        }
+        let lower = trimmed.to_ascii_lowercase();
+        if !seen.iter().any(|s| s == &lower) {
+            seen.push(lower);
+            out.push(trimmed);
+        }
+    }
+    out
+}
+
+/// Group identical RAM modules (e.g. `16.0 GB DDR4-3000 (CMK16...) + 2x 8.0 GB DDR4-3000`).
+pub fn format_ram_sticks_summary(total_gb: f32, sticks: &[(f32, String, u32, String)]) -> String {
+    if sticks.is_empty() {
+        return if total_gb > 0.0 {
+            format!("{:.1} GB", total_gb)
+        } else {
+            "Unknown".to_string()
+        };
+    }
+
+    let mut groups: Vec<(String, usize)> = Vec::new();
+    for (gb, gen, speed, part) in sticks {
+        let cap_str = if (*gb - gb.round()).abs() < 0.15 {
+            format!("{:.0} GB", gb.round())
+        } else {
+            format!("{:.1} GB", gb)
+        };
+        let mut desc = cap_str;
+        match (gen.trim().is_empty(), *speed > 0) {
+            (false, true) => desc.push_str(&format!(" {}-{}", gen.trim(), speed)),
+            (false, false) => desc.push_str(&format!(" {}", gen.trim())),
+            (true, true) => desc.push_str(&format!(" {} MHz", speed)),
+            (true, false) => {}
+        }
+        let clean_part = part.trim();
+        if !clean_part.is_empty()
+            && !clean_part.eq_ignore_ascii_case("unknown")
+            && !clean_part.eq_ignore_ascii_case("0000")
+        {
+            desc.push_str(&format!(" ({})", clean_part));
+        }
+
+        if let Some(existing) = groups.iter_mut().find(|(d, _)| d == &desc) {
+            existing.1 += 1;
+        } else {
+            groups.push((desc, 1));
+        }
+    }
+
+    let modules_str = groups
+        .into_iter()
+        .map(|(desc, count)| {
+            if count > 1 {
+                format!("{}x {}", count, desc)
+            } else {
+                desc
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" + ");
+
+    if total_gb > 0.0 {
+        format!("{:.1} GB total [{}]", total_gb, modules_str)
+    } else {
+        modules_str
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -335,21 +419,61 @@ pub fn build_ai_watt_prompt(
         .gpu_live_power_w
         .map(|w| format!("{:.1} W current board draw", w))
         .unwrap_or_else(|| "N/A".to_string());
+    let ram_line = if !specs.ram_details.is_empty() {
+        specs.ram_details.clone()
+    } else if specs.ram_gb > 0.0 {
+        format!("{:.1} GB", specs.ram_gb)
+    } else {
+        "Unknown".to_string()
+    };
+    let storage_line = if !specs.storage_drives.is_empty() {
+        specs.storage_drives.join(" | ")
+    } else if !specs.storage_summary.is_empty() {
+        specs.storage_summary.clone()
+    } else {
+        "Unknown".to_string()
+    };
+    let network_line = if specs.network_adapters.is_empty() {
+        "Not detected".to_string()
+    } else {
+        specs.network_adapters.join(" | ")
+    };
+    let bt_line = if specs.bluetooth_devices.is_empty() {
+        "None detected".to_string()
+    } else {
+        specs.bluetooth_devices.join(", ")
+    };
+    let audio_line = if specs.audio_devices.is_empty() {
+        "Default / None detected".to_string()
+    } else {
+        specs.audio_devices.join(", ")
+    };
+    let periph_line = if specs.usb_peripherals.is_empty() {
+        "Standard keyboard/mouse".to_string()
+    } else {
+        specs.usb_peripherals.join(", ")
+    };
+    let cpu_threads = specs.cpu_logical_threads.max(specs.cpu_cores);
 
     format!(
         "Estimate accurate wall-plug power consumption (watts) for my computer so I can configure Agent Power Guard.\n\n\
 Detected System Specs:\n\
 - OS: {}\n\
 - Form Factor: {}\n\
-- CPU: {} ({} cores)\n\
-- RAM: {:.1} GB\n\
+- Motherboard / System: {}\n\
+- CPU: {} ({} cores / {} threads)\n\
+- RAM: {}\n\
 - GPU: {} ({:.1} GB VRAM, {})\n\
-- Storage: {}\n\
-- Detected Displays: {}\n\n\
+- Physical Storage Drives: {}\n\
+- Detected Displays: {}\n\
+- Network (Wi-Fi / LAN): {}\n\
+- Bluetooth: {}\n\
+- Audio / Mic / DAC: {}\n\
+- Mouse / Keyboard / USB Peripherals: {}\n\n\
 Manual Hardware & Usage Inputs:\n\
 - SMPS / PSU: {} ({}W, ~{:.0}% efficiency)\n\
 - Monitor count & models: {} ({} monitor(s))\n\
-- Peripherals / extras: {}\n\
+- Peripherals / extras note: {}\n\
 - Electricity rate: {}{:.2}/kWh\n\
 - Typical usage: {:.1}h active/day, {:.1}h idle that should sleep/day\n\n\
 Reply ONLY with a single JSON object using these exact keys (numbers in watts / tariff, no extra markdown):\n\
@@ -368,14 +492,20 @@ Reply ONLY with a single JSON object using these exact keys (numbers in watts / 
 }}",
         if specs.os_name.is_empty() { "Unknown" } else { &specs.os_name },
         if specs.is_laptop { "Laptop" } else { "Desktop" },
+        if specs.motherboard.is_empty() { "Unknown" } else { &specs.motherboard },
         if specs.cpu_brand.is_empty() { "Unknown CPU" } else { &specs.cpu_brand },
         specs.cpu_cores,
-        specs.ram_gb,
+        cpu_threads,
+        ram_line,
         if specs.gpu_name.is_empty() { "Integrated / Unknown" } else { &specs.gpu_name },
         specs.gpu_vram_gb,
         gpu_pwr,
-        if specs.storage_summary.is_empty() { "Unknown" } else { &specs.storage_summary },
+        storage_line,
         monitors_detected,
+        network_line,
+        bt_line,
+        audio_line,
+        periph_line,
         calc.smps_model_note,
         calc.psu_wattage,
         calc.psu_efficiency_pct,
@@ -638,19 +768,30 @@ mod tests {
         let specs = DetectedSystemSpecs {
             fetched: true,
             os_name: "Windows 11".to_string(),
+            motherboard: "Gigabyte B550M DS3H R2".to_string(),
             cpu_brand: "Ryzen 5 5600".to_string(),
             cpu_cores: 6,
+            cpu_logical_threads: 12,
             ram_gb: 32.0,
+            ram_details: "32.0 GB total [16 GB DDR4-3000 + 2x 8 GB DDR4-3000]".to_string(),
             gpu_name: "RTX 3060".to_string(),
             gpu_vram_gb: 12.0,
             gpu_live_power_w: Some(14.5),
             storage_summary: "1x 1TB NVMe".to_string(),
+            storage_drives: vec!["WD Blue SN570 1TB (NVMe SSD, 932 GB)".to_string()],
             monitors: vec!["Acer VG240Y (1920x1080)".to_string()],
+            network_adapters: vec!["LAN: Realtek PCIe GbE [Connected]".to_string()],
+            bluetooth_devices: vec!["TP-Link Bluetooth USB Adapter".to_string()],
+            audio_devices: vec!["Microphone (Blue Snowball)".to_string()],
+            usb_peripherals: vec!["Dell KB216 Wired Keyboard".to_string()],
             is_laptop: false,
         };
         let calc = WattCalculatorState::default();
         let prompt = build_ai_watt_prompt(&specs, &calc, "₹", 9.0);
         assert!(prompt.contains("Ryzen 5 5600"));
+        assert!(prompt.contains("Gigabyte B550M DS3H R2"));
+        assert!(prompt.contains("WD Blue SN570 1TB"));
+        assert!(prompt.contains("Blue Snowball"));
         assert!(prompt.contains("₹9.00/kWh"));
 
         let ai_reply = "Here is your estimated breakdown:\n```json\n{\n  \"active_watts\": 115,\n  \"monitor_watts\": 25,\n  \"sleep_watts\": 3,\n  \"currency_symbol\": \"INR\",\n  \"electricity_rate_kwh\": 9.0,\n  \"notes\": \"Ryzen 5600 + RTX 3060 idle + Acer VG240Y\"\n}\n```\nHope this helps!";
@@ -660,5 +801,26 @@ mod tests {
         assert_eq!(parsed.sleep_watts, Some(3.0));
         assert_eq!(parsed.currency_symbol.as_deref(), Some("₹"));
         assert_eq!(parsed.electricity_rate_kwh, Some(9.0));
+    }
+
+    #[test]
+    fn test_ram_formatter_and_dedupe_clean_list() {
+        let sticks = vec![
+            (16.0, "DDR4".to_string(), 3000, "CMK16GX4".to_string()),
+            (8.0, "DDR4".to_string(), 3000, "CMK8GX4".to_string()),
+            (8.0, "DDR4".to_string(), 3000, "CMK8GX4".to_string()),
+        ];
+        let summary = format_ram_sticks_summary(31.9, &sticks);
+        assert!(summary.contains("31.9 GB total"));
+        assert!(summary.contains("16 GB DDR4-3000 (CMK16GX4)"));
+        assert!(summary.contains("2x 8 GB DDR4-3000 (CMK8GX4)"));
+
+        let cleaned = dedupe_clean_list(vec![
+            "  Blue   Snowball ".to_string(),
+            "".to_string(),
+            "blue snowball".to_string(),
+            "Dell KB216".to_string(),
+        ]);
+        assert_eq!(cleaned, vec!["Blue Snowball", "Dell KB216"]);
     }
 }

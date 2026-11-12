@@ -667,7 +667,7 @@ The **Energy & Cost Savings** tab measures real wall-clock standby durations (`b
 - **26 built-in currencies + Custom symbol:** Supports `INR (₹)`, `USD ($)`, `EUR (€)`, `GBP (£)`, `JPY (¥)`, `CAD (C$)`, `AUD (A$)`, `CHF`, `CNY`, `KRW`, `SGD`, `HKD`, `NZD`, `SEK`, `NOK`, `PLN`, `BRL`, `MXN`, `ZAR`, `AED`, `SAR`, `TRY`, `PHP`, `THB`, `VND`, `IDR`, plus any user-entered custom currency symbol or code.
 - **Daily Power Projections:** Shows live active vs display-off vs sleep draw, daily protected usage cost, and estimated daily / monthly / yearly savings right on the dashboard.
 - **Hardware Watt Calculator & AI Prompt Estimator:**
-  1. **Fetch System Specs:** Automatically detects OS, CPU model/cores, RAM, GPU/VRAM, storage volumes and monitors.
+  1. **Fetch System Specs (Windows, Linux & macOS):** Unprivileged cross-platform hardware detection scans OS/chassis type, motherboard/system model, CPU cores/threads, RAM module count/DDR type/MHz (`Win32_PhysicalMemory`, `lshw`, `system_profiler`), physical storage drive models & bus/media types (`MSFT_PhysicalDisk`/`NVMe`/`SATA`/`USB` via CIM on Windows, `lsblk`/`sysfs` on Linux, `SPNVMeDataType`/`SPSerialATADataType` on macOS — never just volume letters), GPU & VRAM (`AdapterRAM`/registry 64-bit VRAM, `nvidia-smi`/DRM, `SPDisplaysDataType`), displays, Wi-Fi/LAN adapters, Bluetooth devices, audio/mic/USB DAC endpoints, and mouse/keyboard/camera/USB peripherals.
   2. **Manual Inputs & Custom Distribution:** Enter unknown hardware (SMPS/PSU wattage & 80+ efficiency, monitor count & models, peripherals, optional wall-meter override, daily active/idle hours) and customize component watts (`CPU`, `GPU`, `Board/RAM/SSD/Fans`, `Peripherals`, `Monitor`, `Sleep`).
   3. **Zero-API AI Prompt Workflow:** Generates a copy-ready hardware prompt you can paste into any AI chat (ChatGPT, Claude, Gemini); paste the returned JSON reply directly into the app's input field to auto-apply watts, currency and electricity rate.
 - **Local storage:** Defaults start at 150 W active, 50 W display, 3 W sleep (`$0.15`/kWh). Recording can be toggled off anytime; data stays in local `energy_history.json`.
@@ -850,7 +850,7 @@ Unit tests cover the pure signal-conditioning filters (`src/signal.rs`), intent 
 
 <br/>
 
-The version string is duplicated in `Cargo.toml`, `wix/main.wxs` (`Version="x.y.z.0"`), `packaging/macos/Info.plist`, `packaging/build-deb.sh`, and the winget, Scoop, Chocolatey, Homebrew and AUR manifests. `build-msi.ps1` reads `Cargo.toml` and falls back to `1.2.5`. Package-manager manifests also need real SHA-256 values after release checksums are published.
+The version string is duplicated in `Cargo.toml`, `wix/main.wxs` (`Version="x.y.z.0"`), `packaging/macos/Info.plist`, `packaging/build-deb.sh`, and the winget, Scoop, Chocolatey, Homebrew and AUR manifests. `build-msi.ps1` reads `Cargo.toml` and falls back to `1.2.6`. Package-manager manifests also need real SHA-256 values after release checksums are published.
 
 </details>
 
