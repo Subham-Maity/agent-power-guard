@@ -1532,6 +1532,9 @@ impl SharedState {
     pub fn new(config: AppConfig) -> Self {
         let max_cd = config.idle_threshold_secs;
         let op_mode = config.resolved_operational_mode();
+        let init_mon_w = config.monitor_watts;
+        let init_sleep_w = config.sleep_watts;
+        let init_currency = config.currency_symbol.clone();
         let mut eval_state = EvaluationState::default();
         eval_state.countdown_secs = max_cd;
         let now_s = SystemTime::now()
@@ -1623,12 +1626,12 @@ impl SharedState {
 
             detected_specs: DetectedSystemSpecs::default(),
             watt_calc: WattCalculatorState {
-                monitor_each_w: config.monitor_watts,
-                sleep_watts: config.sleep_watts,
+                monitor_each_w: init_mon_w,
+                sleep_watts: init_sleep_w,
                 ..Default::default()
             },
             show_watt_calc_modal: false,
-            custom_currency_input: config.currency_symbol.clone(),
+            custom_currency_input: init_currency,
 
             show_uninstall_modal: false,
             uninstall_wipe_data: false,
@@ -5197,9 +5200,9 @@ pub fn trigger_spec_fetch_locked(s: &mut SharedState, state: Arc<Mutex<SharedSta
 
         let storage_summary = match Disks::new_with_refreshed_list() {
             Ok(disks) => {
-                let disk_count = disks.list().len();
-                let total_disk_gb: u64 = disks.list().iter().map(|d| d.total_space()).sum::<u64>()
-                    / (1024 * 1024 * 1024);
+                let disk_count = disks.len();
+                let total_disk_gb: u64 =
+                    disks.iter().map(|d| d.total_space()).sum::<u64>() / (1024 * 1024 * 1024);
                 format!("{} volume(s) (~{} GB total)", disk_count, total_disk_gb)
             }
             Err(_) => "Unknown".to_string(),
