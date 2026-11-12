@@ -6927,6 +6927,7 @@ fn render_core_spec_pill(
                     if ui
                         .add(
                             egui::Label::new(egui::RichText::new(shown).size(11.5).color(text_col))
+                                .wrap()
                                 .sense(egui::Sense::click()),
                         )
                         .on_hover_text("Click to edit")
@@ -7014,6 +7015,7 @@ fn render_spec_bubble_category(
                                     egui::Label::new(
                                         egui::RichText::new(&items[idx]).size(11.5).color(text_col),
                                     )
+                                    .wrap()
                                     .sense(egui::Sense::click()),
                                 )
                                 .on_hover_text("Click to edit item")
@@ -7633,22 +7635,26 @@ impl eframe::App for AgentPowerGuardApp {
         let mut calc_open = s.show_watt_calc_modal;
         if calc_open {
             let state_arc = self.state.clone();
-            let modal_w = (ui.available_width() - 24.0).clamp(360.0, 840.0);
-            let modal_h = (ui.available_height() - 28.0).clamp(380.0, 740.0);
+            let content_rect = ui.ctx().content_rect();
+            let modal_w = (content_rect.width() - 36.0).clamp(300.0, 820.0);
+            let modal_h = (content_rect.height() - 40.0).clamp(340.0, 720.0);
             egui::Window::new("Hardware Watt Calculator & AI Estimator")
                 .open(&mut calc_open)
+                .collapsible(false)
+                .constrain_to(content_rect)
                 .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
-                .default_size([modal_w, modal_h])
-                .max_width(modal_w)
-                .max_height(modal_h)
+                .fixed_size([modal_w, modal_h])
                 .show(ui.ctx(), |ui| {
+                    let inner_w = (modal_w - 30.0).max(240.0);
                     egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
-                        ui.set_max_width(ui.available_width());
+                        ui.set_width(inner_w);
+                        ui.set_max_width(inner_w);
                         let dark = ui.visuals().dark_mode;
                         let mut any_spec_edited = false;
 
                         // STEP 1: Auto-Fetch & Color-Coded Editable Hardware Bubbles
                         app_card_frame(ui).show(ui, |ui| {
+                            ui.set_width((inner_w - 34.0).max(220.0));
                             ui.horizontal_wrapped(|ui| {
                                 icon_card_title(
                                     ui,
@@ -7885,6 +7891,7 @@ impl eframe::App for AgentPowerGuardApp {
 
                         // STEP 2: Missing Hardware Inputs (SMPS, Fans/ARGB), Custom Watt Distribution & Tariff
                         app_card_frame(ui).show(ui, |ui| {
+                            ui.set_width((inner_w - 34.0).max(220.0));
                             icon_card_title(
                                 ui,
                                 UiIcon::Sliders,
@@ -8092,21 +8099,28 @@ impl eframe::App for AgentPowerGuardApp {
                                 s.watt_calc.daily_idle_sleep_hours,
                             );
                             app_subcard_frame(ui).show(ui, |ui| {
-                                ui.label(
-                                    egui::RichText::new(format!(
-                                        "Active Total: {:.0} W (PC Wall {:.0} W + Monitors {:.0} W)  |  Display Off: {:.0} W  |  Sleep: {:.1} W",
-                                        bd.total_active_watts, bd.wall_pc_watts, bd.total_monitor_watts, proj.display_off_watts, bd.sleep_watts
-                                    ))
-                                    .strong()
-                                    .color(egui::Color32::from_rgb(52, 211, 153)),
+                                ui.set_width((inner_w - 64.0).max(180.0));
+                                ui.add(
+                                    egui::Label::new(
+                                        egui::RichText::new(format!(
+                                            "Active Total: {:.0} W (PC Wall {:.0} W + Monitors {:.0} W)  |  Display Off: {:.0} W  |  Sleep: {:.1} W",
+                                            bd.total_active_watts, bd.wall_pc_watts, bd.total_monitor_watts, proj.display_off_watts, bd.sleep_watts
+                                        ))
+                                        .strong()
+                                        .color(egui::Color32::from_rgb(52, 211, 153)),
+                                    )
+                                    .wrap(),
                                 );
-                                ui.label(
-                                    egui::RichText::new(format!(
-                                        "Daily Protected Cost: {}{:.2}/day ({:.2} kWh)  |  Est. Savings: {}{:.2}/day  |  {}{:.1}/month  |  {}{:.0}/year",
-                                        cur, proj.daily_guard_cost, proj.daily_with_guard_kwh, cur, proj.daily_saved_cost, cur, proj.monthly_saved_cost, cur, proj.yearly_saved_cost
-                                    ))
-                                    .size(12.0)
-                                    .color(egui::Color32::from_rgb(147, 197, 253)),
+                                ui.add(
+                                    egui::Label::new(
+                                        egui::RichText::new(format!(
+                                            "Daily Protected Cost: {}{:.2}/day ({:.2} kWh)  |  Est. Savings: {}{:.2}/day  |  {}{:.1}/month  |  {}{:.0}/year",
+                                            cur, proj.daily_guard_cost, proj.daily_with_guard_kwh, cur, proj.daily_saved_cost, cur, proj.monthly_saved_cost, cur, proj.yearly_saved_cost
+                                        ))
+                                        .size(12.0)
+                                        .color(egui::Color32::from_rgb(147, 197, 253)),
+                                    )
+                                    .wrap(),
                                 );
                             });
                             ui.add_space(6.0);
@@ -8131,6 +8145,7 @@ impl eframe::App for AgentPowerGuardApp {
 
                         // STEP 3: Generate Prompt & Reliable Clipboard Copy
                         app_card_frame(ui).show(ui, |ui| {
+                            ui.set_width((inner_w - 34.0).max(220.0));
                             ui.horizontal_wrapped(|ui| {
                                 icon_card_title(
                                     ui,
@@ -8138,46 +8153,45 @@ impl eframe::App for AgentPowerGuardApp {
                                     egui::Color32::from_rgb(245, 158, 11),
                                     "Step 3: Generate AI Prompt (Use Any AI Chat)",
                                 );
-                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                    if icon_button(
-                                        ui,
-                                        UiIcon::Copy,
-                                        egui::Color32::WHITE,
-                                        "Copy Prompt",
-                                        Some(egui::Color32::from_rgb(37, 99, 235)),
-                                    )
-                                    .clicked()
-                                    {
-                                        if s.watt_calc.generated_prompt.is_empty() {
-                                            s.watt_calc.generated_prompt = build_ai_watt_prompt(
-                                                &s.detected_specs,
-                                                &s.watt_calc,
-                                                &s.config.currency_symbol,
-                                                s.config.electricity_rate_kwh,
-                                            );
-                                        }
-                                        copy_text_reliable(ui.ctx(), &s.watt_calc.generated_prompt);
-                                        s.set_toast("Prompt copied to system clipboard. Paste into ChatGPT, Claude, or Gemini.");
-                                    }
-                                    if icon_button(
-                                        ui,
-                                        UiIcon::Refresh,
-                                        egui::Color32::from_rgb(245, 158, 11),
-                                        "Generate Prompt",
-                                        None,
-                                    )
-                                    .clicked()
-                                    {
-                                        let prompt = build_ai_watt_prompt(
+                                ui.add_space(8.0);
+                                if icon_button(
+                                    ui,
+                                    UiIcon::Refresh,
+                                    egui::Color32::from_rgb(245, 158, 11),
+                                    "Generate Prompt",
+                                    None,
+                                )
+                                .clicked()
+                                {
+                                    let prompt = build_ai_watt_prompt(
+                                        &s.detected_specs,
+                                        &s.watt_calc,
+                                        &s.config.currency_symbol,
+                                        s.config.electricity_rate_kwh,
+                                    );
+                                    s.watt_calc.generated_prompt = prompt;
+                                    s.set_toast("AI prompt updated with current specs & rates.");
+                                }
+                                if icon_button(
+                                    ui,
+                                    UiIcon::Copy,
+                                    egui::Color32::WHITE,
+                                    "Copy Prompt",
+                                    Some(egui::Color32::from_rgb(37, 99, 235)),
+                                )
+                                .clicked()
+                                {
+                                    if s.watt_calc.generated_prompt.is_empty() {
+                                        s.watt_calc.generated_prompt = build_ai_watt_prompt(
                                             &s.detected_specs,
                                             &s.watt_calc,
                                             &s.config.currency_symbol,
                                             s.config.electricity_rate_kwh,
                                         );
-                                        s.watt_calc.generated_prompt = prompt;
-                                        s.set_toast("AI prompt updated with current specs & rates.");
                                     }
-                                });
+                                    copy_text_reliable(ui.ctx(), &s.watt_calc.generated_prompt);
+                                    s.set_toast("Prompt copied to system clipboard. Paste into ChatGPT, Claude, or Gemini.");
+                                }
                             });
                             ui.add_space(4.0);
                             if s.watt_calc.generated_prompt.is_empty() {
@@ -8188,6 +8202,7 @@ impl eframe::App for AgentPowerGuardApp {
                                     s.config.electricity_rate_kwh,
                                 );
                             }
+                            let box_w = (inner_w - 42.0).max(200.0);
                             egui::ScrollArea::vertical()
                                 .id_salt("ai_prompt_scroll")
                                 .max_height(130.0)
@@ -8196,7 +8211,7 @@ impl eframe::App for AgentPowerGuardApp {
                                         egui::TextEdit::multiline(&mut s.watt_calc.generated_prompt)
                                             .code_editor()
                                             .desired_rows(6)
-                                            .desired_width(f32::INFINITY),
+                                            .desired_width(box_w),
                                     );
                                 });
                         });
@@ -8205,6 +8220,7 @@ impl eframe::App for AgentPowerGuardApp {
 
                         // STEP 4: Paste AI JSON Response & Auto-Apply
                         app_card_frame(ui).show(ui, |ui| {
+                            ui.set_width((inner_w - 34.0).max(220.0));
                             ui.horizontal_wrapped(|ui| {
                                 icon_card_title(
                                     ui,
@@ -8212,91 +8228,91 @@ impl eframe::App for AgentPowerGuardApp {
                                     egui::Color32::from_rgb(168, 85, 247),
                                     "Step 4: Paste AI Response & Calculate All Savings",
                                 );
-                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                    if icon_button(
-                                        ui,
-                                        UiIcon::Check,
-                                        egui::Color32::WHITE,
-                                        "Apply AI Response",
-                                        Some(egui::Color32::from_rgb(124, 58, 237)),
-                                    )
-                                    .clicked()
-                                    {
-                                        let raw = s.watt_calc.ai_response_input.clone();
-                                        match parse_ai_watt_response(&raw) {
-                                            Ok(parsed) => {
-                                                if let Some(v) = parsed.cpu_idle_w {
-                                                    s.watt_calc.cpu_idle_w = v;
-                                                }
-                                                if let Some(v) = parsed.gpu_idle_w {
-                                                    s.watt_calc.gpu_idle_w = v;
-                                                }
-                                                if let Some(v) = parsed.mobo_ram_ssd_fans_w {
-                                                    s.watt_calc.mobo_ram_ssd_fans_w = v;
-                                                }
-                                                if let Some(v) = parsed.peripherals_w {
-                                                    s.watt_calc.peripherals_w = v;
-                                                }
-                                                if let Some(v) = parsed.psu_efficiency_pct {
-                                                    s.watt_calc.psu_efficiency_pct = v;
-                                                }
-                                                if let Some(v) = parsed.active_watts {
-                                                    s.config.active_watts = v;
-                                                }
-                                                if let Some(v) = parsed.monitor_watts {
-                                                    s.config.monitor_watts = v;
-                                                    let cnt = s.watt_calc.monitor_count.max(1) as f32;
-                                                    s.watt_calc.monitor_each_w = v / cnt;
-                                                }
-                                                if let Some(v) = parsed.sleep_watts {
-                                                    s.config.sleep_watts = v;
-                                                    s.watt_calc.sleep_watts = v;
-                                                }
-                                                if let Some(sym) = parsed.currency_symbol {
-                                                    s.config.currency_symbol = normalize_currency_input(&sym);
-                                                    s.custom_currency_input = s.config.currency_symbol.clone();
-                                                }
-                                                if let Some(rate) = parsed.electricity_rate_kwh {
-                                                    s.config.electricity_rate_kwh = rate;
-                                                }
-                                                if let Some(notes) = parsed.notes {
-                                                    s.watt_calc.ai_notes = notes;
-                                                }
-                                                s.config_dirty = true;
-                                                s.watt_calc.ai_parse_status = Some(format!(
-                                                    "Applied: Active {:.0}W, Monitor {:.0}W, Sleep {:.1}W, Rate {}{:.2}/kWh",
-                                                    s.config.active_watts,
-                                                    s.config.monitor_watts,
-                                                    s.config.sleep_watts,
-                                                    s.config.currency_symbol,
-                                                    s.config.electricity_rate_kwh
-                                                ));
-                                                s.set_toast("AI estimate parsed and applied to Energy Dashboard.");
+                                ui.add_space(8.0);
+                                if icon_button(
+                                    ui,
+                                    UiIcon::Copy,
+                                    egui::Color32::from_rgb(168, 85, 247),
+                                    "Paste Clipboard",
+                                    None,
+                                )
+                                .clicked()
+                                {
+                                    if let Some(clip_txt) = read_os_clipboard() {
+                                        s.watt_calc.ai_response_input = clip_txt;
+                                        s.set_toast("Pasted clipboard into AI response box.");
+                                    } else {
+                                        s.set_toast("Clipboard is empty.");
+                                    }
+                                }
+                                if icon_button(
+                                    ui,
+                                    UiIcon::Check,
+                                    egui::Color32::WHITE,
+                                    "Apply AI Response",
+                                    Some(egui::Color32::from_rgb(124, 58, 237)),
+                                )
+                                .clicked()
+                                {
+                                    let raw = s.watt_calc.ai_response_input.clone();
+                                    match parse_ai_watt_response(&raw) {
+                                        Ok(parsed) => {
+                                            if let Some(v) = parsed.cpu_idle_w {
+                                                s.watt_calc.cpu_idle_w = v;
                                             }
-                                            Err(err) => {
-                                                s.watt_calc.ai_parse_status = Some(format!("Error: {}", err));
+                                            if let Some(v) = parsed.gpu_idle_w {
+                                                s.watt_calc.gpu_idle_w = v;
                                             }
+                                            if let Some(v) = parsed.mobo_ram_ssd_fans_w {
+                                                s.watt_calc.mobo_ram_ssd_fans_w = v;
+                                            }
+                                            if let Some(v) = parsed.peripherals_w {
+                                                s.watt_calc.peripherals_w = v;
+                                            }
+                                            if let Some(v) = parsed.psu_efficiency_pct {
+                                                s.watt_calc.psu_efficiency_pct = v;
+                                            }
+                                            if let Some(v) = parsed.active_watts {
+                                                s.config.active_watts = v;
+                                            }
+                                            if let Some(v) = parsed.monitor_watts {
+                                                s.config.monitor_watts = v;
+                                                let cnt = s.watt_calc.monitor_count.max(1) as f32;
+                                                s.watt_calc.monitor_each_w = v / cnt;
+                                            }
+                                            if let Some(v) = parsed.sleep_watts {
+                                                s.config.sleep_watts = v;
+                                                s.watt_calc.sleep_watts = v;
+                                            }
+                                            if let Some(sym) = parsed.currency_symbol {
+                                                s.config.currency_symbol = normalize_currency_input(&sym);
+                                                s.custom_currency_input = s.config.currency_symbol.clone();
+                                            }
+                                            if let Some(rate) = parsed.electricity_rate_kwh {
+                                                s.config.electricity_rate_kwh = rate;
+                                            }
+                                            if let Some(notes) = parsed.notes {
+                                                s.watt_calc.ai_notes = notes;
+                                            }
+                                            s.config_dirty = true;
+                                            s.watt_calc.ai_parse_status = Some(format!(
+                                                "Applied: Active {:.0}W, Monitor {:.0}W, Sleep {:.1}W, Rate {}{:.2}/kWh",
+                                                s.config.active_watts,
+                                                s.config.monitor_watts,
+                                                s.config.sleep_watts,
+                                                s.config.currency_symbol,
+                                                s.config.electricity_rate_kwh
+                                            ));
+                                            s.set_toast("AI estimate parsed and applied to Energy Dashboard.");
+                                        }
+                                        Err(err) => {
+                                            s.watt_calc.ai_parse_status = Some(format!("Error: {}", err));
                                         }
                                     }
-                                    if icon_button(
-                                        ui,
-                                        UiIcon::Copy,
-                                        egui::Color32::from_rgb(168, 85, 247),
-                                        "Paste Clipboard",
-                                        None,
-                                    )
-                                    .clicked()
-                                    {
-                                        if let Some(clip_txt) = read_os_clipboard() {
-                                            s.watt_calc.ai_response_input = clip_txt;
-                                            s.set_toast("Pasted clipboard into AI response box.");
-                                        } else {
-                                            s.set_toast("Clipboard is empty.");
-                                        }
-                                    }
-                                });
+                                }
                             });
                             ui.add_space(4.0);
+                            let box_w = (inner_w - 42.0).max(200.0);
                             egui::ScrollArea::vertical()
                                 .id_salt("ai_resp_scroll")
                                 .max_height(110.0)
@@ -8305,7 +8321,7 @@ impl eframe::App for AgentPowerGuardApp {
                                         egui::TextEdit::multiline(&mut s.watt_calc.ai_response_input)
                                             .code_editor()
                                             .desired_rows(5)
-                                            .desired_width(f32::INFINITY)
+                                            .desired_width(box_w)
                                             .hint_text("Paste AI JSON response here, e.g. {\"active_watts\": 115, \"monitor_watts\": 25, \"sleep_watts\": 3, \"currency_symbol\": \"₹\", \"electricity_rate_kwh\": 9.0}"),
                                     );
                                 });

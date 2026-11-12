@@ -172,7 +172,10 @@ jobs:
 
             ---
 
-            ### 🌟 What's New & Fixed in v1.2.7 (Full Upgrade Since v1.0.3)
+            ### 🌟 What's New & Fixed in v1.2.8 (Full Upgrade Since v1.0.3)
+
+            #### 🧩 v1.2.8 Watt Calculator Modal Alignment & Layout Fix
+            - **Zero Left/Right Overflow:** Locked the Hardware Watt Calculator modal with `.fixed_size(...)`, `.constrain_to(ctx.content_rect())`, uniform inner card widths (`inner_w`), and finite `desired_width` on Step 3/4 text editors (replacing `f32::INFINITY`), so all 4 Step cards, colored hardware bubbles, and buttons stay cleanly centered and inside the modal borders on any window size.
 
             #### 🧩 v1.2.7 Editable Color-Coded Hardware Bubbles, Case Cooling & ARGB Support
             - **Interactive Color-Coded Hardware Bubbles (Step 1):** Redesigned detected specs into responsive, color-coded pills by category (**Board/CPU/RAM/GPU**, **Storage Drives**, **Displays**, **Wi-Fi/LAN**, **Bluetooth**, **Audio/Mic**, **USB & Peripherals**, and **Cabinet Cooling/ARGB**). Click any bubble to rename/edit inline, click `x` to remove unused paired/virtual devices, or click `+ Add` inside any category to append custom gear — with responsive modal sizing so buttons and long hardware lists never clip on narrow/portrait monitors.
@@ -230,7 +233,7 @@ jobs:
             |---|---|---|
             | **Windows 10 / 11 (Installer)** | [`AgentPowerGuard-windows-x64.msi`](#) | **Recommended for Windows.** Start Menu, desktop shortcuts, Add/Remove Programs. |
             | **Windows 10 / 11 (Portable)** | [`agent-power-guard-windows-x64.exe`](#) | Portable single-file binary. Runs as standard user (`AsInvoker`) without UAC prompts. |
-            | **Debian / Ubuntu Linux** | [`agent-power-guard_1.2.7_amd64.deb`](#) | Native `.deb` package with desktop integration and systemd user unit. |
+            | **Debian / Ubuntu Linux** | [`agent-power-guard_1.2.8_amd64.deb`](#) | Native `.deb` package with desktop integration and systemd user unit. |
             | **Linux (Generic tarball)** | [`agent-power-guard-linux-x86_64.tar.gz`](#) | Standalone Linux x86_64 binary supporting X11 & Wayland. |
             | **macOS (Universal Bundle)** | [`AgentPowerGuard-macos-universal.zip`](#) | Universal `.app` bundle for both Apple Silicon (M1–M4) and Intel Macs. |
             | **macOS (Apple Silicon)** | [`agent-power-guard-macos-aarch64.tar.gz`](#) | Raw standalone ARM64 binary. |

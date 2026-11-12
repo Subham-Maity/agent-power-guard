@@ -1,6 +1,6 @@
 # Maintainer: Subham Maity <97989643+Subham-Maity@users.noreply.github.com>
 pkgname=agent-power-guard-bin
-pkgver=1.2.7
+pkgver=1.2.8
 pkgrel=1
 pkgdesc="Intelligent keep-awake watchdog utility for workstations running autonomous AI coding agents"
 arch=('x86_64')
