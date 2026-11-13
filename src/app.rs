@@ -3,6 +3,7 @@
 
 // Agent Power Guard - Native Entry Point
 
+pub mod diag;
 pub mod evaluator;
 pub mod intent;
 pub mod probes;
@@ -18,6 +19,9 @@ use std::process::Command;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use crate::diag::{
+    build_github_issue_url, open_browser_url, DiagSeverity, DiagnosticPhase, DiagnosticSession,
+};
 #[cfg(test)]
 use crate::evaluator::Decision;
 use crate::evaluator::{evaluate, ConditionStatus, EvalConfig, EvaluationState, Metrics};
@@ -691,6 +695,7 @@ pub enum ActiveTab {
     Guard,
     History,
     Energy,
+    Diagnostic,
     Notifications,
     Remote,
 }
@@ -1527,6 +1532,9 @@ pub struct SharedState {
 
     // UI feedback toast/notification
     pub toast_message: Option<(String, Instant)>,
+
+    // 120s Automated Diagnostic & Issue Reporter State
+    pub diag_session: DiagnosticSession,
 }
 
 impl SharedState {
@@ -1671,6 +1679,7 @@ impl SharedState {
             last_media_prompt_notif: 0,
 
             toast_message: None,
+            diag_session: DiagnosticSession::default(),
         };
 
         for _ in 0..HISTORY_LEN {
@@ -3350,7 +3359,7 @@ fn run_cli_wrapper(args: &[String]) {
     let lease_reason = reason.unwrap_or_else(|| cmd_parts.join(" "));
 
     println!(
-        "⚡ [Agent Power Guard] Spawning child: {} {:?}",
+        "[EXEC] [Agent Power Guard] Spawning child: {} {:?}",
         program, prog_args
     );
     let mut child = match Command::new(program).args(prog_args).spawn() {
@@ -3374,14 +3383,14 @@ fn run_cli_wrapper(args: &[String]) {
         );
     } else {
         println!(
-            "🔒 [Agent Power Guard] Acquired PID-bound lease (PID {}, {}m cap): {}",
+            "[LOCK] [Agent Power Guard] Acquired PID-bound lease (PID {}, {}m cap): {}",
             pid, max_mins, lease_reason
         );
     }
 
     let status = child.wait();
     let _ = send_cli_request("/api/release");
-    println!("🔓 [Agent Power Guard] Child process exited. Lease released.");
+    println!("[RELEASE] [Agent Power Guard] Child process exited. Lease released.");
 
     match status {
         Ok(st) => {
@@ -3905,6 +3914,7 @@ pub fn run_watchdog_loop(state: Arc<Mutex<SharedState>>, egui_ctx: Option<egui::
 
         let trigger_sleep;
         let mut trigger_monitor_off = false;
+        let mut launch_diag_media = false;
         let hold_os_wake_lock;
         let mut wake_sleep_stabilize = false;
 
@@ -4108,7 +4118,7 @@ pub fn run_watchdog_loop(state: Arc<Mutex<SharedState>>, egui_ctx: Option<egui::
                 top_disk_proc: enriched.top_disk_proc,
                 top_disk_kbps: enriched.top_disk_kbps.min(whole_pc_disk_kbps),
                 default_route_net_kbps: Some(filtered_pc_net_kbps),
-                media: audio_reading.media,
+                media: audio_reading.media.clone(),
                 mic_cam: MicCamSnapshot {
                     health: audio_reading.capture_health,
                     mic_held,
@@ -4118,7 +4128,7 @@ pub fn run_watchdog_loop(state: Arc<Mutex<SharedState>>, egui_ctx: Option<egui::
                     capture_peak: audio_reading.capture_peak,
                     capture_signal: audio_reading.capture_signal,
                 },
-                power_requests: power_req_snap,
+                power_requests: power_req_snap.clone(),
                 lease_tree_cpu_pct: enriched.lease_tree_cpu,
                 lease_tree_disk_kbps: enriched.lease_tree_disk_kbps,
                 wake_classification: wake_cls,
@@ -4358,12 +4368,72 @@ pub fn run_watchdog_loop(state: Arc<Mutex<SharedState>>, egui_ctx: Option<egui::
                 trigger_update_check_locked(&mut s, Arc::clone(&state));
             }
 
+            // 120-Second Automated Diagnostic Session Tick
+            if s.diag_session.active {
+                let os_name = if s.detected_specs.os_name.trim().is_empty() {
+                    #[cfg(windows)]
+                    {
+                        "Windows 11 / Windows 10".to_string()
+                    }
+                    #[cfg(target_os = "macos")]
+                    {
+                        "macOS".to_string()
+                    }
+                    #[cfg(target_os = "linux")]
+                    {
+                        "Linux".to_string()
+                    }
+                    #[cfg(not(any(windows, target_os = "macos", target_os = "linux")))]
+                    {
+                        "Unknown OS".to_string()
+                    }
+                } else {
+                    s.detected_specs.os_name.clone()
+                };
+                let hw_summary = format!(
+                    "CPU: {} ({}c) | RAM: {:.1} GB | GPU: {} | Storage: {} drive(s) | Audio: {} device(s) | Laptop: {}",
+                    if s.detected_specs.cpu_brand.is_empty() { "Detected CPU" } else { &s.detected_specs.cpu_brand },
+                    s.detected_specs.cpu_cores,
+                    s.detected_specs.ram_gb,
+                    if s.detected_specs.gpu_name.is_empty() { "Integrated/Discrete GPU" } else { &s.detected_specs.gpu_name },
+                    s.detected_specs.storage_drives.len(),
+                    s.detected_specs.audio_devices.len(),
+                    s.detected_specs.is_laptop
+                );
+                let audio_devs = s.detected_specs.audio_devices.clone();
+                let intent_display = s.intent.display_label();
+                launch_diag_media = s.diag_session.tick_1s(
+                    idle_secs,
+                    Some(decision.countdown_secs),
+                    &intent_display,
+                    &decision.blockers,
+                    audio_reading.media.render_active,
+                    audio_reading.media.render_peak,
+                    &audio_reading.media.render_app,
+                    power_req_snap.display_active,
+                    power_req_snap.system_active,
+                    whole_pc_cpu,
+                    gpu_reading.util_pct,
+                    whole_pc_disk_kbps * 0.2,
+                    whole_pc_disk_kbps * 0.8,
+                    filtered_pc_net_kbps * 0.7,
+                    filtered_pc_net_kbps * 0.3,
+                    &os_name,
+                    &hw_summary,
+                    &audio_devs,
+                );
+            }
+
             // Auto-save configuration if dirty
             if s.config_dirty {
                 s.config_dirty = false;
                 s.config.save();
             }
         } // unlock state
+
+        if launch_diag_media {
+            open_browser_url("https://www.youtube.com/watch?v=aqz-KE-bpKQ");
+        }
 
         // Sync OS wake-lock thread (Best Performance mode)
         wake_lock.set_locked(hold_os_wake_lock);
@@ -6476,6 +6546,7 @@ pub enum UiIcon {
     Battery,
     Cpu,
     Refresh,
+    Activity,
 }
 
 fn paint_icon(painter: &egui::Painter, rect: egui::Rect, color: egui::Color32, icon: UiIcon) {
@@ -6743,6 +6814,20 @@ fn paint_icon(painter: &egui::Painter, rect: egui::Rect, color: egui::Color32, i
             painter.line_segment([p(0.64, 0.18), p(0.84, 0.26)], st);
             painter.line_segment([p(0.84, 0.26), p(0.76, 0.44)], st);
         }
+        UiIcon::Activity => {
+            let pts = [
+                p(0.10, 0.52),
+                p(0.28, 0.52),
+                p(0.38, 0.18),
+                p(0.54, 0.86),
+                p(0.66, 0.36),
+                p(0.74, 0.52),
+                p(0.90, 0.52),
+            ];
+            for seg in pts.windows(2) {
+                painter.line_segment([seg[0], seg[1]], st);
+            }
+        }
     }
 }
 
@@ -6924,8 +7009,12 @@ fn render_core_spec_pill(
     } else {
         value.clone()
     };
-    let text_w = measure_text_px(ui, &format!("{}: {}", prefix, shown), 11.5);
-    let too_wide = text_w + 30.0 > max_row_w;
+    let display_txt = if shown.chars().count() > 52 {
+        let truncated: String = shown.chars().take(49).collect();
+        format!("{}...", truncated)
+    } else {
+        shown.clone()
+    };
 
     egui::Frame::new()
         .fill(fill)
@@ -6933,9 +7022,6 @@ fn render_core_spec_pill(
         .corner_radius(11.0)
         .inner_margin(egui::Margin::symmetric(9, 4))
         .show(ui, |ui| {
-            if too_wide {
-                ui.set_max_width((max_row_w - 22.0).max(180.0));
-            }
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = 5.0;
                 ui.label(
@@ -6963,15 +7049,12 @@ fn render_core_spec_pill(
                         *edit_target = None;
                     }
                 } else {
-                    let lbl =
-                        egui::Label::new(egui::RichText::new(shown).size(11.5).color(text_col))
-                            .sense(egui::Sense::click());
-                    let resp = if too_wide {
-                        ui.add(lbl.wrap())
-                    } else {
-                        ui.add(lbl.extend())
-                    };
-                    if resp.on_hover_text("Click to edit").clicked() {
+                    let lbl = egui::Label::new(
+                        egui::RichText::new(display_txt).size(11.5).color(text_col),
+                    )
+                    .sense(egui::Sense::click());
+                    let resp = ui.add(lbl.extend());
+                    if resp.on_hover_text(&shown).clicked() {
                         *edit_target = Some((cat_key.to_string(), 0));
                         *edit_buf = value.clone();
                     }
@@ -7103,7 +7186,13 @@ fn render_spec_bubble_category(
                 let is_editing = edit_target
                     .as_ref()
                     .is_some_and(|(k, i)| k == cat_key && *i == idx);
-                let too_wide = measure_text_px(ui, &items[idx], 11.5) + 46.0 > max_row_w;
+                let raw_item = items[idx].clone();
+                let display_item = if raw_item.chars().count() > 52 {
+                    let truncated: String = raw_item.chars().take(49).collect();
+                    format!("{}...", truncated)
+                } else {
+                    raw_item.clone()
+                };
 
                 egui::Frame::new()
                     .fill(fill)
@@ -7111,9 +7200,6 @@ fn render_spec_bubble_category(
                     .corner_radius(11.0)
                     .inner_margin(egui::Margin::symmetric(8, 3))
                     .show(ui, |ui| {
-                        if too_wide {
-                            ui.set_max_width((max_row_w - 22.0).max(180.0));
-                        }
                         ui.horizontal(|ui| {
                             ui.spacing_mut().item_spacing.x = 4.0;
                             if is_editing {
@@ -7139,15 +7225,11 @@ fn render_spec_bubble_category(
                                 }
                             } else {
                                 let lbl = egui::Label::new(
-                                    egui::RichText::new(&items[idx]).size(11.5).color(text_col),
+                                    egui::RichText::new(display_item).size(11.5).color(text_col),
                                 )
                                 .sense(egui::Sense::click());
-                                let resp = if too_wide {
-                                    ui.add(lbl.wrap())
-                                } else {
-                                    ui.add(lbl.extend())
-                                };
-                                if resp.on_hover_text("Click to edit item").clicked() {
+                                let resp = ui.add(lbl.extend());
+                                if resp.on_hover_text(&raw_item).clicked() {
                                     *edit_target = Some((cat_key.to_string(), idx));
                                     *edit_buf = items[idx].clone();
                                 }
@@ -8824,6 +8906,7 @@ impl eframe::App for AgentPowerGuardApp {
                     (ActiveTab::Guard, "Watchdog & Presets", UiIcon::Shield, egui::Color32::from_rgb(52, 211, 153)),
                     (ActiveTab::History, "Block History", UiIcon::History, egui::Color32::from_rgb(245, 158, 11)),
                     (ActiveTab::Energy, "Energy Savings", UiIcon::Coin, egui::Color32::from_rgb(56, 189, 248)),
+                    (ActiveTab::Diagnostic, "Test & Report", UiIcon::Activity, egui::Color32::from_rgb(244, 63, 94)),
                     (ActiveTab::Notifications, "Alerts & Updates", UiIcon::Bell, egui::Color32::from_rgb(168, 85, 247)),
                     (ActiveTab::Remote, "Remote", UiIcon::Globe, egui::Color32::from_rgb(96, 165, 250)),
                 ] {
@@ -10378,7 +10461,504 @@ impl eframe::App for AgentPowerGuardApp {
             });
         }
         // ====================================================================
-        // TAB 4: ALERTS, UPDATES & SOFTWARE MANAGEMENT VIEW
+        // TAB 4: 120-SECOND AUTOMATED TEST & ISSUE REPORTER
+        // ====================================================================
+        else if s.active_tab == ActiveTab::Diagnostic {
+            egui::CentralPanel::default_margins().show(ui, |ui| {
+                egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+                    ui.add_space(4.0);
+                    ui.horizontal_wrapped(|ui| {
+                        icon_heading(
+                            ui,
+                            UiIcon::Activity,
+                            egui::Color32::from_rgb(244, 63, 94),
+                            "120s Automated Diagnostic & Issue Reporter",
+                        );
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if s.diag_session.active {
+                                if icon_button(
+                                    ui,
+                                    UiIcon::Trash,
+                                    egui::Color32::from_rgb(248, 113, 113),
+                                    "Cancel Test",
+                                    None,
+                                )
+                                .clicked()
+                                {
+                                    s.diag_session.cancel("User cancelled test");
+                                    s.set_toast("Diagnostic cancelled.");
+                                }
+                            } else if s.diag_session.phase == DiagnosticPhase::Completed {
+                                if icon_button(
+                                    ui,
+                                    UiIcon::Refresh,
+                                    egui::Color32::from_rgb(56, 189, 248),
+                                    "New Diagnostic",
+                                    None,
+                                )
+                                .clicked()
+                                {
+                                    s.diag_session = DiagnosticSession::default();
+                                }
+                            }
+                        });
+                    });
+                    ui.label(
+                        egui::RichText::new(
+                            "Autonomous 120-second end-to-end diagnostic suite that validates sleep countdowns, tests audio render pipelines, inspects OS DISPLAY keep-awake requests, and flags zombie driver locks.",
+                        )
+                        .weak()
+                        .size(12.0),
+                    );
+                    ui.separator();
+
+                    let dark = ui.visuals().dark_mode;
+                    let now_epoch = SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_secs();
+
+                    // --------------------------------------------------------
+                    // STATE 1: IDLE / CANCELLED (Pre-Flight & Start Test)
+                    // --------------------------------------------------------
+                    if !s.diag_session.active && s.diag_session.phase != DiagnosticPhase::Completed {
+                        app_card_frame(ui).show(ui, |ui| {
+                            ui.set_width((ui.available_width() - 4.0).max(280.0));
+                            icon_card_title(
+                                ui,
+                                UiIcon::Sliders,
+                                egui::Color32::from_rgb(56, 189, 248),
+                                "Automated 120-Second Test Routine",
+                            );
+                            ui.add_space(6.0);
+                            ui.label(
+                                egui::RichText::new(
+                                    "When started, the diagnostic engine executes 5 synchronized test phases to verify whether your system behaves nominally or suffers from premature sleep or sleep refusal:",
+                                )
+                                .size(12.0),
+                            );
+                            ui.add_space(6.0);
+
+                            let phases_info = [
+                                ("1. Arming & Baseline Idle (0-25s)", "Verifies user input is idle, monitors baseline CPU/GPU/Disk, and checks sleep countdown continuity."),
+                                ("2. Automated Media Playback (25-55s)", "Automatically triggers a test video in your browser. Verifies whether CoreAudio/WASAPI render hooks and OS DISPLAY requests activate. (Diagnoses why laptops sleep while watching movies!)."),
+                                ("3. Post-Media Release & Grace (55-85s)", "Tests audio stop/close. Verifies drivers release sound sessions cleanly without leaving zombie sleep locks."),
+                                ("4. Hardware Blocker Deep-Dive (85-110s)", "Isolates physical drive activity from browser IPC cache noise, and checks powercfg driver assertions."),
+                                ("5. Synthesis & Report (110-120s)", "Synthesizes sensor samples into root cause diagnosis and outputs a full GitHub-ready Markdown report."),
+                            ];
+
+                            for (title, desc) in phases_info {
+                                ui.horizontal(|ui| {
+                                    draw_icon_inline(ui, 12.0, egui::Color32::from_rgb(52, 211, 153), UiIcon::Check);
+                                    ui.label(egui::RichText::new(title).strong().size(12.0));
+                                });
+                                ui.label(egui::RichText::new(desc).weak().size(11.5));
+                                ui.add_space(3.0);
+                            }
+
+                            ui.add_space(10.0);
+
+                            // Warning Banner: Hands off keyboard & mouse!
+                            let warn_fill = if dark {
+                                egui::Color32::from_rgb(69, 26, 3)
+                            } else {
+                                egui::Color32::from_rgb(254, 243, 199)
+                            };
+                            let warn_stroke = if dark {
+                                egui::Color32::from_rgb(180, 83, 9)
+                            } else {
+                                egui::Color32::from_rgb(245, 158, 11)
+                            };
+                            egui::Frame::new()
+                                .fill(warn_fill)
+                                .stroke(egui::Stroke::new(1.0, warn_stroke))
+                                .corner_radius(8.0)
+                                .inner_margin(egui::Margin::symmetric(12, 10))
+                                .show(ui, |ui| {
+                                    ui.horizontal(|ui| {
+                                        draw_icon_inline(ui, 18.0, egui::Color32::from_rgb(245, 158, 11), UiIcon::Warning);
+                                        ui.vertical(|ui| {
+                                            ui.label(
+                                                egui::RichText::new("HANDS-OFF REQUIREMENT (120 SECONDS)")
+                                                    .strong()
+                                                    .size(12.5)
+                                                    .color(if dark { egui::Color32::from_rgb(253, 230, 138) } else { egui::Color32::from_rgb(146, 64, 14) }),
+                                            );
+                                            ui.label(
+                                                egui::RichText::new(
+                                                    "Do NOT press any keys or move the mouse once the test begins. The watchdog requires uninterrupted human idle time to evaluate sensor accuracy and sleep thresholds.",
+                                                )
+                                                .size(11.5)
+                                                .color(if dark { egui::Color32::from_rgb(254, 243, 199) } else { egui::Color32::from_rgb(120, 53, 15) }),
+                                            );
+                                        });
+                                    });
+                                });
+
+                            ui.add_space(14.0);
+
+                            ui.vertical_centered(|ui| {
+                                let start_btn = ui.add_sized(
+                                    [320.0, 44.0],
+                                    egui::Button::new(
+                                        egui::RichText::new("Start 120s Automated Diagnostic")
+                                            .strong()
+                                            .size(15.0)
+                                            .color(egui::Color32::WHITE),
+                                    )
+                                    .fill(egui::Color32::from_rgb(225, 29, 72))
+                                    .corner_radius(10.0),
+                                );
+                                if start_btn.clicked() {
+                                    s.diag_session.start(now_epoch);
+                                    s.set_toast("120s Diagnostic started: Please release keyboard and mouse!");
+                                }
+                            });
+                            ui.add_space(8.0);
+                        });
+                    }
+
+                    // --------------------------------------------------------
+                    // STATE 2: ACTIVE DIAGNOSTIC (Live 120s Progress & Sensors)
+                    // --------------------------------------------------------
+                    else if s.diag_session.active {
+                        let sec = s.diag_session.elapsed_secs;
+                        let phase = s.diag_session.phase;
+                        let pct = (sec as f32 / 120.0).clamp(0.0, 1.0);
+
+                        // Urgent Hands-Off Banner
+                        let alert_fill = if dark {
+                            egui::Color32::from_rgb(76, 5, 25)
+                        } else {
+                            egui::Color32::from_rgb(255, 228, 230)
+                        };
+                        let alert_stroke = if dark {
+                            egui::Color32::from_rgb(225, 29, 72)
+                        } else {
+                            egui::Color32::from_rgb(244, 63, 94)
+                        };
+                        egui::Frame::new()
+                            .fill(alert_fill)
+                            .stroke(egui::Stroke::new(1.5, alert_stroke))
+                            .corner_radius(8.0)
+                            .inner_margin(egui::Margin::symmetric(14, 10))
+                            .show(ui, |ui| {
+                                ui.horizontal(|ui| {
+                                    draw_icon_inline(ui, 20.0, egui::Color32::from_rgb(244, 63, 94), UiIcon::Activity);
+                                    ui.vertical(|ui| {
+                                        ui.label(
+                                            egui::RichText::new(format!("DIAGNOSTIC IN PROGRESS: {}s / 120s", sec))
+                                                .strong()
+                                                .size(14.0)
+                                                .color(if dark { egui::Color32::WHITE } else { egui::Color32::from_rgb(159, 18, 57) }),
+                                        );
+                                        ui.label(
+                                            egui::RichText::new("PLEASE DO NOT TOUCH MOUSE OR KEYBOARD: Monitoring sleep countdown, media hooks, and driver assertions...")
+                                                .size(12.0)
+                                                .color(if dark { egui::Color32::from_rgb(254, 205, 211) } else { egui::Color32::from_rgb(136, 19, 55) }),
+                                        );
+                                    });
+                                });
+                            });
+
+                        ui.add_space(8.0);
+
+                        // Progress Bar
+                        ui.add(
+                            egui::ProgressBar::new(pct)
+                                .text(format!("{}s / 120s — {}", sec, phase.label()))
+                                .animate(true),
+                        );
+
+                        ui.add_space(8.0);
+
+                        // Current Phase Description Card
+                        app_card_frame(ui).show(ui, |ui| {
+                            ui.set_width((ui.available_width() - 4.0).max(280.0));
+                            ui.horizontal(|ui| {
+                                draw_icon_inline(ui, 14.0, egui::Color32::from_rgb(56, 189, 248), UiIcon::Clock);
+                                ui.label(egui::RichText::new(phase.label()).strong().size(13.0));
+                            });
+                            ui.label(egui::RichText::new(phase.description()).size(12.0));
+                            if s.diag_session.user_interrupted {
+                                ui.label(
+                                    egui::RichText::new("Notice: Human input detected during test. Idle countdown was reset.")
+                                        .color(egui::Color32::from_rgb(245, 158, 11))
+                                        .size(11.5),
+                                );
+                            }
+                        });
+
+                        ui.add_space(8.0);
+
+                        // Live Multi-Sensor Readout Cards
+                        ui.label(egui::RichText::new("Real-Time Diagnostic Sensors:").strong().size(12.5));
+                        ui.add_space(4.0);
+
+                        let card_w = ((ui.available_width() - 24.0) / 4.0).max(140.0);
+
+                        let last_smp = s.diag_session.samples.last();
+                        let live_idle = last_smp.map(|sm| sm.idle_secs).unwrap_or(s.live_idle_secs);
+                        let live_cd = last_smp.and_then(|sm| sm.countdown_secs).unwrap_or(s.countdown_secs);
+                        let live_aud_act = last_smp.map(|sm| sm.audio_render_active).unwrap_or(s.media_lock_active);
+                        let live_peak = last_smp.map(|sm| sm.audio_peak).unwrap_or(s.mic_capture_peak);
+                        let live_disp = last_smp.map(|sm| sm.display_power_request).unwrap_or(!s.cond9_power_requests.is_passing);
+                        let live_sys = last_smp.map(|sm| sm.system_power_request).unwrap_or(false);
+                        let intent_str = s.intent.display_label();
+
+                        ui.horizontal_wrapped(|ui| {
+                            // Card 1: Input Idle
+                            egui::Frame::new()
+                                .fill(if dark { egui::Color32::from_rgb(20, 27, 38) } else { egui::Color32::from_rgb(241, 245, 249) })
+                                .corner_radius(8.0)
+                                .inner_margin(egui::Margin::symmetric(10, 8))
+                                .show(ui, |ui| {
+                                    ui.set_width(card_w);
+                                    ui.label(egui::RichText::new("Input Idle").weak().size(11.0));
+                                    let idle_txt = format!("{}s", live_idle);
+                                    ui.label(egui::RichText::new(idle_txt).strong().size(16.0).color(egui::Color32::from_rgb(52, 211, 153)));
+                                    ui.label(egui::RichText::new("Threshold: 180s").weak().size(10.5));
+                                });
+
+                            // Card 2: Sleep Countdown
+                            egui::Frame::new()
+                                .fill(if dark { egui::Color32::from_rgb(20, 27, 38) } else { egui::Color32::from_rgb(241, 245, 249) })
+                                .corner_radius(8.0)
+                                .inner_margin(egui::Margin::symmetric(10, 8))
+                                .show(ui, |ui| {
+                                    ui.set_width(card_w);
+                                    ui.label(egui::RichText::new("Sleep Countdown").weak().size(11.0));
+                                    let cd_txt = if s.all_conditions_pass {
+                                        format!("{}s", live_cd)
+                                    } else {
+                                        "HOLD".to_string()
+                                    };
+                                    let cd_col = if s.all_conditions_pass { egui::Color32::from_rgb(56, 189, 248) } else { egui::Color32::from_rgb(245, 158, 11) };
+                                    ui.label(egui::RichText::new(cd_txt).strong().size(16.0).color(cd_col));
+                                    ui.label(egui::RichText::new(&intent_str).weak().size(10.5));
+                                });
+
+                            // Card 3: Audio Render Pipeline
+                            egui::Frame::new()
+                                .fill(if dark { egui::Color32::from_rgb(20, 27, 38) } else { egui::Color32::from_rgb(241, 245, 249) })
+                                .corner_radius(8.0)
+                                .inner_margin(egui::Margin::symmetric(10, 8))
+                                .show(ui, |ui| {
+                                    ui.set_width(card_w);
+                                    ui.label(egui::RichText::new("Audio Render").weak().size(11.0));
+                                    let aud_txt = if live_aud_act { "Active" } else { "Idle / Muted" };
+                                    let aud_col = if live_aud_act { egui::Color32::from_rgb(52, 211, 153) } else { egui::Color32::from_rgb(148, 163, 184) };
+                                    ui.label(egui::RichText::new(aud_txt).strong().size(16.0).color(aud_col));
+                                    let peak_pct = (live_peak * 100.0).round();
+                                    ui.label(egui::RichText::new(format!("Peak: {:.0}%", peak_pct)).weak().size(10.5));
+                                });
+
+                            // Card 4: OS Power Requests
+                            egui::Frame::new()
+                                .fill(if dark { egui::Color32::from_rgb(20, 27, 38) } else { egui::Color32::from_rgb(241, 245, 249) })
+                                .corner_radius(8.0)
+                                .inner_margin(egui::Margin::symmetric(10, 8))
+                                .show(ui, |ui| {
+                                    ui.set_width(card_w);
+                                    ui.label(egui::RichText::new("OS Keep-Awake").weak().size(11.0));
+                                    let req_txt = if live_disp { "DISPLAY: YES" } else { "DISPLAY: NO" };
+                                    let req_col = if live_disp { egui::Color32::from_rgb(52, 211, 153) } else { egui::Color32::from_rgb(248, 113, 113) };
+                                    ui.label(egui::RichText::new(req_txt).strong().size(15.0).color(req_col));
+                                    let sys_txt = if live_sys { "SYSTEM: YES" } else { "SYSTEM: NO" };
+                                    ui.label(egui::RichText::new(sys_txt).weak().size(10.5));
+                                });
+                        });
+
+                        ui.add_space(10.0);
+
+                        // Live Event Timeline Table (Last 10 samples)
+                        app_card_frame(ui).show(ui, |ui| {
+                            ui.set_width((ui.available_width() - 4.0).max(280.0));
+                            icon_card_title(
+                                ui,
+                                UiIcon::History,
+                                egui::Color32::from_rgb(168, 85, 247),
+                                "Live Event Log Stream",
+                            );
+                            ui.add_space(4.0);
+
+                            egui::ScrollArea::vertical()
+                                .max_height(140.0)
+                                .auto_shrink([false, false])
+                                .show(ui, |ui| {
+                                    for smp in s.diag_session.samples.iter().rev().take(10) {
+                                        let note_display = if smp.note.is_empty() {
+                                            format!("{}: Audio={}, CD={:?}", smp.phase.label(), smp.audio_render_active, smp.countdown_secs)
+                                        } else {
+                                            smp.note.clone()
+                                        };
+                                        ui.horizontal(|ui| {
+                                            ui.label(egui::RichText::new(format!("[{:02}s]", smp.second)).monospace().weak());
+                                            ui.label(egui::RichText::new(note_display).size(11.5));
+                                        });
+                                    }
+                                });
+                        });
+                    }
+
+                    // --------------------------------------------------------
+                    // STATE 3: COMPLETED (Report & GitHub 1-Click Submission)
+                    // --------------------------------------------------------
+                    else if s.diag_session.phase == DiagnosticPhase::Completed {
+                        // Hero Completion Banner
+                        let comp_fill = if dark {
+                            egui::Color32::from_rgb(6, 78, 59)
+                        } else {
+                            egui::Color32::from_rgb(209, 250, 229)
+                        };
+                        let comp_stroke = if dark {
+                            egui::Color32::from_rgb(16, 185, 129)
+                        } else {
+                            egui::Color32::from_rgb(5, 150, 105)
+                        };
+                        egui::Frame::new()
+                            .fill(comp_fill)
+                            .stroke(egui::Stroke::new(1.0, comp_stroke))
+                            .corner_radius(8.0)
+                            .inner_margin(egui::Margin::symmetric(14, 10))
+                            .show(ui, |ui| {
+                                ui.horizontal(|ui| {
+                                    draw_icon_inline(ui, 20.0, egui::Color32::from_rgb(16, 185, 129), UiIcon::Check);
+                                    ui.vertical(|ui| {
+                                        ui.label(
+                                            egui::RichText::new("120S AUTOMATED DIAGNOSTIC COMPLETE")
+                                                .strong()
+                                                .size(13.5)
+                                                .color(if dark { egui::Color32::WHITE } else { egui::Color32::from_rgb(6, 95, 70) }),
+                                        );
+                                        ui.label(
+                                            egui::RichText::new("Sensor timeline captured, root cause analysis synthesized, and GitHub report generated.")
+                                                .size(11.5)
+                                                .color(if dark { egui::Color32::from_rgb(167, 243, 208) } else { egui::Color32::from_rgb(4, 120, 87) }),
+                                        );
+                                    });
+                                });
+                            });
+
+                        ui.add_space(8.0);
+
+                        // Findings & Diagnosis Cards
+                        app_card_frame(ui).show(ui, |ui| {
+                            ui.set_width((ui.available_width() - 4.0).max(280.0));
+                            icon_card_title(
+                                ui,
+                                UiIcon::Shield,
+                                egui::Color32::from_rgb(56, 189, 248),
+                                "Diagnostic Findings & Root Cause Analysis",
+                            );
+                            ui.add_space(6.0);
+
+                            for finding in &s.diag_session.findings {
+                                let (badge_col, border_col) = match finding.severity {
+                                    DiagSeverity::Critical => (egui::Color32::from_rgb(244, 63, 94), egui::Color32::from_rgb(159, 18, 57)),
+                                    DiagSeverity::Warning => (egui::Color32::from_rgb(245, 158, 11), egui::Color32::from_rgb(180, 83, 9)),
+                                    DiagSeverity::Info => (egui::Color32::from_rgb(52, 211, 153), egui::Color32::from_rgb(5, 150, 105)),
+                                };
+
+                                egui::Frame::new()
+                                    .fill(if dark { egui::Color32::from_rgb(20, 27, 38) } else { egui::Color32::from_rgb(248, 250, 252) })
+                                    .stroke(egui::Stroke::new(1.0, border_col))
+                                    .corner_radius(8.0)
+                                    .inner_margin(egui::Margin::symmetric(10, 8))
+                                    .show(ui, |ui| {
+                                        ui.horizontal(|ui| {
+                                            ui.label(egui::RichText::new(finding.severity.badge()).strong().color(badge_col));
+                                            ui.label(egui::RichText::new(&finding.title).strong().size(12.5));
+                                        });
+                                        ui.label(egui::RichText::new(&finding.description).size(11.5));
+                                        ui.add_space(2.0);
+                                        ui.horizontal(|ui| {
+                                            ui.label(egui::RichText::new("Recommendation:").strong().size(11.5).color(egui::Color32::from_rgb(56, 189, 248)));
+                                            ui.label(egui::RichText::new(&finding.recommendation).size(11.5));
+                                        });
+                                    });
+                                ui.add_space(4.0);
+                            }
+                        });
+
+                        ui.add_space(8.0);
+
+                        // Markdown Report Card & Action Buttons
+                        app_card_frame(ui).show(ui, |ui| {
+                            ui.set_width((ui.available_width() - 4.0).max(280.0));
+                            icon_card_title(
+                                ui,
+                                UiIcon::Copy,
+                                egui::Color32::from_rgb(168, 85, 247),
+                                "Generated Diagnostic Report (Markdown)",
+                            );
+                            ui.add_space(4.0);
+
+                            ui.horizontal_wrapped(|ui| {
+                                if icon_button(
+                                    ui,
+                                    UiIcon::Copy,
+                                    egui::Color32::WHITE,
+                                    "Copy Diagnostic Report",
+                                    Some(egui::Color32::from_rgb(37, 99, 235)),
+                                )
+                                .clicked()
+                                {
+                                    copy_text_reliable(ui.ctx(), &s.diag_session.generated_report);
+                                    s.set_toast("Diagnostic report copied to clipboard!");
+                                }
+
+                                if icon_button(
+                                    ui,
+                                    UiIcon::Globe,
+                                    egui::Color32::WHITE,
+                                    "Report Issue on GitHub",
+                                    Some(egui::Color32::from_rgb(16, 185, 129)),
+                                )
+                                .on_hover_text("Opens pre-filled GitHub issue in your browser (no API key required)")
+                                .clicked()
+                                {
+                                    let url = build_github_issue_url(&s.diag_session.generated_report, None);
+                                    open_browser_url(&url);
+                                    s.set_toast("Opening GitHub issue creator in your browser...");
+                                }
+
+                                if icon_button(
+                                    ui,
+                                    UiIcon::Refresh,
+                                    egui::Color32::from_rgb(148, 163, 184),
+                                    "Run New Test",
+                                    None,
+                                )
+                                .clicked()
+                                {
+                                    s.diag_session = DiagnosticSession::default();
+                                }
+                            });
+
+                            ui.add_space(6.0);
+
+                            egui::ScrollArea::vertical()
+                                .max_height(260.0)
+                                .auto_shrink([false, false])
+                                .show(ui, |ui| {
+                                    let mut report_clone = s.diag_session.generated_report.clone();
+                                    ui.add(
+                                        egui::TextEdit::multiline(&mut report_clone)
+                                            .desired_width(f32::INFINITY)
+                                            .font(egui::TextStyle::Monospace)
+                                            .interactive(true),
+                                    );
+                                });
+                        });
+                    }
+
+                    ui.add_space(20.0);
+                });
+            });
+        }
+        // ====================================================================
+        // TAB 5: ALERTS, UPDATES & SOFTWARE MANAGEMENT VIEW
         // ====================================================================
         else if s.active_tab == ActiveTab::Notifications {
             egui::CentralPanel::default_margins().show(ui, |ui| {

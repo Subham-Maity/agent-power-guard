@@ -704,6 +704,25 @@ The **Block History** tab shows what prevented sleep:
 
 ---
 
+## <img src="assets/icons/activity.svg" width="22" height="22" align="absmiddle" alt="" /> 120-Second Automated Diagnostic & Issue Reporter
+
+The **Test & Report** tab runs an autonomous 120-second end-to-end diagnostic suite that validates sleep countdowns, tests audio render pipelines, inspects OS `DISPLAY` keep-awake assertions, detects zombie driver locks, and profiles disk noise.
+
+### Automated 5-Phase Test Routine:
+1. **Arming & Baseline Idle (0–25s):** User keeps hands off keyboard and mouse. The watchdog confirms 0 human input, verifies baseline CPU/GPU/Disk activity, and tracks sleep countdown progression.
+2. **Automated Media Playback Test (25–55s):** Automatically triggers a test video stream in your default browser. Monitors active audio endpoints, volume levels, and verifies whether Windows or the browser properly asserted a `DISPLAY` keep-awake request.
+3. **Post-Media Release & Pause Grace (55–85s):** Tests media pause/close. Verifies whether sound drivers release their sessions cleanly or leave lingering "zombie locks" that prevent PC sleep.
+4. **Hardware & Disk Deep-Dive (85–110s):** Separates physical SSD/HDD throughput from virtual browser/IPC cache thrashing, and inspects system power requests (`powercfg /requests`).
+5. **Synthesis & Root Cause Diagnosis (110–120s):** Synthesizes sensor telemetry, classifies findings (`[CRITICAL]`, `[WARNING]`, `[OK]`), and generates an actionable Markdown report.
+
+### Why Laptops Sleep While Watching Movies:
+Many web browsers and media players fail to call Windows `SetThreadExecutionState(ES_DISPLAY_REQUIRED)` while streaming video passively. Because you are watching without touching the mouse or keyboard, Windows assumes you walked away and abruptly puts your laptop to sleep mid-movie! **Agent Power Guard's Smart Guard** monitors active CoreAudio/WASAPI render sessions and SMTC tokens directly at the kernel level, ensuring media playback keeps your screen and machine awake even when players fail to assert power requests.
+
+### 1-Click GitHub Issue Reporting:
+When the test completes, click **Report Issue on GitHub** to immediately open a pre-filled GitHub issue in your browser containing the full diagnostic report and telemetry breakdown — **no personal access tokens or API keys required**. You can also copy the markdown report directly using **Copy Diagnostic Report**.
+
+---
+
 ## <img src="assets/icons/bell.svg" width="22" height="22" align="absmiddle" alt="" /> Alerts, in-panel updates and uninstall
 
 The **Alerts & Updates** tab configures notifications, in-app software updates and uninstallation. **No notification channels are configured by default** (`ntfy`, Telegram and webhook fields start empty), and outbound requests go only to destinations you configure. Network calls run on a dedicated worker thread so the 1 Hz watchdog is never delayed.
@@ -850,7 +869,7 @@ Unit tests cover the pure signal-conditioning filters (`src/signal.rs`), intent 
 
 <br/>
 
-The version string is duplicated in `Cargo.toml`, `wix/main.wxs` (`Version="x.y.z.0"`), `packaging/macos/Info.plist`, `packaging/build-deb.sh`, and the winget, Scoop, Chocolatey, Homebrew and AUR manifests. `build-msi.ps1` reads `Cargo.toml` and falls back to `1.2.9`. Package-manager manifests also need real SHA-256 values after release checksums are published.
+The version string is duplicated in `Cargo.toml`, `wix/main.wxs` (`Version="x.y.z.0"`), `packaging/macos/Info.plist`, `packaging/build-deb.sh`, and the winget, Scoop, Chocolatey, Homebrew and AUR manifests. `build-msi.ps1` reads `Cargo.toml` and falls back to `1.3.0`. Package-manager manifests also need real SHA-256 values after release checksums are published.
 
 </details>
 
@@ -872,7 +891,12 @@ The version string is duplicated in `Cargo.toml`, `wix/main.wxs` (`Version="x.y.
 
 **The machine never sleeps.** Open the app and look for the condition marked **BLOCKING SLEEP**; it shows the reason. The usual causes are a stuck power request (enable the override in condition 9), a background process matching the watch list (the defaults include broad names such as `code`, `node` and `git`), or a threshold that is too tight for your machine's idle noise. The **Block History** tab and the dashboard's **+ Ignore** button help identify and exclude false positives.
 
-**Antivirus flags or removes the executable.** The app suspends the machine, acquires `SeShutdownPrivilege`, writes a startup entry and polls hardware and registry state. Those are legitimate for a power tool but look similar to suspicious behaviour to heuristic scanners, and the binary is not signed with a paid code-signing certificate. The project is open source and makes no network calls other than those you configure. To resolve it, add an exclusion for the install folder:
+**Antivirus flags or removes the executable.** The app suspends the machine, acquires `SeShutdownPrivilege`, writes a startup entry and polls hardware and registry state. Those are legitimate for a power tool but look similar to suspicious behaviour to heuristic scanners, and the binary is not signed with a paid code-signing certificate. The project is open source and makes no network calls other than those you configure.
+
+> [!NOTE]
+> **Windows Defender SmartScreen & Browser Warning:** Because Agent Power Guard is a free open-source tool without an expensive commercial EV certificate, Windows Defender SmartScreen or your browser may say *"Windows protected your PC"* or flag the downloaded `.exe` / `.msi`. Click **"More info"** and choose **"Run anyway"** (or in your browser download bar, select **"Keep anyway"**). All binaries are compiled transparently from public source code on GitHub Actions.
+
+To add an exclusion for the install folder:
 
 - **Microsoft Defender:**
   1. Open **Windows Security → Virus & threat protection → Manage settings**.

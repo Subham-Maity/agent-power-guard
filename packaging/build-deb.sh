@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # Debian (.deb) package generator for Agent Power Guard
-VERSION="1.2.9"
+VERSION="1.3.0"
 ARCH="amd64"
 PKG_DIR="target/debian/agent-power-guard_${VERSION}_${ARCH}"
 
