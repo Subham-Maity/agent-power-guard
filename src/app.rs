@@ -19,9 +19,7 @@ use std::process::Command;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use crate::diag::{
-    build_github_issue_url, open_browser_url, DiagSeverity, DiagnosticPhase, DiagnosticSession,
-};
+use crate::diag::{open_browser_url, DiagSeverity, DiagnosticPhase, DiagnosticSession};
 #[cfg(test)]
 use crate::evaluator::Decision;
 use crate::evaluator::{evaluate, ConditionStatus, EvalConfig, EvaluationState, Metrics};
@@ -3914,7 +3912,8 @@ pub fn run_watchdog_loop(state: Arc<Mutex<SharedState>>, egui_ctx: Option<egui::
 
         let trigger_sleep;
         let mut trigger_monitor_off = false;
-        let mut launch_diag_media = false;
+        let mut launch_diag_media = crate::diag::DiagLaunchMedia::None;
+        let is_diag_active;
         let hold_os_wake_lock;
         let mut wake_sleep_stabilize = false;
 
@@ -4368,8 +4367,40 @@ pub fn run_watchdog_loop(state: Arc<Mutex<SharedState>>, egui_ctx: Option<egui::
                 trigger_update_check_locked(&mut s, Arc::clone(&state));
             }
 
-            // 120-Second Automated Diagnostic Session Tick
-            if s.diag_session.active {
+            // Automated Diagnostic Session & Spec Auto-Fetch
+            if (s.diag_session.active || s.active_tab == ActiveTab::Diagnostic)
+                && !s.detected_specs.fetched
+                && !s.watt_calc.spec_fetch_in_progress
+            {
+                trigger_spec_fetch_locked(&mut s, Arc::clone(&state));
+            }
+
+            is_diag_active = s.diag_session.active;
+            if is_diag_active {
+                // Dynamic Watt Calculation from component specifications
+                let psu_eff = (s.watt_calc.psu_efficiency_pct / 100.0).clamp(0.60, 0.98);
+                let cpu_idle_w = s.watt_calc.cpu_idle_w;
+                let gpu_idle_w = s.watt_calc.gpu_idle_w;
+                let board_fans_w = s.watt_calc.mobo_ram_ssd_fans_w;
+                let extras_w = s.watt_calc.peripherals_w;
+                let mon_count = s.watt_calc.monitor_count.max(1) as f32;
+                let mon_each_w = s.watt_calc.monitor_each_w.clamp(5.0, 250.0);
+                let monitors_active_w = mon_count * mon_each_w;
+
+                let dynamic_cpu_w = cpu_idle_w
+                    + (whole_pc_cpu / 100.0)
+                        * (s.detected_specs.cpu_cores as f32 * 12.0).clamp(35.0, 150.0);
+                let dynamic_gpu_w = gpu_idle_w + (gpu_reading.util_pct / 100.0) * 110.0;
+                let pc_internal_active_w = dynamic_cpu_w + dynamic_gpu_w + board_fans_w + extras_w;
+                let pc_wall_w = pc_internal_active_w / psu_eff;
+                let est_active_watts = pc_wall_w + monitors_active_w;
+
+                let est_display_off_watts = pc_wall_w + (mon_count * 0.5); // monitors in sleep draw ~0.5W
+                let est_sleep_watts = s.watt_calc.sleep_watts.clamp(1.0, 15.0);
+
+                let display_off_condition_met = trigger_monitor_off;
+                let sleep_condition_met = trigger_sleep;
+
                 let os_name = if s.detected_specs.os_name.trim().is_empty() {
                     #[cfg(windows)]
                     {
@@ -4390,18 +4421,103 @@ pub fn run_watchdog_loop(state: Arc<Mutex<SharedState>>, egui_ctx: Option<egui::
                 } else {
                     s.detected_specs.os_name.clone()
                 };
-                let hw_summary = format!(
-                    "CPU: {} ({}c) | RAM: {:.1} GB | GPU: {} | Storage: {} drive(s) | Audio: {} device(s) | Laptop: {}",
-                    if s.detected_specs.cpu_brand.is_empty() { "Detected CPU" } else { &s.detected_specs.cpu_brand },
+
+                let specs_report = format!(
+                    "- **OS:** {}\n\
+                     - **Motherboard:** {}\n\
+                     - **CPU:** {} ({} physical cores, {} threads)\n\
+                     - **RAM:** {} (Total: {:.1} GB)\n\
+                     - **GPU:** {} ({:.1} GB VRAM)\n\
+                     - **Storage Volumes:** {} (Summary: {})\n\
+                     - **Connected Displays:** {} (Count: {})\n\
+                     - **Estimated Active Power:** {:.1} W (PC: {:.1} W, Monitors: {:.1} W)\n\
+                     - **Estimated Display-Off Power:** {:.1} W (Watt Drop: -{:.1} W)\n\
+                     - **Estimated S3 Standby Power:** {:.1} W (Watt Drop: -{:.1} W)\n\
+                     - **Cooling & Form Factor:** Fans: {}, ARGB: {}, Cooler: {}, Laptop: {}",
+                    os_name,
+                    if s.detected_specs.motherboard.is_empty() {
+                        "Standard Desktop Motherboard"
+                    } else {
+                        &s.detected_specs.motherboard
+                    },
+                    if s.detected_specs.cpu_brand.is_empty() {
+                        "Detected CPU"
+                    } else {
+                        &s.detected_specs.cpu_brand
+                    },
                     s.detected_specs.cpu_cores,
+                    s.detected_specs.cpu_logical_threads,
+                    if s.detected_specs.ram_details.is_empty() {
+                        format!("{:.1} GB", s.detected_specs.ram_gb)
+                    } else {
+                        s.detected_specs.ram_details.clone()
+                    },
                     s.detected_specs.ram_gb,
-                    if s.detected_specs.gpu_name.is_empty() { "Integrated/Discrete GPU" } else { &s.detected_specs.gpu_name },
+                    if s.detected_specs.gpu_name.is_empty() {
+                        "Standard GPU"
+                    } else {
+                        &s.detected_specs.gpu_name
+                    },
+                    s.detected_specs.gpu_vram_gb,
                     s.detected_specs.storage_drives.len(),
-                    s.detected_specs.audio_devices.len(),
+                    if s.detected_specs.storage_summary.is_empty() {
+                        "Storage Volumes Detected"
+                    } else {
+                        &s.detected_specs.storage_summary
+                    },
+                    if s.detected_specs.monitors.is_empty() {
+                        "1 Display".to_string()
+                    } else {
+                        s.detected_specs.monitors.join(", ")
+                    },
+                    s.watt_calc.monitor_count,
+                    est_active_watts,
+                    pc_wall_w,
+                    monitors_active_w,
+                    est_display_off_watts,
+                    (est_active_watts - est_display_off_watts).max(0.0),
+                    est_sleep_watts,
+                    (est_active_watts - est_sleep_watts).max(0.0),
+                    s.watt_calc.case_fan_count,
+                    s.watt_calc.argb_fan_count,
+                    s.watt_calc.cooler_type,
                     s.detected_specs.is_laptop
                 );
-                let audio_devs = s.detected_specs.audio_devices.clone();
+
+                let mut audio_summary = String::new();
+                audio_summary.push_str("### Audio Output / Render Endpoints:\n");
+                if s.detected_specs.audio_devices.is_empty() {
+                    audio_summary.push_str("- Default Audio Render Endpoint (CoreAudio/WASAPI)\n");
+                } else {
+                    for dev in &s.detected_specs.audio_devices {
+                        audio_summary.push_str(&format!("- {}\n", dev));
+                    }
+                }
+                audio_summary.push_str("\n### Audio Input / Microphone Capture Endpoints:\n");
+                let mic_devs: Vec<&String> = s
+                    .detected_specs
+                    .usb_peripherals
+                    .iter()
+                    .filter(|d| {
+                        let l = d.to_lowercase();
+                        l.contains("mic")
+                            || l.contains("snowball")
+                            || l.contains("audio")
+                            || l.contains("dac")
+                    })
+                    .collect();
+                if mic_devs.is_empty() {
+                    audio_summary
+                        .push_str("- Default System Microphone / Audio Capture Endpoint\n");
+                } else {
+                    for dev in mic_devs {
+                        audio_summary.push_str(&format!("- {}\n", dev));
+                    }
+                }
+
+                let mic_active = audio_reading.capture_peak > 0.01;
                 let intent_display = s.intent.display_label();
+
                 launch_diag_media = s.diag_session.tick_1s(
                     idle_secs,
                     Some(decision.countdown_secs),
@@ -4410,6 +4526,8 @@ pub fn run_watchdog_loop(state: Arc<Mutex<SharedState>>, egui_ctx: Option<egui::
                     audio_reading.media.render_active,
                     audio_reading.media.render_peak,
                     &audio_reading.media.render_app,
+                    mic_active,
+                    audio_reading.capture_peak,
                     power_req_snap.display_active,
                     power_req_snap.system_active,
                     whole_pc_cpu,
@@ -4418,9 +4536,13 @@ pub fn run_watchdog_loop(state: Arc<Mutex<SharedState>>, egui_ctx: Option<egui::
                     whole_pc_disk_kbps * 0.8,
                     filtered_pc_net_kbps * 0.7,
                     filtered_pc_net_kbps * 0.3,
-                    &os_name,
-                    &hw_summary,
-                    &audio_devs,
+                    est_active_watts,
+                    est_display_off_watts,
+                    est_sleep_watts,
+                    display_off_condition_met,
+                    sleep_condition_met,
+                    &specs_report,
+                    &audio_summary,
                 );
             }
 
@@ -4431,8 +4553,14 @@ pub fn run_watchdog_loop(state: Arc<Mutex<SharedState>>, egui_ctx: Option<egui::
             }
         } // unlock state
 
-        if launch_diag_media {
-            open_browser_url("https://www.youtube.com/watch?v=aqz-KE-bpKQ");
+        match launch_diag_media {
+            crate::diag::DiagLaunchMedia::Primary => {
+                open_browser_url("https://www.youtube.com/watch?v=aqz-KE-bpKQ");
+            }
+            crate::diag::DiagLaunchMedia::Secondary => {
+                open_browser_url("https://www.youtube.com/watch?v=jfKfPfyJRdk");
+            }
+            crate::diag::DiagLaunchMedia::None => {}
         }
 
         // Sync OS wake-lock thread (Best Performance mode)
@@ -4442,13 +4570,13 @@ pub fn run_watchdog_loop(state: Arc<Mutex<SharedState>>, egui_ctx: Option<egui::
             std::thread::sleep(Duration::from_millis(1200));
         }
 
-        // Execute Stage 1 Display-Off outside mutex lock
-        if trigger_monitor_off {
+        // Execute Stage 1 Display-Off outside mutex lock (SUPPRESSED during diagnostic test)
+        if trigger_monitor_off && !is_diag_active {
             turn_off_monitors_now();
         }
 
-        // Execute sleep outside of mutex lock, measuring real wall-clock sleep duration
-        if trigger_sleep {
+        // Execute sleep outside of mutex lock (SUPPRESSED during diagnostic test)
+        if trigger_sleep && !is_diag_active {
             let before_sleep = SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .unwrap_or_default()
@@ -10472,7 +10600,7 @@ impl eframe::App for AgentPowerGuardApp {
                             ui,
                             UiIcon::Activity,
                             egui::Color32::from_rgb(244, 63, 94),
-                            "120s Automated Diagnostic & Issue Reporter",
+                            "Autonomous System Power & Sleep Diagnostic Suite",
                         );
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             if s.diag_session.active {
@@ -10505,7 +10633,7 @@ impl eframe::App for AgentPowerGuardApp {
                     });
                     ui.label(
                         egui::RichText::new(
-                            "Autonomous 120-second end-to-end diagnostic suite that validates sleep countdowns, tests audio render pipelines, inspects OS DISPLAY keep-awake requests, and flags zombie driver locks.",
+                            "Autonomous multi-phase diagnostic engine that verifies sleep timers, browser media keep-awake hooks, microphone activity, simulated display-off and standby triggers, and live watt drops without cutting system power.",
                         )
                         .weak()
                         .size(12.0),
@@ -10519,7 +10647,7 @@ impl eframe::App for AgentPowerGuardApp {
                         .as_secs();
 
                     // --------------------------------------------------------
-                    // STATE 1: IDLE / CANCELLED (Pre-Flight & Start Test)
+                    // STATE 1: IDLE / CANCELLED (Pre-Flight Consent & Presets)
                     // --------------------------------------------------------
                     if !s.diag_session.active && s.diag_session.phase != DiagnosticPhase::Completed {
                         app_card_frame(ui).show(ui, |ui| {
@@ -10528,37 +10656,18 @@ impl eframe::App for AgentPowerGuardApp {
                                 ui,
                                 UiIcon::Sliders,
                                 egui::Color32::from_rgb(56, 189, 248),
-                                "Automated 120-Second Test Routine",
+                                "Diagnostic Test Configuration & Pre-Flight Verification",
                             );
                             ui.add_space(6.0);
                             ui.label(
                                 egui::RichText::new(
-                                    "When started, the diagnostic engine executes 5 synchronized test phases to verify whether your system behaves nominally or suffers from premature sleep or sleep refusal:",
+                                    "The diagnostic engine runs a synchronized test sequence to verify why laptops sleep unexpectedly during video playback, isolate zombie driver locks, and record real-time watt drops:",
                                 )
                                 .size(12.0),
                             );
-                            ui.add_space(6.0);
+                            ui.add_space(8.0);
 
-                            let phases_info = [
-                                ("1. Arming & Baseline Idle (0-25s)", "Verifies user input is idle, monitors baseline CPU/GPU/Disk, and checks sleep countdown continuity."),
-                                ("2. Automated Media Playback (25-55s)", "Automatically triggers a test video in your browser. Verifies whether CoreAudio/WASAPI render hooks and OS DISPLAY requests activate. (Diagnoses why laptops sleep while watching movies!)."),
-                                ("3. Post-Media Release & Grace (55-85s)", "Tests audio stop/close. Verifies drivers release sound sessions cleanly without leaving zombie sleep locks."),
-                                ("4. Hardware Blocker Deep-Dive (85-110s)", "Isolates physical drive activity from browser IPC cache noise, and checks powercfg driver assertions."),
-                                ("5. Synthesis & Report (110-120s)", "Synthesizes sensor samples into root cause diagnosis and outputs a full GitHub-ready Markdown report."),
-                            ];
-
-                            for (title, desc) in phases_info {
-                                ui.horizontal(|ui| {
-                                    draw_icon_inline(ui, 12.0, egui::Color32::from_rgb(52, 211, 153), UiIcon::Check);
-                                    ui.label(egui::RichText::new(title).strong().size(12.0));
-                                });
-                                ui.label(egui::RichText::new(desc).weak().size(11.5));
-                                ui.add_space(3.0);
-                            }
-
-                            ui.add_space(10.0);
-
-                            // Warning Banner: Hands off keyboard & mouse!
+                            // Critical Hands-Off Warning Box
                             let warn_fill = if dark {
                                 egui::Color32::from_rgb(69, 26, 3)
                             } else {
@@ -10571,60 +10680,122 @@ impl eframe::App for AgentPowerGuardApp {
                             };
                             egui::Frame::new()
                                 .fill(warn_fill)
-                                .stroke(egui::Stroke::new(1.0, warn_stroke))
+                                .stroke(egui::Stroke::new(1.5, warn_stroke))
                                 .corner_radius(8.0)
-                                .inner_margin(egui::Margin::symmetric(12, 10))
+                                .inner_margin(egui::Margin::symmetric(14, 12))
                                 .show(ui, |ui| {
                                     ui.horizontal(|ui| {
-                                        draw_icon_inline(ui, 18.0, egui::Color32::from_rgb(245, 158, 11), UiIcon::Warning);
+                                        draw_icon_inline(ui, 22.0, egui::Color32::from_rgb(245, 158, 11), UiIcon::Warning);
                                         ui.vertical(|ui| {
                                             ui.label(
-                                                egui::RichText::new("HANDS-OFF REQUIREMENT (120 SECONDS)")
+                                                egui::RichText::new("MANDATORY HANDS-OFF REQUIREMENT")
                                                     .strong()
-                                                    .size(12.5)
+                                                    .size(13.0)
                                                     .color(if dark { egui::Color32::from_rgb(253, 230, 138) } else { egui::Color32::from_rgb(146, 64, 14) }),
                                             );
                                             ui.label(
                                                 egui::RichText::new(
-                                                    "Do NOT press any keys or move the mouse once the test begins. The watchdog requires uninterrupted human idle time to evaluate sensor accuracy and sleep thresholds.",
+                                                    "Please DO NOT touch your keyboard or mouse once the test begins. Moving the mouse or pressing any key will immediately reset the operating system's natural idle timer and disrupt sleep evaluation. (The test logs accidental human input).",
                                                 )
                                                 .size(11.5)
                                                 .color(if dark { egui::Color32::from_rgb(254, 243, 199) } else { egui::Color32::from_rgb(120, 53, 15) }),
+                                            );
+                                            ui.add_space(3.0);
+                                            ui.label(
+                                                egui::RichText::new(
+                                                    "Safety Guarantee: This test will NOT black out your display or suspend your PC; it captures system-level trigger events ('display_off_simulated' and 'sleep_simulated') while keeping your screen active.",
+                                                )
+                                                .size(11.0)
+                                                .color(if dark { egui::Color32::from_rgb(253, 230, 138) } else { egui::Color32::from_rgb(146, 64, 14) }),
                                             );
                                         });
                                     });
                                 });
 
+                            ui.add_space(12.0);
+
+                            // Test Scope Steps
+                            let phases_info = [
+                                ("1. Baseline Idle & Calibration", "Validates user input is 0, monitors baseline CPU/GPU/Disk, and checks sleep countdown continuity."),
+                                ("2. Primary Media Stream Playback", "Automatically triggers a 4K test video in your browser. Verifies whether CoreAudio/WASAPI render hooks and OS DISPLAY requests activate. (Diagnoses why laptops sleep while watching movies!)."),
+                                ("3. Secondary Background Media Stream", "Launches a secondary background tab (lofi stream) to verify multi-stream audio mixing and background keep-awake behavior."),
+                                ("4. Audio/Mic Release & Zombie Driver Check", "Evaluates audio stop/close. Verifies whether speakers and microphones release sound pipelines without zombie locks."),
+                                ("5. Hardware Blocker, Disk & Watt Profiling", "Isolates physical disk writes, evaluates driver assertions, and measures live active vs standby watt drops."),
+                                ("6. Synthesis & Safe GitHub Issue Generation", "Compiles full Markdown report with hardware specs, auto-copies to clipboard, and builds safe 1-click GitHub issue."),
+                            ];
+
+                            for (title, desc) in phases_info {
+                                ui.horizontal(|ui| {
+                                    draw_icon_inline(ui, 12.0, egui::Color32::from_rgb(52, 211, 153), UiIcon::Check);
+                                    ui.label(egui::RichText::new(title).strong().size(12.0));
+                                });
+                                ui.label(egui::RichText::new(desc).weak().size(11.5));
+                                ui.add_space(3.0);
+                            }
+
                             ui.add_space(14.0);
 
+                            // Duration Preset Selection & Start Action Buttons
                             ui.vertical_centered(|ui| {
-                                let start_btn = ui.add_sized(
-                                    [320.0, 44.0],
-                                    egui::Button::new(
-                                        egui::RichText::new("Start 120s Automated Diagnostic")
-                                            .strong()
-                                            .size(15.0)
-                                            .color(egui::Color32::WHITE),
-                                    )
-                                    .fill(egui::Color32::from_rgb(225, 29, 72))
-                                    .corner_radius(10.0),
-                                );
-                                if start_btn.clicked() {
-                                    s.diag_session.start(now_epoch);
-                                    s.set_toast("120s Diagnostic started: Please release keyboard and mouse!");
-                                }
+                                ui.label(egui::RichText::new("Select Diagnostic Test Duration:").strong().size(13.0));
+                                ui.add_space(6.0);
+
+                                ui.horizontal_wrapped(|ui| {
+                                    // 300s Deep Precision Button (Recommended)
+                                    let deep_btn = ui.add_sized(
+                                        [330.0, 48.0],
+                                        egui::Button::new(
+                                            egui::RichText::new("I Agree — Start 300s Deep Diagnostic (Recommended)")
+                                                .strong()
+                                                .size(13.5)
+                                                .color(egui::Color32::WHITE),
+                                        )
+                                        .fill(egui::Color32::from_rgb(14, 165, 233))
+                                        .corner_radius(10.0),
+                                    );
+                                    if deep_btn.clicked() {
+                                        if !s.detected_specs.fetched {
+                                            trigger_spec_fetch_locked(&mut s, Arc::clone(&self.state));
+                                        }
+                                        s.diag_session.start(now_epoch, crate::diag::DiagDurationMode::Deep300s);
+                                        s.set_toast("300s Deep Diagnostic started: Please release keyboard and mouse!");
+                                    }
+
+                                    ui.add_space(10.0);
+
+                                    // 120s Rapid Button
+                                    let rapid_btn = ui.add_sized(
+                                        [250.0, 48.0],
+                                        egui::Button::new(
+                                            egui::RichText::new("Start 120s Rapid Diagnostic")
+                                                .strong()
+                                                .size(13.5)
+                                                .color(egui::Color32::WHITE),
+                                        )
+                                        .fill(egui::Color32::from_rgb(225, 29, 72))
+                                        .corner_radius(10.0),
+                                    );
+                                    if rapid_btn.clicked() {
+                                        if !s.detected_specs.fetched {
+                                            trigger_spec_fetch_locked(&mut s, Arc::clone(&self.state));
+                                        }
+                                        s.diag_session.start(now_epoch, crate::diag::DiagDurationMode::Rapid120s);
+                                        s.set_toast("120s Rapid Diagnostic started: Please release keyboard and mouse!");
+                                    }
+                                });
                             });
                             ui.add_space(8.0);
                         });
                     }
 
                     // --------------------------------------------------------
-                    // STATE 2: ACTIVE DIAGNOSTIC (Live 120s Progress & Sensors)
+                    // STATE 2: ACTIVE DIAGNOSTIC (Live Telemetry & Sensors)
                     // --------------------------------------------------------
                     else if s.diag_session.active {
                         let sec = s.diag_session.elapsed_secs;
+                        let total = s.diag_session.total_secs;
                         let phase = s.diag_session.phase;
-                        let pct = (sec as f32 / 120.0).clamp(0.0, 1.0);
+                        let pct = (sec as f32 / total.max(1) as f32).clamp(0.0, 1.0);
 
                         // Urgent Hands-Off Banner
                         let alert_fill = if dark {
@@ -10647,13 +10818,13 @@ impl eframe::App for AgentPowerGuardApp {
                                     draw_icon_inline(ui, 20.0, egui::Color32::from_rgb(244, 63, 94), UiIcon::Activity);
                                     ui.vertical(|ui| {
                                         ui.label(
-                                            egui::RichText::new(format!("DIAGNOSTIC IN PROGRESS: {}s / 120s", sec))
+                                            egui::RichText::new(format!("DIAGNOSTIC IN PROGRESS: {}s / {}s ({:?})", sec, total, s.diag_session.duration_mode))
                                                 .strong()
                                                 .size(14.0)
                                                 .color(if dark { egui::Color32::WHITE } else { egui::Color32::from_rgb(159, 18, 57) }),
                                         );
                                         ui.label(
-                                            egui::RichText::new("PLEASE DO NOT TOUCH MOUSE OR KEYBOARD: Monitoring sleep countdown, media hooks, and driver assertions...")
+                                            egui::RichText::new("PLEASE DO NOT TOUCH MOUSE OR KEYBOARD: Monitoring sleep countdown, dual media streams, mic capture, and watt drops...")
                                                 .size(12.0)
                                                 .color(if dark { egui::Color32::from_rgb(254, 205, 211) } else { egui::Color32::from_rgb(136, 19, 55) }),
                                         );
@@ -10666,7 +10837,7 @@ impl eframe::App for AgentPowerGuardApp {
                         // Progress Bar
                         ui.add(
                             egui::ProgressBar::new(pct)
-                                .text(format!("{}s / 120s — {}", sec, phase.label()))
+                                .text(format!("{}s / {}s — {}", sec, total, phase.label()))
                                 .animate(true),
                         );
 
@@ -10691,19 +10862,23 @@ impl eframe::App for AgentPowerGuardApp {
 
                         ui.add_space(8.0);
 
-                        // Live Multi-Sensor Readout Cards
-                        ui.label(egui::RichText::new("Real-Time Diagnostic Sensors:").strong().size(12.5));
+                        // Live Multi-Sensor Readout Cards (5 Cards)
+                        ui.label(egui::RichText::new("Live Telemetry, System Triggers & Watt Meter:").strong().size(12.5));
                         ui.add_space(4.0);
 
-                        let card_w = ((ui.available_width() - 24.0) / 4.0).max(140.0);
+                        let card_w = ((ui.available_width() - 32.0) / 5.0).max(120.0);
 
                         let last_smp = s.diag_session.samples.last();
                         let live_idle = last_smp.map(|sm| sm.idle_secs).unwrap_or(s.live_idle_secs);
                         let live_cd = last_smp.and_then(|sm| sm.countdown_secs).unwrap_or(s.countdown_secs);
                         let live_aud_act = last_smp.map(|sm| sm.audio_render_active).unwrap_or(s.media_lock_active);
                         let live_peak = last_smp.map(|sm| sm.audio_peak).unwrap_or(s.mic_capture_peak);
+                        let live_mic = last_smp.map(|sm| sm.mic_capture_active).unwrap_or(false);
+                        let live_mic_peak = last_smp.map(|sm| sm.mic_peak).unwrap_or(0.0);
                         let live_disp = last_smp.map(|sm| sm.display_power_request).unwrap_or(!s.cond9_power_requests.is_passing);
-                        let live_sys = last_smp.map(|sm| sm.system_power_request).unwrap_or(false);
+                        let live_watts = last_smp.map(|sm| sm.est_active_watts).unwrap_or(105.0);
+                        let live_drop_disp = last_smp.map(|sm| (sm.est_active_watts - sm.est_display_off_watts).max(0.0)).unwrap_or(0.0);
+                        let live_drop_sleep = last_smp.map(|sm| (sm.est_active_watts - sm.est_sleep_watts).max(0.0)).unwrap_or(0.0);
                         let intent_str = s.intent.display_label();
 
                         ui.horizontal_wrapped(|ui| {
@@ -10717,10 +10892,10 @@ impl eframe::App for AgentPowerGuardApp {
                                     ui.label(egui::RichText::new("Input Idle").weak().size(11.0));
                                     let idle_txt = format!("{}s", live_idle);
                                     ui.label(egui::RichText::new(idle_txt).strong().size(16.0).color(egui::Color32::from_rgb(52, 211, 153)));
-                                    ui.label(egui::RichText::new("Threshold: 180s").weak().size(10.5));
+                                    ui.label(egui::RichText::new(format!("Threshold: {}s", s.config.idle_threshold_secs)).weak().size(10.5));
                                 });
 
-                            // Card 2: Sleep Countdown
+                            // Card 2: Sleep Countdown & Triggers
                             egui::Frame::new()
                                 .fill(if dark { egui::Color32::from_rgb(20, 27, 38) } else { egui::Color32::from_rgb(241, 245, 249) })
                                 .corner_radius(8.0)
@@ -10735,10 +10910,22 @@ impl eframe::App for AgentPowerGuardApp {
                                     };
                                     let cd_col = if s.all_conditions_pass { egui::Color32::from_rgb(56, 189, 248) } else { egui::Color32::from_rgb(245, 158, 11) };
                                     ui.label(egui::RichText::new(cd_txt).strong().size(16.0).color(cd_col));
-                                    ui.label(egui::RichText::new(&intent_str).weak().size(10.5));
+                                    ui.label(egui::RichText::new(if live_disp { "OS Lock: Active" } else { &intent_str }).weak().size(10.5));
                                 });
 
-                            // Card 3: Audio Render Pipeline
+                            // Card 3: Live System Wattage
+                            egui::Frame::new()
+                                .fill(if dark { egui::Color32::from_rgb(20, 27, 38) } else { egui::Color32::from_rgb(241, 245, 249) })
+                                .corner_radius(8.0)
+                                .inner_margin(egui::Margin::symmetric(10, 8))
+                                .show(ui, |ui| {
+                                    ui.set_width(card_w);
+                                    ui.label(egui::RichText::new("Live Power").weak().size(11.0));
+                                    ui.label(egui::RichText::new(format!("{:.1} W", live_watts)).strong().size(16.0).color(egui::Color32::from_rgb(251, 191, 36)));
+                                    ui.label(egui::RichText::new(format!("Drop: -{:.0}W | -{:.0}W", live_drop_disp, live_drop_sleep)).weak().size(10.5));
+                                });
+
+                            // Card 4: Audio Render Pipeline
                             egui::Frame::new()
                                 .fill(if dark { egui::Color32::from_rgb(20, 27, 38) } else { egui::Color32::from_rgb(241, 245, 249) })
                                 .corner_radius(8.0)
@@ -10746,27 +10933,56 @@ impl eframe::App for AgentPowerGuardApp {
                                 .show(ui, |ui| {
                                     ui.set_width(card_w);
                                     ui.label(egui::RichText::new("Audio Render").weak().size(11.0));
-                                    let aud_txt = if live_aud_act { "Active" } else { "Idle / Muted" };
+                                    let aud_txt = if live_aud_act { "Playing" } else { "Idle / Muted" };
                                     let aud_col = if live_aud_act { egui::Color32::from_rgb(52, 211, 153) } else { egui::Color32::from_rgb(148, 163, 184) };
                                     ui.label(egui::RichText::new(aud_txt).strong().size(16.0).color(aud_col));
                                     let peak_pct = (live_peak * 100.0).round();
                                     ui.label(egui::RichText::new(format!("Peak: {:.0}%", peak_pct)).weak().size(10.5));
                                 });
 
-                            // Card 4: OS Power Requests
+                            // Card 5: Audio Input / Microphone
                             egui::Frame::new()
                                 .fill(if dark { egui::Color32::from_rgb(20, 27, 38) } else { egui::Color32::from_rgb(241, 245, 249) })
                                 .corner_radius(8.0)
                                 .inner_margin(egui::Margin::symmetric(10, 8))
                                 .show(ui, |ui| {
                                     ui.set_width(card_w);
-                                    ui.label(egui::RichText::new("OS Keep-Awake").weak().size(11.0));
-                                    let req_txt = if live_disp { "DISPLAY: YES" } else { "DISPLAY: NO" };
-                                    let req_col = if live_disp { egui::Color32::from_rgb(52, 211, 153) } else { egui::Color32::from_rgb(248, 113, 113) };
-                                    ui.label(egui::RichText::new(req_txt).strong().size(15.0).color(req_col));
-                                    let sys_txt = if live_sys { "SYSTEM: YES" } else { "SYSTEM: NO" };
-                                    ui.label(egui::RichText::new(sys_txt).weak().size(10.5));
+                                    ui.label(egui::RichText::new("Microphone").weak().size(11.0));
+                                    let mic_txt = if live_mic { "Active Capture" } else { "Silent / Idle" };
+                                    let mic_col = if live_mic { egui::Color32::from_rgb(244, 63, 94) } else { egui::Color32::from_rgb(52, 211, 153) };
+                                    ui.label(egui::RichText::new(mic_txt).strong().size(15.0).color(mic_col));
+                                    let mic_pct = (live_mic_peak * 100.0).round();
+                                    ui.label(egui::RichText::new(format!("Mic Peak: {:.0}%", mic_pct)).weak().size(10.5));
                                 });
+                        });
+
+                        ui.add_space(8.0);
+
+                        // Simulated System Triggers Status Row
+                        ui.horizontal(|ui| {
+                            let disp_msg = match s.diag_session.display_off_simulated_at {
+                                Some(at) => format!("Display-Off Status: [TRIGGERED at {}s, Saved -{:.1}W]", at, s.diag_session.display_off_watt_drop),
+                                None => "Display-Off Status: [Evaluating Countdown...]".to_string(),
+                            };
+                            let disp_color = if s.diag_session.display_off_simulated_at.is_some() {
+                                egui::Color32::from_rgb(52, 211, 153)
+                            } else {
+                                egui::Color32::from_rgb(148, 163, 184)
+                            };
+                            ui.label(egui::RichText::new(disp_msg).strong().color(disp_color).size(12.0));
+
+                            ui.add_space(16.0);
+
+                            let sleep_msg = match s.diag_session.sleep_simulated_at {
+                                Some(at) => format!("Standby Sleep Status: [TRIGGERED at {}s, Saved -{:.1}W]", at, s.diag_session.sleep_watt_drop),
+                                None => "Standby Sleep Status: [Evaluating Countdown...]".to_string(),
+                            };
+                            let sleep_color = if s.diag_session.sleep_simulated_at.is_some() {
+                                egui::Color32::from_rgb(56, 189, 248)
+                            } else {
+                                egui::Color32::from_rgb(148, 163, 184)
+                            };
+                            ui.label(egui::RichText::new(sleep_msg).strong().color(sleep_color).size(12.0));
                         });
 
                         ui.add_space(10.0);
@@ -10778,7 +10994,7 @@ impl eframe::App for AgentPowerGuardApp {
                                 ui,
                                 UiIcon::History,
                                 egui::Color32::from_rgb(168, 85, 247),
-                                "Live Event Log Stream",
+                                "Live Event Log Stream & Watt Meter",
                             );
                             ui.add_space(4.0);
 
@@ -10788,7 +11004,7 @@ impl eframe::App for AgentPowerGuardApp {
                                 .show(ui, |ui| {
                                     for smp in s.diag_session.samples.iter().rev().take(10) {
                                         let note_display = if smp.note.is_empty() {
-                                            format!("{}: Audio={}, CD={:?}", smp.phase.label(), smp.audio_render_active, smp.countdown_secs)
+                                            format!("{}: Watts={:.1}W, Audio={}, CD={:?}", smp.phase.label(), smp.est_active_watts, smp.audio_render_active, smp.countdown_secs)
                                         } else {
                                             smp.note.clone()
                                         };
@@ -10802,7 +11018,7 @@ impl eframe::App for AgentPowerGuardApp {
                     }
 
                     // --------------------------------------------------------
-                    // STATE 3: COMPLETED (Report & GitHub 1-Click Submission)
+                    // STATE 3: COMPLETED (Report & Safe GitHub 1-Click Submission)
                     // --------------------------------------------------------
                     else if s.diag_session.phase == DiagnosticPhase::Completed {
                         // Hero Completion Banner
@@ -10826,13 +11042,13 @@ impl eframe::App for AgentPowerGuardApp {
                                     draw_icon_inline(ui, 20.0, egui::Color32::from_rgb(16, 185, 129), UiIcon::Check);
                                     ui.vertical(|ui| {
                                         ui.label(
-                                            egui::RichText::new("120S AUTOMATED DIAGNOSTIC COMPLETE")
+                                            egui::RichText::new(format!("{}S AUTOMATED DIAGNOSTIC COMPLETE", s.diag_session.total_secs))
                                                 .strong()
                                                 .size(13.5)
                                                 .color(if dark { egui::Color32::WHITE } else { egui::Color32::from_rgb(6, 95, 70) }),
                                         );
                                         ui.label(
-                                            egui::RichText::new("Sensor timeline captured, root cause analysis synthesized, and GitHub report generated.")
+                                            egui::RichText::new("Sensor timeline captured, simulated triggers verified, watt profile recorded, and safe GitHub report generated.")
                                                 .size(11.5)
                                                 .color(if dark { egui::Color32::from_rgb(167, 243, 208) } else { egui::Color32::from_rgb(4, 120, 87) }),
                                         );
@@ -10905,7 +11121,7 @@ impl eframe::App for AgentPowerGuardApp {
                                 .clicked()
                                 {
                                     copy_text_reliable(ui.ctx(), &s.diag_session.generated_report);
-                                    s.set_toast("Diagnostic report copied to clipboard!");
+                                    s.set_toast("Full diagnostic report copied to clipboard!");
                                 }
 
                                 if icon_button(
@@ -10915,12 +11131,45 @@ impl eframe::App for AgentPowerGuardApp {
                                     "Report Issue on GitHub",
                                     Some(egui::Color32::from_rgb(16, 185, 129)),
                                 )
-                                .on_hover_text("Opens pre-filled GitHub issue in your browser (no API key required)")
+                                .on_hover_text("Copies full report to clipboard and opens safe GitHub issue creator (no URL length limits)")
                                 .clicked()
                                 {
-                                    let url = build_github_issue_url(&s.diag_session.generated_report, None);
-                                    open_browser_url(&url);
-                                    s.set_toast("Opening GitHub issue creator in your browser...");
+                                    // 1. Copy complete unabridged markdown report to clipboard
+                                    copy_text_reliable(ui.ctx(), &s.diag_session.generated_report);
+
+                                    // 2. Save full report locally to file
+                                    if let Ok(user_profile) = std::env::var("USERPROFILE").or_else(|_| std::env::var("HOME")) {
+                                        let report_path = std::path::Path::new(&user_profile).join("agent-power-guard-diagnostic.md");
+                                        let _ = std::fs::write(&report_path, &s.diag_session.generated_report);
+                                    }
+
+                                    // 3. Inform user via toast
+                                    s.set_toast("Full report copied to clipboard! Paste (Ctrl+V) into GitHub issue body.");
+
+                                    // 4. Generate safe compact prefilled issue URL
+                                    let safe_url = s.diag_session.build_safe_github_issue_url(
+                                        if s.detected_specs.os_name.is_empty() { "Windows 11 / Windows 10" } else { &s.detected_specs.os_name },
+                                        if s.detected_specs.cpu_brand.is_empty() { "Standard CPU" } else { &s.detected_specs.cpu_brand },
+                                        if s.detected_specs.gpu_name.is_empty() { "Standard GPU" } else { &s.detected_specs.gpu_name },
+                                    );
+                                    open_browser_url(&safe_url);
+                                }
+
+                                if icon_button(
+                                    ui,
+                                    UiIcon::Download,
+                                    egui::Color32::from_rgb(56, 189, 248),
+                                    "Save Report to File",
+                                    None,
+                                )
+                                .clicked()
+                                {
+                                    if let Ok(user_profile) = std::env::var("USERPROFILE").or_else(|_| std::env::var("HOME")) {
+                                        let report_path = std::path::Path::new(&user_profile).join("agent-power-guard-diagnostic.md");
+                                        if std::fs::write(&report_path, &s.diag_session.generated_report).is_ok() {
+                                            s.set_toast(&format!("Report saved to {}", report_path.display()));
+                                        }
+                                    }
                                 }
 
                                 if icon_button(

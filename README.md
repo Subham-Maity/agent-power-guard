@@ -704,22 +704,31 @@ The **Block History** tab shows what prevented sleep:
 
 ---
 
-## <img src="assets/icons/activity.svg" width="22" height="22" align="absmiddle" alt="" /> 120-Second Automated Diagnostic & Issue Reporter
+## <img src="assets/icons/activity.svg" width="22" height="22" align="absmiddle" alt="" /> Autonomous Power, Sleep & Media Diagnostic Engine
 
-The **Test & Report** tab runs an autonomous 120-second end-to-end diagnostic suite that validates sleep countdowns, tests audio render pipelines, inspects OS `DISPLAY` keep-awake assertions, detects zombie driver locks, and profiles disk noise.
+The **Test & Report** tab runs an autonomous multi-phase diagnostic suite that validates sleep countdowns, tests audio render & microphone capture pipelines, inspects OS `DISPLAY` keep-awake assertions, detects zombie driver locks, and profiles real-time watt drops.
 
-### Automated 5-Phase Test Routine:
-1. **Arming & Baseline Idle (0–25s):** User keeps hands off keyboard and mouse. The watchdog confirms 0 human input, verifies baseline CPU/GPU/Disk activity, and tracks sleep countdown progression.
-2. **Automated Media Playback Test (25–55s):** Automatically triggers a test video stream in your default browser. Monitors active audio endpoints, volume levels, and verifies whether Windows or the browser properly asserted a `DISPLAY` keep-awake request.
-3. **Post-Media Release & Pause Grace (55–85s):** Tests media pause/close. Verifies whether sound drivers release their sessions cleanly or leave lingering "zombie locks" that prevent PC sleep.
-4. **Hardware & Disk Deep-Dive (85–110s):** Separates physical SSD/HDD throughput from virtual browser/IPC cache thrashing, and inspects system power requests (`powercfg /requests`).
-5. **Synthesis & Root Cause Diagnosis (110–120s):** Synthesizes sensor telemetry, classifies findings (`[CRITICAL]`, `[WARNING]`, `[OK]`), and generates an actionable Markdown report.
+### Diagnostic Duration Presets:
+- **120 Seconds (2 Minutes) Rapid Diagnostic:** Fast verification of idle baseline, primary video stream keep-awake assertions, audio endpoints, and sleep triggers.
+- **300 Seconds (5 Minutes) Deep Precision Diagnostic [Recommended]:** Full deep trace allowing complete idle timer decay, dual-tab media playback, background microphone & audio endpoint isolation, driver assertion deep-dive, and full watt drop curve.
+
+### Automated Test Phases:
+1. **Pre-Flight Consent & Arming:** Requires hands off mouse and keyboard to observe natural system idle behavior. Guaranteed safe: does NOT physically black out screens or suspend your PC; it captures real system-level trigger events (`display_off_simulated` and `sleep_simulated`) and queries power assertions.
+2. **Baseline Idle & Calibration:** Verifies 0 human input, monitors baseline CPU/GPU/Disk activity, and tracks sleep countdown progression.
+3. **Primary Media Stream Playback:** Automatically launches a 4K test video in your browser. Verifies whether CoreAudio/WASAPI render hooks and OS `DISPLAY` keep-awake requests activate. (Diagnoses why laptops sleep while watching movies!).
+4. **Secondary Background Media Stream:** Automatically opens a secondary background media stream (lofi radio) to test multi-stream audio mixing and background keep-awake retention.
+5. **Audio/Mic Release & Zombie Driver Check:** Tests audio pause/close. Verifies whether speakers and active microphone capture streams release cleanly without lingering zombie sleep locks.
+6. **Hardware Blocker & Dynamic Watt Profiling:** Isolates physical SSD/HDD throughput from browser cache IPC noise, queries `powercfg /requests`, and calculates live active watts, simulated display-off watt drops, and S3 standby sleep watt drops.
+7. **Synthesis & Root Cause Diagnosis:** Synthesizes sensor telemetry, classifies findings (`[CRITICAL]`, `[WARNING]`, `[OK]`), and generates an actionable Markdown report.
 
 ### Why Laptops Sleep While Watching Movies:
 Many web browsers and media players fail to call Windows `SetThreadExecutionState(ES_DISPLAY_REQUIRED)` while streaming video passively. Because you are watching without touching the mouse or keyboard, Windows assumes you walked away and abruptly puts your laptop to sleep mid-movie! **Agent Power Guard's Smart Guard** monitors active CoreAudio/WASAPI render sessions and SMTC tokens directly at the kernel level, ensuring media playback keeps your screen and machine awake even when players fail to assert power requests.
 
-### 1-Click GitHub Issue Reporting:
-When the test completes, click **Report Issue on GitHub** to immediately open a pre-filled GitHub issue in your browser containing the full diagnostic report and telemetry breakdown — **no personal access tokens or API keys required**. You can also copy the markdown report directly using **Copy Diagnostic Report**.
+### Safe 1-Click GitHub Issue Reporting (Zero URL Length Limits):
+When the test completes, click **Report Issue on GitHub**:
+- The complete, unabridged Markdown diagnostic report (with detailed hardware profile, audio/mic devices, watt breakdown, and second-by-second timeline) is **automatically copied to your OS clipboard** and saved to disk (`agent-power-guard-diagnostic.md`).
+- A safe, pre-formatted issue creation template opens in your browser (**no URL length errors, no PATs, and no API keys required**).
+- Simply press **Ctrl+V** (or **Cmd+V**) into the issue body to paste the complete diagnostic data! You can also copy the report directly via **Copy Diagnostic Report** or save it with **Save Report to File**.
 
 ---
 
