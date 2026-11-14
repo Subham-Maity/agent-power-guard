@@ -1691,19 +1691,16 @@ pub fn close_diag_media_tabs() -> usize {
             end tell
         "#;
         let _ = Command::new("osascript").args(["-e", script]).output();
-        1
+        count += 1;
     }
     #[cfg(target_os = "linux")]
     {
         let _ = Command::new("pkill")
             .args(["-f", "chrome.*(aqz-KE-bpKQ|jfKfPfyJRdk)"])
             .output();
-        1
+        count += 1;
     }
-    #[cfg(not(any(windows, target_os = "macos", target_os = "linux")))]
-    {
-        0
-    }
+    count
 }
 
 #[cfg(windows)]

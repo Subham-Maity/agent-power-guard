@@ -5742,7 +5742,11 @@ $out | ConvertTo-Json -Depth 4 -Compress
         let parse_result = serde_json::from_str::<serde_json::Value>(&stdout_str);
 
         // Diagnostic logging: hwscan.log
-        let log_dir = get_config_path().parent().unwrap_or(&PathBuf::from(".")).join("logs");
+        let cfg_path = get_config_path();
+        let log_dir = cfg_path
+            .parent()
+            .unwrap_or_else(|| std::path::Path::new("."))
+            .join("logs");
         let _ = std::fs::create_dir_all(&log_dir);
         let log_file = log_dir.join("hwscan.log");
         let log_entry = format!(
