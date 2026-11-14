@@ -121,10 +121,10 @@
     <!-- View Switcher Tabs (Phase 5.3) -->
     <div style="display: flex; gap: 8px; margin-bottom: 16px;">
       <button id="tab-btn-local" class="btn btn-accent" style="flex: 1; padding: 10px; font-size: 0.9rem;" onclick="switchTab('local')">
-        💻 This Machine
+         This Machine
       </button>
       <button id="tab-btn-fleet" class="btn btn-outline" style="flex: 1; padding: 10px; font-size: 0.9rem;" onclick="switchTab('fleet')">
-        🌐 Multi-Machine Fleet (<span id="fleet-count">0</span>)
+         Multi-Machine Fleet (<span id="fleet-count">0</span>)
       </button>
     </div>
 
@@ -133,7 +133,7 @@
       <!-- Unauthorized Alert Modal / Banner -->
       <div id="auth-banner" class="card" style="display:none; background: rgba(239, 68, 68, 0.15); border: 1px solid #ef4444; padding: 18px; margin-bottom: 16px;">
       <div style="display: flex; align-items: center; gap: 10px; margin-bottom: 8px;">
-        <span style="font-size: 1.4rem;">🔒</span>
+        <span style="font-size: 1.4rem;"></span>
         <strong style="color: #f87171; font-size: 1.05rem;">Authentication Required</strong>
       </div>
       <p style="font-size: 0.9rem; color: #cbd5e1; margin-bottom: 12px; line-height: 1.4;">
@@ -157,35 +157,35 @@
 
       <!-- 3 Operational Modes -->
       <div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin-bottom: 12px;">
-        <button id="opmode-smart_guard" class="btn btn-accent" style="padding: 8px 6px; font-size: 0.8rem;" onclick="setOperationalMode('smart_guard')">🛡 Smart Guard</button>
+        <button id="opmode-smart_guard" class="btn btn-accent" style="padding: 8px 6px; font-size: 0.8rem;" onclick="setOperationalMode('smart_guard')"> Smart Guard</button>
         <button id="opmode-guard_off" class="btn btn-outline" style="padding: 8px 6px; font-size: 0.8rem;" onclick="setOperationalMode('guard_off')">⏸ Guard Off</button>
-        <button id="opmode-best_performance" class="btn btn-outline" style="padding: 8px 6px; font-size: 0.8rem;" onclick="setOperationalMode('best_performance')">⚡ Best Perf</button>
+        <button id="opmode-best_performance" class="btn btn-outline" style="padding: 8px 6px; font-size: 0.8rem;" onclick="setOperationalMode('best_performance')"> Best Perf</button>
       </div>
       
       <div class="actions-grid">
         <button class="btn btn-danger" onclick="apiAction('/api/sleep')">
-          ⚡ Sleep Now
+           Sleep Now
         </button>
         <button class="btn btn-warning" onclick="apiAction('/api/postpone?mins=15')">
-          ⏳ Postpone 15m
+           Postpone 15m
         </button>
         <button class="btn btn-primary" onclick="toggleGuard()">
           <span id="guard-btn-text">⏸️ Toggle Guard</span>
         </button>
         <button class="btn btn-outline" onclick="promptLease()">
-          🔒 Agent Lease
+           Agent Lease
         </button>
       </div>
     </div>
 
     <!-- Passive Media Prompt Card -->
     <div class="card" id="media-prompt-card" style="display: none; background: rgba(59, 130, 246, 0.15); border-color: #3b82f6;">
-      <div style="font-weight: 700; color: #93c5fd; margin-bottom: 4px;" id="media-prompt-heading">🎬 Idle Media Playback Detected</div>
+      <div style="font-weight: 700; color: #93c5fd; margin-bottom: 4px;" id="media-prompt-heading"> Idle Media Playback Detected</div>
       <div id="media-prompt-sub" style="font-size: 0.84rem; color: #cbd5e1; margin-bottom: 10px;">Keep PC awake for this playback session?</div>
       <div style="display: flex; gap: 8px; flex-wrap: wrap;">
-        <button class="btn btn-accent" style="padding: 6px 12px; font-size: 0.82rem;" onclick="apiAction('/api/media_prompt?action=keep')">✅ Keep Awake</button>
-        <button class="btn btn-danger" style="padding: 6px 12px; font-size: 0.82rem;" onclick="apiAction('/api/media_prompt?action=sleep')">💤 Sleep Now</button>
-        <button class="btn btn-outline" style="padding: 6px 12px; font-size: 0.82rem;" onclick="apiAction('/api/media_prompt?action=hide')">🙈 Hide</button>
+        <button class="btn btn-accent" style="padding: 6px 12px; font-size: 0.82rem;" onclick="apiAction('/api/media_prompt?action=keep')">[OK] Keep Awake</button>
+        <button class="btn btn-danger" style="padding: 6px 12px; font-size: 0.82rem;" onclick="apiAction('/api/media_prompt?action=sleep')"> Sleep Now</button>
+        <button class="btn btn-outline" style="padding: 6px 12px; font-size: 0.82rem;" onclick="apiAction('/api/media_prompt?action=hide')"> Hide</button>
       </div>
     </div>
 
@@ -193,7 +193,7 @@
     <div class="card" id="lease-card" style="display: none; background: rgba(59, 130, 246, 0.12); border-color: rgba(59, 130, 246, 0.4);">
       <div style="display: flex; justify-content: space-between; align-items: center;">
         <div>
-          <div style="font-weight: 700; color: #93c5fd; font-size: 0.95rem;">🔒 Active Agent Lease</div>
+          <div style="font-weight: 700; color: #93c5fd; font-size: 0.95rem;"> Active Agent Lease</div>
           <div id="lease-detail" style="font-size: 0.85rem; color: #bfdbfe; margin-top: 4px;">Reason: Compiling (14m remaining)</div>
         </div>
         <button class="btn btn-outline" style="padding: 6px 12px; font-size: 0.85rem;" onclick="apiAction('/api/release')">Release</button>
@@ -203,7 +203,7 @@
     <!-- Structured Blocker Transparency Card -->
     <div class="card" id="structured-blockers-card" style="display: none;">
       <div class="section-title">
-        <span>🔍 Active Blockers (Who / Value / Since)</span>
+        <span> Active Blockers (Who / Value / Since)</span>
       </div>
       <div id="structured-blockers-list"></div>
     </div>
@@ -269,7 +269,7 @@
     <!-- Live Rolling Sparklines (Phase 4.3) -->
     <div class="card">
       <div class="section-title">
-        <span>📈 Live System Trends (120s Rolling)</span>
+        <span> Live System Trends (120s Rolling)</span>
       </div>
       <div class="sparkline-grid">
         <div class="sparkline-item">
@@ -306,7 +306,7 @@
     <!-- Active & Top Processes with 1-Tap Ignore (Phase 4.4) -->
     <div class="card">
       <div class="section-title">
-        <span>⚡ Active Processes</span>
+        <span> Active Processes</span>
         <span style="font-size: 0.8rem; font-weight: normal; color: var(--text-muted);">1-Tap to Ignore False Blocks</span>
       </div>
       <div id="top-processes-list">
@@ -317,7 +317,7 @@
     <!-- Energy & Cost Savings -->
     <div class="card">
       <div class="section-title">
-        <span>💰 Energy & Cost Savings</span>
+        <span> Energy & Cost Savings</span>
         <button class="btn btn-outline" style="padding: 4px 10px; font-size: 0.8rem;" onclick="clearEnergy()">Clear Data</button>
       </div>
       <div class="energy-stats">
@@ -343,7 +343,7 @@
     <!-- Wake-On-LAN (WoL) Remote Turn-On Card -->
     <div class="card">
       <div class="section-title">
-        <span>⚡ Remote Turn-On (Wake-on-LAN)</span>
+        <span> Remote Turn-On (Wake-on-LAN)</span>
       </div>
       <p style="font-size: 0.85rem; color: var(--text-muted); line-height: 1.4;">
         When this PC goes to sleep, its CPU is suspended. To turn it back on from your phone over Wi-Fi, send a standard <strong>Wake-on-LAN Magic Packet</strong> using any free phone app (e.g. <em>Wake On Lan</em> on iOS/Android).
@@ -365,7 +365,7 @@
   <div id="view-fleet" style="display: none;">
     <div class="card" style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 14px;">
       <div>
-        <div style="font-weight: 700; font-size: 1.1rem; color: #fff;">🌐 Multi-Machine Fleet</div>
+        <div style="font-weight: 700; font-size: 1.1rem; color: #fff;"> Multi-Machine Fleet</div>
         <div style="font-size: 0.85rem; color: var(--text-muted); margin-top: 2px;">Monitor and control your workstations, servers & laptops</div>
       </div>
       <button class="btn btn-accent" style="padding: 8px 14px; font-size: 0.85rem;" onclick="toggleAddPeerModal(true)">
@@ -377,7 +377,7 @@
     <div id="add-peer-card" class="card" style="display: none; border-color: var(--primary); margin-bottom: 14px;">
       <div class="section-title">
         <span>Add Remote Machine</span>
-        <button class="btn btn-outline" style="padding: 2px 8px; font-size: 0.8rem;" onclick="toggleAddPeerModal(false)">✕ Close</button>
+        <button class="btn btn-outline" style="padding: 2px 8px; font-size: 0.8rem;" onclick="toggleAddPeerModal(false)">x Close</button>
       </div>
       <div style="display: flex; flex-direction: column; gap: 10px; margin-top: 10px;">
         <div>
@@ -486,11 +486,11 @@
         });
         if (res.status === 401) {
           document.getElementById('auth-banner').style.display = 'block';
-          showToast('🔒 Unauthorized: Invalid or missing token');
+          showToast(' Unauthorized: Invalid or missing token');
           return;
         }
         if (res.status === 429) {
-          showToast('⚠️ Rate limit exceeded. Try again in 1 minute.');
+          showToast('[!]️ Rate limit exceeded. Try again in 1 minute.');
           return;
         }
         const data = await res.json();
@@ -594,7 +594,7 @@
           const badge = document.getElementById('status-badge');
           badge.className = 'status-pill status-blocked';
           badge.innerText = 'UNAUTHORIZED';
-          document.getElementById('countdown').innerText = '🔒 LOCKED';
+          document.getElementById('countdown').innerText = ' LOCKED';
           document.getElementById('blocker-banner').innerText = 'Access restricted: Please provide the API token to view live status.';
           return;
         }
@@ -637,7 +637,7 @@
           badge.innerText = 'BEST PERFORMANCE';
           count.innerText = 'LOCKED';
           banner.innerText = 'Best Performance: Display and PC locked awake.';
-          document.getElementById('guard-btn-text').innerText = '🛡️ Smart Guard';
+          document.getElementById('guard-btn-text').innerText = '️ Smart Guard';
         } else if (s.all_conditions_pass) {
           badge.className = 'status-pill status-passing';
           badge.innerText = 'ARMED (SLEEPING SOON)';
@@ -660,7 +660,7 @@
         const mediaCard = document.getElementById('media-prompt-card');
         if (mediaCard && s.media && s.media.prompt_active) {
           mediaCard.style.display = 'block';
-          document.getElementById('media-prompt-heading').innerText = `🎬 Idle playback detected in ${s.media.app || 'Media Player'}`;
+          document.getElementById('media-prompt-heading').innerText = ` Idle playback detected in ${s.media.app || 'Media Player'}`;
           document.getElementById('media-prompt-sub').innerText = s.media.title ? `Playing "${s.media.title}" — keep PC awake for this session?` : 'Keep PC awake for this playback session?';
         } else if (mediaCard) {
           mediaCard.style.display = 'none';
@@ -972,7 +972,7 @@
                 <span id="peer-badge-${safeId}" class="status-pill status-paused" style="font-size: 0.75rem; padding: 2px 8px;">
                   POLLING...
                 </span>
-                <button class="btn-sm" onclick="deletePeerMachine(decodeURIComponent('${encodeURIComponent(peer.id)}'))" title="Remove machine" style="color:#f87171; border-color:#ef4444;">✕</button>
+                <button class="btn-sm" onclick="deletePeerMachine(decodeURIComponent('${encodeURIComponent(peer.id)}'))" title="Remove machine" style="color:#f87171; border-color:#ef4444;">x</button>
               </div>
             </div>
 
@@ -982,12 +982,12 @@
 
             <div id="peer-actions-${safeId}" style="display: flex; gap: 8px; flex-wrap: wrap;">
               ${isControl ? `
-                <button class="btn btn-outline" style="padding: 6px 10px; font-size: 0.8rem;" onclick="peerAction(decodeURIComponent('${encUrl}'), decodeURIComponent('${encToken}'), '/api/postpone?mins=15')">⏳ +15m</button>
-                <button class="btn btn-danger" style="padding: 6px 10px; font-size: 0.8rem;" onclick="peerAction(decodeURIComponent('${encUrl}'), decodeURIComponent('${encToken}'), '/api/sleep')">⚡ Sleep</button>
-                <button class="btn btn-outline" style="padding: 6px 10px; font-size: 0.8rem;" onclick="peerAction(decodeURIComponent('${encUrl}'), decodeURIComponent('${encToken}'), '/api/toggle_guard')">🛡️ Toggle</button>
+                <button class="btn btn-outline" style="padding: 6px 10px; font-size: 0.8rem;" onclick="peerAction(decodeURIComponent('${encUrl}'), decodeURIComponent('${encToken}'), '/api/postpone?mins=15')"> +15m</button>
+                <button class="btn btn-danger" style="padding: 6px 10px; font-size: 0.8rem;" onclick="peerAction(decodeURIComponent('${encUrl}'), decodeURIComponent('${encToken}'), '/api/sleep')"> Sleep</button>
+                <button class="btn btn-outline" style="padding: 6px 10px; font-size: 0.8rem;" onclick="peerAction(decodeURIComponent('${encUrl}'), decodeURIComponent('${encToken}'), '/api/toggle_guard')">️ Toggle</button>
               ` : ''}
               ${peer.mac ? `
-                <button class="btn btn-primary" style="padding: 6px 10px; font-size: 0.8rem;" onclick="wakePeer(decodeURIComponent('${encMac}'))">⚡ Wake-on-LAN</button>
+                <button class="btn btn-primary" style="padding: 6px 10px; font-size: 0.8rem;" onclick="wakePeer(decodeURIComponent('${encMac}'))"> Wake-on-LAN</button>
               ` : ''}
             </div>
           </div>

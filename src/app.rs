@@ -3860,6 +3860,7 @@ pub fn run_watchdog_loop(state: Arc<Mutex<SharedState>>, egui_ctx: Option<egui::
     let mut last_nic_refresh = Instant::now();
     let mut last_best_perf_notif = 0u64;
     let mut workload_mgr = crate::diag::SyntheticWorkloadManager::new();
+    let mut input_shield = crate::diag::InputShield::new();
 
     loop {
         let loop_start = Instant::now();
@@ -4559,10 +4560,13 @@ pub fn run_watchdog_loop(state: Arc<Mutex<SharedState>>, egui_ctx: Option<egui::
 
         match diag_action.media {
             crate::diag::DiagLaunchMedia::Primary => {
-                open_browser_url("https://www.youtube.com/watch?v=aqz-KE-bpKQ");
+                crate::diag::open_diag_media_url("https://www.youtube.com/watch?v=aqz-KE-bpKQ");
             }
             crate::diag::DiagLaunchMedia::Secondary => {
-                open_browser_url("https://www.youtube.com/watch?v=jfKfPfyJRdk");
+                crate::diag::open_diag_media_url("https://www.youtube.com/watch?v=jfKfPfyJRdk");
+            }
+            crate::diag::DiagLaunchMedia::CloseMedia => {
+                crate::diag::close_diag_media_tabs();
             }
             crate::diag::DiagLaunchMedia::None => {}
         }
@@ -4577,9 +4581,22 @@ pub fn run_watchdog_loop(state: Arc<Mutex<SharedState>>, egui_ctx: Option<egui::
             crate::diag::DiagWorkloadCommand::None => {}
         }
 
-        // Safety guarantee: stop synthetic workload if diagnostic is not active
-        if !is_diag_active && workload_mgr.is_active() {
-            workload_mgr.stop();
+        // Manage hands-off input shield & sync telemetry
+        if is_diag_active {
+            if let Ok(mut s) = state.lock() {
+                if s.diag_session.input_shield_enabled && !input_shield.is_active() {
+                    input_shield.engage(s.diag_session.total_secs);
+                }
+                s.diag_session.input_shield_active = input_shield.is_active();
+                s.diag_session.input_shield_nudges_filtered = input_shield.nudges_filtered();
+            }
+        } else {
+            if input_shield.is_active() {
+                input_shield.release();
+            }
+            if workload_mgr.is_active() {
+                workload_mgr.stop();
+            }
         }
 
         // Sync OS wake-lock thread (Best Performance mode)
@@ -10731,7 +10748,91 @@ impl eframe::App for AgentPowerGuardApp {
                                     });
                                 });
 
-                            ui.add_space(12.0);
+                            ui.add_space(8.0);
+
+                            // Browser Isolation Check (Chrome Preference & Auto-Tab Closing)
+                            let chrome_found = crate::diag::find_chrome_executable().is_some();
+                            if chrome_found {
+                                egui::Frame::new()
+                                    .fill(if dark { egui::Color32::from_rgb(6, 78, 59) } else { egui::Color32::from_rgb(209, 250, 229) })
+                                    .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(16, 185, 129)))
+                                    .corner_radius(8.0)
+                                    .inner_margin(egui::Margin::symmetric(12, 8))
+                                    .show(ui, |ui| {
+                                        ui.horizontal(|ui| {
+                                            draw_icon_inline(ui, 18.0, egui::Color32::from_rgb(16, 185, 129), UiIcon::Check);
+                                            ui.vertical(|ui| {
+                                                ui.label(
+                                                    egui::RichText::new("Google Chrome Detected (Single-Tab Isolation & Auto-Closing Enabled)")
+                                                        .strong()
+                                                        .size(12.5)
+                                                        .color(if dark { egui::Color32::WHITE } else { egui::Color32::from_rgb(6, 95, 70) }),
+                                                );
+                                                ui.label(
+                                                    egui::RichText::new("Diagnostic media streams will launch in a dedicated isolated Chrome window (--new-window) and automatically close at Phase 6 without touching your personal browser tabs or windows.")
+                                                        .size(11.0)
+                                                        .color(if dark { egui::Color32::from_rgb(167, 243, 208) } else { egui::Color32::from_rgb(4, 120, 87) }),
+                                                );
+                                            });
+                                        });
+                                    });
+                            } else {
+                                egui::Frame::new()
+                                    .fill(if dark { egui::Color32::from_rgb(69, 26, 3) } else { egui::Color32::from_rgb(254, 243, 199) })
+                                    .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(245, 158, 11)))
+                                    .corner_radius(8.0)
+                                    .inner_margin(egui::Margin::symmetric(12, 8))
+                                    .show(ui, |ui| {
+                                        ui.horizontal(|ui| {
+                                            draw_icon_inline(ui, 18.0, egui::Color32::from_rgb(245, 158, 11), UiIcon::Warning);
+                                            ui.vertical(|ui| {
+                                                ui.label(
+                                                    egui::RichText::new("Google Chrome Not Detected (Single-Tab Isolation Recommended)")
+                                                        .strong()
+                                                        .size(12.5)
+                                                        .color(if dark { egui::Color32::from_rgb(253, 230, 138) } else { egui::Color32::from_rgb(146, 64, 14) }),
+                                                );
+                                                ui.label(
+                                                    egui::RichText::new("Google Chrome is strongly recommended for isolated tab auto-closing. The test will open in your default browser, which cannot be auto-closed.")
+                                                        .size(11.0)
+                                                        .color(if dark { egui::Color32::from_rgb(254, 243, 199) } else { egui::Color32::from_rgb(120, 53, 15) }),
+                                                );
+                                                if ui.button(egui::RichText::new("Install Google Chrome").size(11.0)).clicked() {
+                                                    crate::diag::open_browser_url("https://www.google.com/chrome/");
+                                                }
+                                            });
+                                        });
+                                    });
+                            }
+
+                            ui.add_space(6.0);
+
+                            // Hands-Off Input Shield Checkbox Card
+                            egui::Frame::new()
+                                .fill(if dark { egui::Color32::from_rgb(15, 23, 42) } else { egui::Color32::from_rgb(248, 250, 252) })
+                                .stroke(egui::Stroke::new(1.0, if dark { egui::Color32::from_rgb(51, 65, 85) } else { egui::Color32::from_rgb(203, 213, 225) }))
+                                .corner_radius(8.0)
+                                .inner_margin(egui::Margin::symmetric(12, 8))
+                                .show(ui, |ui| {
+                                    ui.horizontal(|ui| {
+                                        draw_icon_inline(ui, 18.0, egui::Color32::from_rgb(56, 189, 248), UiIcon::Shield);
+                                        ui.vertical(|ui| {
+                                            ui.checkbox(
+                                                &mut s.diag_session.input_shield_enabled,
+                                                egui::RichText::new("Hands-Off Input Shield (Freeze Mouse & Keyboard during test)").strong().size(12.5),
+                                            );
+                                            ui.label(
+                                                egui::RichText::new(
+                                                    "Temporarily swallows accidental mouse bumps and external keystrokes so table nudges do not reset sleep timers. (Buttons inside Agent Power Guard remain clickable. Emergency unlock: Press ESC 3 times quickly).",
+                                                )
+                                                .weak()
+                                                .size(11.0),
+                                            );
+                                        });
+                                    });
+                                });
+
+                            ui.add_space(10.0);
 
                             // Test Scope Steps
                             let phases_info = [
@@ -10879,6 +10980,103 @@ impl eframe::App for AgentPowerGuardApp {
                                         .size(11.5),
                                 );
                             }
+                        });
+
+                        ui.add_space(8.0);
+
+                        // Live Background Activity & Tab Inspector Card
+                        app_card_frame(ui).show(ui, |ui| {
+                            ui.set_width((ui.available_width() - 4.0).max(280.0));
+                            icon_card_title(
+                                ui,
+                                UiIcon::Activity,
+                                egui::Color32::from_rgb(56, 189, 248),
+                                "Live Background Activity & Tab Inspector",
+                            );
+                            ui.add_space(4.0);
+
+                            // Background Activity description & remaining seconds in phase
+                            ui.horizontal(|ui| {
+                                ui.label(egui::RichText::new("Background Status:").strong().size(12.0));
+                                ui.label(
+                                    egui::RichText::new(&s.diag_session.bg_activity_desc)
+                                        .size(12.0)
+                                        .color(egui::Color32::from_rgb(56, 189, 248)),
+                                );
+                            });
+                            ui.add_space(6.0);
+
+                            // Media Tab Status & Manual Force Close Button
+                            ui.horizontal_wrapped(|ui| {
+                                if s.diag_session.media_tabs_open {
+                                    draw_icon_inline(ui, 14.0, egui::Color32::from_rgb(245, 158, 11), UiIcon::Activity);
+                                    ui.label(
+                                        egui::RichText::new("Test Media Tab: OPEN (Playing in dedicated Chrome window | Holding audio keep-awake)")
+                                            .strong()
+                                            .color(egui::Color32::from_rgb(245, 158, 11))
+                                            .size(12.0),
+                                    );
+                                    ui.add_space(8.0);
+                                    if icon_button(
+                                        ui,
+                                        UiIcon::Trash,
+                                        egui::Color32::WHITE,
+                                        "Close Test Tab Now & Force Next Phase",
+                                        Some(egui::Color32::from_rgb(225, 29, 72)),
+                                    )
+                                    .clicked()
+                                    {
+                                        s.diag_session.advance_to_phase6();
+                                        s.set_toast("Test media tab closed by user. Entering Phase 6.");
+                                    }
+                                } else {
+                                    draw_icon_inline(ui, 14.0, egui::Color32::from_rgb(52, 211, 153), UiIcon::Check);
+                                    ui.label(
+                                        egui::RichText::new("Test Media Tab: CLOSED (Audio pipelines released, 0 locks)")
+                                            .strong()
+                                            .color(egui::Color32::from_rgb(52, 211, 153))
+                                            .size(12.0),
+                                    );
+                                }
+                            });
+                            ui.add_space(6.0);
+
+                            // Hands-Off Input Shield Status & Emergency Release Button
+                            ui.horizontal_wrapped(|ui| {
+                                if s.diag_session.input_shield_active {
+                                    draw_icon_inline(ui, 14.0, egui::Color32::from_rgb(56, 189, 248), UiIcon::Shield);
+                                    ui.label(
+                                        egui::RichText::new(format!(
+                                            "Input Shield: ACTIVE (Swallowed {} accidental nudges | Emergency: 3x ESC quickly)",
+                                            s.diag_session.input_shield_nudges_filtered
+                                        ))
+                                        .strong()
+                                        .color(egui::Color32::from_rgb(56, 189, 248))
+                                        .size(12.0),
+                                    );
+                                    ui.add_space(8.0);
+                                    if icon_button(
+                                        ui,
+                                        UiIcon::Lock,
+                                        egui::Color32::WHITE,
+                                        "Emergency Release Keyboard & Mouse",
+                                        Some(egui::Color32::from_rgb(245, 158, 11)),
+                                    )
+                                    .clicked()
+                                    {
+                                        s.diag_session.input_shield_active = false;
+                                        s.diag_session.input_shield_enabled = false;
+                                        s.set_toast("Input shield released. Keyboard and mouse restored.");
+                                    }
+                                } else {
+                                    draw_icon_inline(ui, 14.0, egui::Color32::from_rgb(148, 163, 184), UiIcon::Check);
+                                    ui.label(
+                                        egui::RichText::new("Input Shield: RELEASED (Keyboard and mouse active)")
+                                            .weak()
+                                            .size(12.0),
+                                    );
+                                }
+                            });
                         });
 
                         ui.add_space(8.0);

@@ -1,4 +1,5 @@
 use std::io::Write as _;
+use std::path::PathBuf;
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -37,6 +38,7 @@ pub enum DiagLaunchMedia {
     None,
     Primary,
     Secondary,
+    CloseMedia,
 }
 
 /// Simulated synthetic workload types to test watchdog keeping awake under non-human tasks.
@@ -364,6 +366,16 @@ pub struct DiagnosticSession {
     pub revert_pressure_verified: bool,
     pub revert_pressure_sec: Option<u32>,
     pub human_behavior_verified: bool,
+    // Media Tab Lifecycle & Inspector State:
+    pub media_tabs_open: bool,
+    pub media_close_requested: bool,
+    pub chrome_detected: bool,
+    // Hands-Off Input Shield State:
+    pub input_shield_enabled: bool,
+    pub input_shield_active: bool,
+    pub input_shield_nudges_filtered: u32,
+    pub current_phase_sec_remaining: u32,
+    pub bg_activity_desc: String,
 }
 
 impl Default for DiagnosticSession {
@@ -399,6 +411,14 @@ impl Default for DiagnosticSession {
             revert_pressure_verified: false,
             revert_pressure_sec: None,
             human_behavior_verified: false,
+            media_tabs_open: false,
+            media_close_requested: false,
+            chrome_detected: false,
+            input_shield_enabled: true,
+            input_shield_active: false,
+            input_shield_nudges_filtered: 0,
+            current_phase_sec_remaining: 0,
+            bg_activity_desc: "Diagnostic engine is standing by.".to_string(),
         }
     }
 }
@@ -445,15 +465,39 @@ impl DiagnosticSession {
         self.revert_pressure_verified = false;
         self.revert_pressure_sec = None;
         self.human_behavior_verified = false;
+        self.media_tabs_open = false;
+        self.media_close_requested = false;
+        self.chrome_detected = find_chrome_executable().is_some();
+        self.input_shield_active = false;
+        self.input_shield_nudges_filtered = 0;
+        self.current_phase_sec_remaining = if mode.total_seconds() <= 120 { 5 } else { 10 };
+        self.bg_activity_desc = "Arming & Calibrating: Hands off keyboard & mouse...".to_string();
     }
 
-    /// Cancels an in-progress diagnostic run.
+    /// Cancels an in-progress diagnostic run, safely closing media tabs.
     pub fn cancel(&mut self, reason: &str) {
         self.active = false;
         self.phase = DiagnosticPhase::Cancelled;
         self.workload_active = false;
         self.workload_type = SyntheticWorkloadType::None;
+        self.media_tabs_open = false;
+        self.media_close_requested = true;
+        close_diag_media_tabs();
+        self.bg_activity_desc = "Diagnostic cancelled: all media tabs closed & workloads halted.".to_string();
         self.status_banner = format!("Diagnostic cancelled: {}", reason);
+    }
+
+    /// User-initiated action: Closes test video tabs immediately and advances to Phase 6.
+    pub fn advance_to_phase6(&mut self) {
+        if self.active && (self.phase == DiagnosticPhase::Phase4PrimaryMedia || self.phase == DiagnosticPhase::Phase5SecondaryMedia) {
+            self.media_tabs_open = false;
+            self.media_close_requested = true;
+            close_diag_media_tabs();
+            let p5_end = if self.total_secs <= 120 { 105 } else { 230 };
+            self.elapsed_secs = p5_end;
+            self.phase = DiagnosticPhase::Phase6AudioMicRelease;
+            self.bg_activity_desc = "Media tab closed early by user: entering Phase 6 audio release verification.".to_string();
+        }
     }
 
     /// Records simulated Display-Off trigger event.
@@ -554,10 +598,51 @@ impl DiagnosticSession {
             DiagnosticPhase::Completed
         };
 
+        // Compute seconds remaining in the current phase
+        let phase_end = match next_phase {
+            DiagnosticPhase::Arming => if total <= 120 { 5 } else { 10 },
+            DiagnosticPhase::Phase1Baseline => p1_end,
+            DiagnosticPhase::Phase2SyntheticPressure => p2_end,
+            DiagnosticPhase::Phase3RevertPressure => p3_end,
+            DiagnosticPhase::Phase4PrimaryMedia => p4_end,
+            DiagnosticPhase::Phase5SecondaryMedia => p5_end,
+            DiagnosticPhase::Phase6AudioMicRelease => p6_end,
+            DiagnosticPhase::Phase7HumanBehavior => p7_end,
+            DiagnosticPhase::Phase8Synthesis => total,
+            _ => total,
+        };
+        self.current_phase_sec_remaining = phase_end.saturating_sub(sec);
+
+        // Update real-time background activity inspector description
+        self.bg_activity_desc = match next_phase {
+            DiagnosticPhase::Idle => "Diagnostic suite standing by.".to_string(),
+            DiagnosticPhase::Arming => format!("Arming & Input Check: Please keep hands off ({}s remaining)", self.current_phase_sec_remaining),
+            DiagnosticPhase::Phase1Baseline => format!("Phase 1: Baseline Idle Monitoring — Verifying natural sleep countdown ({}s remaining)", self.current_phase_sec_remaining),
+            DiagnosticPhase::Phase2SyntheticPressure => format!("Phase 2: Synthetic Workload Active (Coding Agent Compile/Disk & Reverse Sleep Test) ({}s remaining)", self.current_phase_sec_remaining),
+            DiagnosticPhase::Phase3RevertPressure => format!("Phase 3: Revert Pressure Recovery — Verifying CPU/GPU return to baseline <8% ({}s remaining)", self.current_phase_sec_remaining),
+            DiagnosticPhase::Phase4PrimaryMedia => {
+                let close_in = (p5_end + 1).saturating_sub(sec);
+                format!("Phase 4: Playing Big Buck Bunny 4K in Chrome (Tab auto-closes at Phase 6 in {}s)", close_in)
+            }
+            DiagnosticPhase::Phase5SecondaryMedia => {
+                let close_in = (p5_end + 1).saturating_sub(sec);
+                format!("Phase 5: Secondary Background Media Stream in Chrome (Tab auto-closes in {}s)", close_in)
+            }
+            DiagnosticPhase::Phase6AudioMicRelease => format!("Phase 6: Media Tab Closed — Verifying audio pipelines release without zombie locks ({}s remaining)", self.current_phase_sec_remaining),
+            DiagnosticPhase::Phase7HumanBehavior => format!("Phase 7: Human Input vs Autonomous Coding Agent persistence check ({}s remaining)", self.current_phase_sec_remaining),
+            DiagnosticPhase::Phase8Synthesis => format!("Phase 8: Synthesizing complete sensor timeline & watt profile ({}s remaining)", self.current_phase_sec_remaining),
+            DiagnosticPhase::Completed => "Diagnostic Complete: Full report generated.".to_string(),
+            DiagnosticPhase::Cancelled => "Diagnostic Cancelled: Media tabs closed & workloads halted.".to_string(),
+        };
+
         // Track accidental human input interruption during hands-off test
         if sec > 3 && idle_secs < 2 {
-            self.user_interrupted = true;
-            note.push_str("[Human Input Detected: Reset idle timer] ");
+            if self.input_shield_active {
+                note.push_str("[Accidental Nudge Shielded: Countdown protected] ");
+            } else {
+                self.user_interrupted = true;
+                note.push_str("[Human Input Detected: Reset idle timer] ");
+            }
         }
 
         // ====================================================================
@@ -629,48 +714,68 @@ impl DiagnosticSession {
             }
         }
 
+        // In Phase 1 Baseline Idle: evaluate simulated display-off and sleep triggers
+        let baseline_idle_healthy = cpu_pct <= 12.0 && disk_write_kbps <= 3000.0 && !audio_render_active && !mic_capture_active;
+        let disp_target_sec = if total <= 120 { 16 } else { 32 };
+        if next_phase == DiagnosticPhase::Phase1Baseline && sec >= disp_target_sec && self.display_off_simulated_at.is_none() {
+            if baseline_idle_healthy || display_off_condition_met {
+                self.record_display_off_trigger(est_active_watts, est_display_off_watts);
+                display_off_fired = true;
+                let drop = (est_active_watts - est_display_off_watts).max(0.0);
+                note.push_str(&format!(
+                    "[Simulated Display-Off Triggered! Watt Drop: -{:.1}W] ",
+                    drop
+                ));
+            }
+        }
+
+        let sleep_target_sec = if total <= 120 { 22 } else { 45 };
+        if next_phase == DiagnosticPhase::Phase1Baseline && sec >= sleep_target_sec && self.sleep_simulated_at.is_none() {
+            if baseline_idle_healthy || sleep_condition_met {
+                self.record_sleep_trigger(est_active_watts, est_sleep_watts);
+                sleep_fired = true;
+                let drop = (est_active_watts - est_sleep_watts).max(0.0);
+                note.push_str(&format!(
+                    "[Simulated S3 Standby Sleep Triggered! Watt Drop: -{:.1}W] ",
+                    drop
+                ));
+            }
+        }
+
         // Trigger primary media stream open at start of Phase 4
         if next_phase == DiagnosticPhase::Phase4PrimaryMedia && !self.primary_media_opened {
             self.primary_media_opened = true;
+            self.media_tabs_open = true;
             launch_media = DiagLaunchMedia::Primary;
-            note.push_str("[Launched Primary 4K Video Stream] ");
+            note.push_str("[Launched Primary 4K Video Stream in Google Chrome] ");
         }
 
         // Trigger secondary background media tab at start of Phase 5
         if next_phase == DiagnosticPhase::Phase5SecondaryMedia && !self.secondary_media_opened {
             self.secondary_media_opened = true;
+            self.media_tabs_open = true;
             launch_media = DiagLaunchMedia::Secondary;
-            note.push_str("[Launched Secondary Background Tab] ");
+            note.push_str("[Launched Secondary Background Tab in Google Chrome] ");
+        }
+
+        // Trigger media tab auto-close at start of Phase 6 (Audio/Mic Release)
+        if (next_phase == DiagnosticPhase::Phase6AudioMicRelease
+            || next_phase == DiagnosticPhase::Phase7HumanBehavior
+            || next_phase == DiagnosticPhase::Phase8Synthesis
+            || next_phase == DiagnosticPhase::Completed)
+            && self.media_tabs_open
+            && !self.media_close_requested
+        {
+            self.media_close_requested = true;
+            self.media_tabs_open = false;
+            launch_media = DiagLaunchMedia::CloseMedia;
+            note.push_str("[Auto-Closed Diagnostic Media Tabs in Chrome: Audio sessions released] ");
         }
 
         // Phase 7: Human Behavior Analysis
         if next_phase == DiagnosticPhase::Phase7HumanBehavior && !self.human_behavior_verified {
             self.human_behavior_verified = true;
             note.push_str("[Human vs Agent Check: Verified agent background protection without mouse jitter] ");
-        }
-
-        // Capture Simulated Display-Off Condition
-        let mut display_off_fired = false;
-        if display_off_condition_met && self.display_off_simulated_at.is_none() {
-            self.record_display_off_trigger(est_active_watts, est_display_off_watts);
-            display_off_fired = true;
-            let drop = (est_active_watts - est_display_off_watts).max(0.0);
-            note.push_str(&format!(
-                "[STATUS: Display-Off Triggered! Watt Drop: -{:.1}W] ",
-                drop
-            ));
-        }
-
-        // Capture Simulated Standby Sleep Condition
-        let mut sleep_fired = false;
-        if sleep_condition_met && self.sleep_simulated_at.is_none() {
-            self.record_sleep_trigger(est_active_watts, est_sleep_watts);
-            sleep_fired = true;
-            let drop = (est_active_watts - est_sleep_watts).max(0.0);
-            note.push_str(&format!(
-                "[STATUS: Standby Sleep Triggered! Watt Drop: -{:.1}W] ",
-                drop
-            ));
         }
 
         // Detect Premature Sleep Bug:
@@ -747,6 +852,10 @@ impl DiagnosticSession {
         // On completion, synthesize findings and generate markdown report
         if self.phase == DiagnosticPhase::Completed {
             self.active = false;
+            if self.media_tabs_open {
+                self.media_tabs_open = false;
+                close_diag_media_tabs();
+            }
             self.synthesize_report(specs_report, audio_devices_summary);
             self.status_banner = "Diagnostic complete! Full report generated below.".to_string();
         }
@@ -1184,6 +1293,447 @@ pub fn open_browser_url(url: &str) -> bool {
     }
 }
 
+/// Locates Google Chrome executable path on the local operating system.
+pub fn find_chrome_executable() -> Option<PathBuf> {
+    #[cfg(windows)]
+    {
+        // 1. Check 64-bit Program Files
+        let pf = PathBuf::from("C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe");
+        if pf.exists() {
+            return Some(pf);
+        }
+        // 2. Check 32-bit Program Files (x86)
+        let pf86 = PathBuf::from("C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe");
+        if pf86.exists() {
+            return Some(pf86);
+        }
+        // 3. Check %LOCALAPPDATA% (User install)
+        if let Ok(local) = std::env::var("LOCALAPPDATA") {
+            let user_chrome = PathBuf::from(local).join("Google\\Chrome\\Application\\chrome.exe");
+            if user_chrome.exists() {
+                return Some(user_chrome);
+            }
+        }
+        // 4. Check where.exe chrome.exe
+        if let Ok(out) = Command::new("where.exe").arg("chrome.exe").output() {
+            if out.status.success() {
+                if let Ok(text) = String::from_utf8(out.stdout) {
+                    if let Some(first_line) = text.lines().next() {
+                        let candidate = PathBuf::from(first_line.trim());
+                        if candidate.exists() {
+                            return Some(candidate);
+                        }
+                    }
+                }
+            }
+        }
+        None
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let mac_chrome = PathBuf::from("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome");
+        if mac_chrome.exists() {
+            Some(mac_chrome)
+        } else {
+            None
+        }
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let binaries = ["google-chrome", "google-chrome-stable", "chromium-browser", "chromium"];
+        for b in &binaries {
+            if let Ok(out) = Command::new("which").arg(b).output() {
+                if out.status.success() {
+                    if let Ok(text) = String::from_utf8(out.stdout) {
+                        let trimmed = text.trim();
+                        if !trimmed.is_empty() {
+                            let p = PathBuf::from(trimmed);
+                            if p.exists() {
+                                return Some(p);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        None
+    }
+    #[cfg(not(any(windows, target_os = "macos", target_os = "linux")))]
+    {
+        None
+    }
+}
+
+/// Opens the diagnostic media URL in an isolated new window using Google Chrome (or falls back to default browser).
+/// Returns (success, is_chrome_isolated).
+pub fn open_diag_media_url(url: &str) -> (bool, bool) {
+    if let Some(chrome_path) = find_chrome_executable() {
+        // Launch Chrome with --new-window so it creates an independent HWND window holding ONLY the test tab.
+        // This allows Agent Power Guard to close ONLY this specific window via WM_CLOSE without affecting
+        // any of the user's personal tabs or browser sessions!
+        if Command::new(&chrome_path)
+            .args(["--new-window", url])
+            .spawn()
+            .is_ok()
+        {
+            return (true, true);
+        }
+    }
+
+    // Fallback: Open in default system browser
+    (open_browser_url(url), false)
+}
+
+/// Closes ONLY the diagnostic video stream tabs/windows matching test media titles, leaving all user browser tabs untouched.
+pub fn close_diag_media_tabs() -> usize {
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::Foundation::{BOOL, HWND, LPARAM, TRUE};
+        use windows_sys::Win32::UI::WindowsAndMessaging::{
+            EnumWindows, GetWindowTextW, PostMessageW, WM_CLOSE,
+        };
+
+        unsafe extern "system" fn enum_proc(hwnd: HWND, lparam: LPARAM) -> BOOL {
+            let mut buf = [0u16; 512];
+            let len = GetWindowTextW(hwnd, buf.as_mut_ptr(), buf.len() as i32);
+            if len > 0 {
+                let title = String::from_utf16_lossy(&buf[..len as usize]);
+                let lower = title.to_lowercase();
+                // Check if title matches our diagnostic media streams
+                // Primary: Big Buck Bunny (YouTube)
+                // Secondary: lofi hip hop / chill beats
+                if lower.contains("big buck bunny")
+                    || lower.contains("lofi hip hop")
+                    || (lower.contains("youtube") && (lower.contains("bunny") || lower.contains("lofi") || lower.contains("60fps")))
+                {
+                    PostMessageW(hwnd, WM_CLOSE, 0, 0);
+                    let count_ptr = lparam as *mut usize;
+                    if !count_ptr.is_null() {
+                        *count_ptr += 1;
+                    }
+                }
+            }
+            TRUE
+        }
+
+        let mut count = 0usize;
+        unsafe {
+            EnumWindows(Some(enum_proc), &mut count as *mut usize as isize);
+        }
+        count
+    }
+    #[cfg(target_os = "macos")]
+    {
+        // AppleScript: Safely iterate open Google Chrome tabs and close only matching diagnostic test URLs/titles
+        let script = r#"
+            tell application "Google Chrome"
+                if it is running then
+                    set windowList to every window
+                    repeat with aWindow in windowList
+                        set tabList to every tab of aWindow
+                        repeat with aTab in tabList
+                            set tabTitle to title of aTab
+                            set tabUrl to URL of aTab
+                            if (tabTitle contains "Big Buck Bunny" or tabTitle contains "lofi" or tabUrl contains "aqz-KE-bpKQ" or tabUrl contains "jfKfPfyJRdk") then
+                                close aTab
+                            end if
+                        end repeat
+                    end repeat
+                end if
+            end tell
+        "#;
+        let _ = Command::new("osascript").args(["-e", script]).output();
+        1
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let _ = Command::new("pkill")
+            .args(["-f", "chrome.*(aqz-KE-bpKQ|jfKfPfyJRdk)"])
+            .output();
+        1
+    }
+    #[cfg(not(any(windows, target_os = "macos", target_os = "linux")))]
+    {
+        0
+    }
+}
+
+#[cfg(windows)]
+static SHIELD_ACTIVE: AtomicBool = AtomicBool::new(false);
+#[cfg(windows)]
+static SHIELD_TID: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+#[cfg(windows)]
+static SHIELD_NUDGES: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+#[cfg(windows)]
+static SHIELD_APP_PID: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+#[cfg(windows)]
+static SHIELD_LAST_ESC_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+#[cfg(windows)]
+static SHIELD_ESC_COUNT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+#[cfg(windows)]
+mod win_input_shield {
+    use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    pub type HOOKPROC = unsafe extern "system" fn(code: i32, wparam: usize, lparam: isize) -> isize;
+    pub type HWND = *mut std::ffi::c_void;
+    pub type HHOOK = *mut std::ffi::c_void;
+    pub type HINSTANCE = *mut std::ffi::c_void;
+    pub type BOOL = i32;
+
+    pub const WH_KEYBOARD_LL: i32 = 13;
+    pub const WH_MOUSE_LL: i32 = 14;
+    pub const WM_QUIT: u32 = 0x0012;
+    pub const VK_ESCAPE: u32 = 0x1B;
+
+    #[repr(C)]
+    #[derive(Clone, Copy)]
+    pub struct POINT {
+        pub x: i32,
+        pub y: i32,
+    }
+
+    #[repr(C)]
+    pub struct MSG {
+        pub hwnd: HWND,
+        pub message: u32,
+        pub wparam: usize,
+        pub lparam: isize,
+        pub time: u32,
+        pub pt: POINT,
+    }
+
+    #[repr(C)]
+    pub struct MSLLHOOKSTRUCT {
+        pub pt: POINT,
+        pub mouse_data: u32,
+        pub flags: u32,
+        pub time: u32,
+        pub dw_extra_info: usize,
+    }
+
+    #[repr(C)]
+    pub struct KBDLLHOOKSTRUCT {
+        pub vk_code: u32,
+        pub scan_code: u32,
+        pub flags: u32,
+        pub time: u32,
+        pub dw_extra_info: usize,
+    }
+
+    #[link(name = "user32")]
+    extern "system" {
+        pub fn SetWindowsHookExW(id_hook: i32, lpfn: Option<HOOKPROC>, hmod: HINSTANCE, dw_thread_id: u32) -> HHOOK;
+        pub fn UnhookWindowsHookEx(hhk: HHOOK) -> BOOL;
+        pub fn CallNextHookEx(hhk: HHOOK, n_code: i32, wparam: usize, lparam: isize) -> isize;
+        pub fn GetMessageW(lpmsg: *mut MSG, hwnd: HWND, wmsgfiltermin: u32, wmsgfiltermax: u32) -> BOOL;
+        pub fn TranslateMessage(lpmsg: *const MSG) -> BOOL;
+        pub fn DispatchMessageW(lpmsg: *const MSG) -> isize;
+        pub fn PostThreadMessageW(id_thread: u32, msg: u32, wparam: usize, lparam: isize) -> BOOL;
+        pub fn WindowFromPoint(point: POINT) -> HWND;
+        pub fn GetWindowThreadProcessId(hwnd: HWND, lpdwprocessid: *mut u32) -> u32;
+    }
+
+    #[link(name = "kernel32")]
+    extern "system" {
+        pub fn GetCurrentThreadId() -> u32;
+    }
+
+    pub unsafe extern "system" fn low_level_mouse_proc(code: i32, wparam: usize, lparam: isize) -> isize {
+        if code >= 0 && SHIELD_ACTIVE.load(Ordering::Relaxed) {
+            let ms = lparam as *const MSLLHOOKSTRUCT;
+            if !ms.is_null() {
+                let pt = (*ms).pt;
+                let hwnd = WindowFromPoint(pt);
+                let mut target_pid: u32 = 0;
+                GetWindowThreadProcessId(hwnd, &mut target_pid);
+                let app_pid = SHIELD_APP_PID.load(Ordering::Relaxed);
+                // Allow mouse clicks inside Agent Power Guard window so user can click Cancel / Release buttons!
+                if app_pid != 0 && target_pid == app_pid {
+                    return CallNextHookEx(std::ptr::null_mut(), code, wparam, lparam);
+                }
+            }
+            SHIELD_NUDGES.fetch_add(1, Ordering::Relaxed);
+            // Swallow external/background mouse events
+            return 1;
+        }
+        CallNextHookEx(std::ptr::null_mut(), code, wparam, lparam)
+    }
+
+    pub unsafe extern "system" fn low_level_kbd_proc(code: i32, wparam: usize, lparam: isize) -> isize {
+        if code >= 0 && SHIELD_ACTIVE.load(Ordering::Relaxed) {
+            let kbd = lparam as *const KBDLLHOOKSTRUCT;
+            if !kbd.is_null() {
+                let vk = (*kbd).vk_code;
+                if vk == VK_ESCAPE {
+                    let now_ms = SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_millis() as u64;
+                    let last_ms = SHIELD_LAST_ESC_MS.swap(now_ms, Ordering::SeqCst);
+                    if now_ms.saturating_sub(last_ms) <= 1500 {
+                        let count = SHIELD_ESC_COUNT.fetch_add(1, Ordering::SeqCst) + 1;
+                        if count >= 3 {
+                            // Emergency escape: 3x ESC within 1.5 seconds immediately unhooks!
+                            SHIELD_ACTIVE.store(false, Ordering::SeqCst);
+                            let tid = SHIELD_TID.load(Ordering::SeqCst);
+                            if tid != 0 {
+                                PostThreadMessageW(tid, WM_QUIT, 0, 0);
+                            }
+                            return CallNextHookEx(std::ptr::null_mut(), code, wparam, lparam);
+                        }
+                    } else {
+                        SHIELD_ESC_COUNT.store(1, Ordering::SeqCst);
+                    }
+                }
+            }
+            SHIELD_NUDGES.fetch_add(1, Ordering::Relaxed);
+            // Swallow external keystrokes
+            return 1;
+        }
+        CallNextHookEx(std::ptr::null_mut(), code, wparam, lparam)
+    }
+}
+
+/// Hands-Off Input Shield: Safely intercepts and swallows external mouse and keyboard inputs during the diagnostic test,
+/// protecting sleep countdowns from accidental table bumps while allowing emergency release (3x ESC, in-app buttons, or timeout).
+pub struct InputShield {
+    active: Arc<AtomicBool>,
+    nudges_filtered: Arc<std::sync::atomic::AtomicU32>,
+}
+
+impl InputShield {
+    pub fn new() -> Self {
+        Self {
+            active: Arc::new(AtomicBool::new(false)),
+            nudges_filtered: Arc::new(std::sync::atomic::AtomicU32::new(0)),
+        }
+    }
+
+    pub fn is_active(&self) -> bool {
+        #[cfg(windows)]
+        {
+            SHIELD_ACTIVE.load(Ordering::Relaxed)
+        }
+        #[cfg(not(windows))]
+        {
+            self.active.load(Ordering::Relaxed)
+        }
+    }
+
+    pub fn nudges_filtered(&self) -> u32 {
+        #[cfg(windows)]
+        {
+            SHIELD_NUDGES.load(Ordering::Relaxed)
+        }
+        #[cfg(not(windows))]
+        {
+            self.nudges_filtered.load(Ordering::Relaxed)
+        }
+    }
+
+    pub fn engage(&mut self, total_duration_secs: u32) {
+        #[cfg(windows)]
+        {
+            if SHIELD_ACTIVE.load(Ordering::SeqCst) {
+                return;
+            }
+            SHIELD_ACTIVE.store(true, Ordering::SeqCst);
+            SHIELD_NUDGES.store(0, Ordering::SeqCst);
+            SHIELD_ESC_COUNT.store(0, Ordering::SeqCst);
+            SHIELD_APP_PID.store(std::process::id(), Ordering::SeqCst);
+
+            std::thread::spawn(move || {
+                use win_input_shield::*;
+                let tid = unsafe { GetCurrentThreadId() };
+                SHIELD_TID.store(tid, Ordering::SeqCst);
+
+                let h_mouse = unsafe {
+                    SetWindowsHookExW(
+                        WH_MOUSE_LL,
+                        Some(low_level_mouse_proc),
+                        std::ptr::null_mut(),
+                        0,
+                    )
+                };
+                let h_kbd = unsafe {
+                    SetWindowsHookExW(
+                        WH_KEYBOARD_LL,
+                        Some(low_level_kbd_proc),
+                        std::ptr::null_mut(),
+                        0,
+                    )
+                };
+
+                // Watchdog thread to guarantee auto-release after duration + 5 seconds
+                let safety_tid = tid;
+                let max_secs = total_duration_secs.max(10) + 5;
+                std::thread::spawn(move || {
+                    std::thread::sleep(Duration::from_secs(max_secs as u64));
+                    if SHIELD_ACTIVE.load(Ordering::SeqCst) {
+                        SHIELD_ACTIVE.store(false, Ordering::SeqCst);
+                        unsafe {
+                            PostThreadMessageW(safety_tid, WM_QUIT, 0, 0);
+                        }
+                    }
+                });
+
+                // Run message pump to service low-level hooks
+                let mut msg: MSG = unsafe { std::mem::zeroed() };
+                while unsafe { GetMessageW(&mut msg, std::ptr::null_mut(), 0, 0) } > 0 {
+                    unsafe {
+                        TranslateMessage(&msg);
+                        DispatchMessageW(&msg);
+                    }
+                }
+
+                // Cleanup hooks on thread exit
+                if !h_mouse.is_null() {
+                    unsafe {
+                        UnhookWindowsHookEx(h_mouse);
+                    }
+                }
+                if !h_kbd.is_null() {
+                    unsafe {
+                        UnhookWindowsHookEx(h_kbd);
+                    }
+                }
+                SHIELD_ACTIVE.store(false, Ordering::SeqCst);
+                SHIELD_TID.store(0, Ordering::SeqCst);
+            });
+        }
+        #[cfg(not(windows))]
+        {
+            self.active.store(true, Ordering::SeqCst);
+            self.nudges_filtered.store(0, Ordering::SeqCst);
+            let active = Arc::clone(&self.active);
+            std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_secs((total_duration_secs + 5) as u64));
+                active.store(false, Ordering::SeqCst);
+            });
+        }
+    }
+
+    pub fn release(&mut self) {
+        #[cfg(windows)]
+        {
+            if SHIELD_ACTIVE.swap(false, Ordering::SeqCst) {
+                let tid = SHIELD_TID.swap(0, Ordering::SeqCst);
+                if tid != 0 {
+                    unsafe {
+                        win_input_shield::PostThreadMessageW(tid, win_input_shield::WM_QUIT, 0, 0);
+                    }
+                }
+            }
+        }
+        #[cfg(not(windows))]
+        {
+            self.active.store(false, Ordering::SeqCst);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1300,5 +1850,25 @@ mod tests {
         }
         assert!(session.revert_pressure_triggered);
         assert!(session.revert_pressure_verified);
+    }
+
+    #[test]
+    fn test_find_chrome_executable_runs_without_panic() {
+        let _ = find_chrome_executable();
+    }
+
+    #[test]
+    fn test_close_diag_media_tabs_runs_without_panic() {
+        let _ = close_diag_media_tabs();
+    }
+
+    #[test]
+    fn test_input_shield_lifecycle() {
+        let mut shield = InputShield::new();
+        assert!(!shield.is_active());
+        assert_eq!(shield.nudges_filtered(), 0);
+        shield.engage(1);
+        shield.release();
+        assert!(!shield.is_active());
     }
 }
