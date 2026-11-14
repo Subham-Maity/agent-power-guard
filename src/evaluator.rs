@@ -1472,16 +1472,19 @@ pub fn evaluate(config: &EvalConfig, metrics: &Metrics, state: &mut EvaluationSt
                 state.media_prompt_active = false;
             }
 
-            if !passive_media_sleeping_now && (state.media_prompt_active || passive_media_locked) {
+            if !passive_media_sleeping_now {
+                let status_desc = if passive_media_locked {
+                    "Session locked awake"
+                } else if state.media_prompt_active {
+                    "Awaiting prompt"
+                } else {
+                    "Playback active"
+                };
                 raw_blockers.push(PendingBlocker::new(
                     0,
                     "Passive Media",
                     &passive_media_app,
-                    if passive_media_locked {
-                        "Session locked awake"
-                    } else {
-                        "Awaiting prompt"
-                    },
+                    status_desc,
                     None,
                     None,
                     format!("Passive Media ({})", passive_media_app),
@@ -1589,9 +1592,12 @@ pub fn evaluate(config: &EvalConfig, metrics: &Metrics, state: &mut EvaluationSt
     };
 
     // Stage 1 (Display-off) & OS Wake Lock per §3 & §6 & §5.8
-    let defer_display_off_for_monitor_audio = config.protect_monitor_audio
-        && metrics.media.monitor_speaker_active
-        && metrics.media.render_active;
+    let is_video_or_browser_media = metrics.media.browser_audio_active
+        || crate::intent::is_video_app(metrics.media.effective_app_name());
+    let defer_display_off_for_media = (config.protect_monitor_audio && (metrics.media.monitor_speaker_active || metrics.is_laptop))
+        || is_video_or_browser_media;
+    let defer_display_off_for_monitor_audio = defer_display_off_for_media
+        && (metrics.media.render_active || metrics.media.smtc_playing);
 
     let stage1_display_off_allowed = match mode {
         OperationalMode::BestPerformance | OperationalMode::GuardOff => false,
@@ -1602,7 +1608,8 @@ pub fn evaluate(config: &EvalConfig, metrics: &Metrics, state: &mut EvaluationSt
                 && !defer_display_off_for_monitor_audio
         }
     };
-    let hold_os_wake_lock = mode == OperationalMode::BestPerformance;
+    let hold_os_wake_lock = mode == OperationalMode::BestPerformance
+        || (mode == OperationalMode::SmartGuard && (!blockers.is_empty() || (media_playing && !passive_media_sleeping_now)));
 
     // Critical Low Battery Override
     let mut critical_battery_sleep = false;
@@ -2228,5 +2235,28 @@ mod tests {
         let d = evaluate(&cfg, &m, &mut st);
         assert!(matches!(d.intent, UserIntent::MeetingLive { .. }));
         assert!(!d.stage1_display_off_allowed);
+    }
+
+    #[test]
+    fn test_video_media_blocks_sleep_and_defers_display_off() {
+        let cfg = base_config();
+        let mut st = fresh_state(&cfg, 1000);
+        let mut m = passing_metrics(1000);
+        m.idle_secs = 120;
+        m.media = MediaSessionSnapshot {
+            health: ProbeHealth::Available,
+            render_active: true,
+            render_peak: 0.25,
+            browser_audio_active: true,
+            render_app: "chrome.exe".to_string(),
+            session_key: "render::chrome.exe::1".to_string(),
+            ..Default::default()
+        };
+
+        let d = evaluate(&cfg, &m, &mut st);
+        assert!(!d.all_conditions_pass, "Active video/movie must block sleep");
+        assert!(!d.stage1_display_off_allowed, "Active video/movie must keep display ON");
+        assert!(d.hold_os_wake_lock, "Active video/movie must hold OS wake lock");
+        assert!(!d.trigger_sleep);
     }
 }

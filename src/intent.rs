@@ -173,6 +173,31 @@ pub fn is_browser_process(name: &str) -> bool {
     .any(|b| lower.contains(b))
 }
 
+pub fn is_video_app(name: &str) -> bool {
+    let lower = name.to_lowercase();
+    is_browser_process(&lower)
+        || [
+            "vlc",
+            "mpv",
+            "mpc-hc",
+            "mpc-be",
+            "potplayer",
+            "wmplayer",
+            "microsoft.media.player",
+            "movies & tv",
+            "netflix",
+            "prime",
+            "disney",
+            "stremio",
+            "plex",
+            "kodi",
+            "iina",
+            "quicktime",
+        ]
+        .iter()
+        .any(|v| lower.contains(v))
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct PowerRequestOwner {
     pub category: String,    // "DISPLAY", "SYSTEM", "AWAYMODE"
