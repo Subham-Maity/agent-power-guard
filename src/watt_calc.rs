@@ -163,6 +163,7 @@ pub struct DetectedSystemSpecs {
     pub usb_peripherals: Vec<String>,
     pub cabinet_cooling: Vec<String>,
     pub is_laptop: bool,
+    pub is_modern_standby: bool,
 }
 
 /// Trim entries, remove blanks, and deduplicate case-insensitively while preserving order.
@@ -826,6 +827,7 @@ mod tests {
             usb_peripherals: vec!["Standard USB Keyboard".to_string()],
             cabinet_cooling: vec!["3x 120mm Case Fans".to_string()],
             is_laptop: false,
+            is_modern_standby: false,
         };
         let mut calc = WattCalculatorState::default();
         calc.case_fan_count = 3;
@@ -868,5 +870,33 @@ mod tests {
             "Standard Keyboard".to_string(),
         ]);
         assert_eq!(cleaned, vec!["USB Microphone", "Standard Keyboard"]);
+    }
+
+    #[test]
+    fn test_hardware_scan_resilient_parsing() {
+        // TC-07: Verify JSON parsing resilience against non-ASCII characters (e.g. ®, ™)
+        // and ensure partial sections survive even if one section contains non-standard characters
+        let raw_json = r#"{
+            "motherboard": "Acer® Aspire™ 7 A715-42G",
+            "ram_sticks": [
+                { "gb": 8.0, "gen": "DDR4", "speed": 3200, "mfg": "SK hynix®", "part": "HMA81GS6DJR8N-XN" }
+            ],
+            "gpus": [
+                { "name": "Intel(R) UHD Graphics 630", "vram": 0.0 },
+                { "name": "NVIDIA® GeForce RTX™ 3050 Laptop GPU", "vram": 4.0 }
+            ],
+            "storage_drives": ["WDC PC SN530 SDBPNPZ-512G (NVMe SSD, 512 GB)"],
+            "monitors": ["AUO B156HAN02.1 (1920x1080)"],
+            "chassis": [10],
+            "is_modern_standby": true
+        }"#;
+
+        let parsed: Result<serde_json::Value, _> = serde_json::from_str(raw_json);
+        assert!(parsed.is_ok(), "JSON with registered trademark symbols should parse cleanly");
+        let v = parsed.unwrap();
+        assert_eq!(v["motherboard"].as_str(), Some("Acer® Aspire™ 7 A715-42G"));
+        assert_eq!(v["is_modern_standby"].as_bool(), Some(true));
+        let gpus = v["gpus"].as_array().expect("gpus array");
+        assert_eq!(gpus.len(), 2);
     }
 }

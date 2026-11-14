@@ -1406,6 +1406,9 @@ pub struct SharedState {
     pub live_cam_active: bool,
     pub live_mic_cam_app: String,
     pub live_power_display_active: bool,
+    pub live_audio_render_active: bool,
+    pub live_audio_render_peak: f32,
+    pub live_audio_render_app: String,
 
     // Conditions
     pub cond1_idle: ConditionStatus,
@@ -1568,6 +1571,9 @@ impl SharedState {
             live_cam_active: false,
             live_mic_cam_app: String::new(),
             live_power_display_active: false,
+            live_audio_render_active: false,
+            live_audio_render_peak: 0.0,
+            live_audio_render_app: String::new(),
 
             cond1_idle: ConditionStatus::default(),
             cond2_agent_cpu: ConditionStatus::default(),
@@ -3666,6 +3672,53 @@ pub fn send_wol_packet(mac_str: &str, broadcast_ip: Option<&str>) -> Result<(), 
     Ok(())
 }
 
+fn run_synthetic_worker(duration_secs: u64) {
+    let stop_at = std::time::Instant::now() + std::time::Duration::from_secs(duration_secs);
+    let mut scratch_path = std::env::temp_dir();
+    scratch_path.push(format!("apg_worker_scratch_{}.tmp", std::process::id()));
+
+    let num_cpus = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(4)
+        .min(8);
+    let running = Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let mut handles = Vec::new();
+
+    for _ in 0..num_cpus {
+        let r = running.clone();
+        handles.push(std::thread::spawn(move || {
+            let mut x = 1.0f64;
+            while r.load(std::sync::atomic::Ordering::Relaxed) {
+                for _ in 0..10_000 {
+                    x = (x * 1.000001 + 0.000001).sin();
+                }
+            }
+            let _ = x;
+        }));
+    }
+
+    let chunk = vec![0u8; 1024 * 1024]; // 1MB
+    while std::time::Instant::now() < stop_at {
+        if let Ok(mut f) = std::fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .open(&scratch_path)
+        {
+            use std::io::Write;
+            let _ = f.write_all(&chunk);
+            let _ = f.flush();
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+
+    running.store(false, std::sync::atomic::Ordering::Relaxed);
+    for h in handles {
+        let _ = h.join();
+    }
+    let _ = std::fs::remove_file(scratch_path);
+}
+
 fn handle_cli_command(args: &[String]) {
     #[cfg(windows)]
     unsafe {
@@ -3673,6 +3726,13 @@ fn handle_cli_command(args: &[String]) {
     }
     let cmd = args[1].to_lowercase();
     match cmd.as_str() {
+        "--synthetic-worker" => {
+            let duration_secs = args
+                .get(2)
+                .and_then(|s| s.parse::<u64>().ok())
+                .unwrap_or(75);
+            run_synthetic_worker(duration_secs);
+        }
         "run" => {
             run_cli_wrapper(&args[2..]);
         }
@@ -4039,6 +4099,9 @@ pub fn run_watchdog_loop(state: Arc<Mutex<SharedState>>, egui_ctx: Option<egui::
             s.mic_capture_peak = audio_reading.capture_peak;
             s.mic_capture_signal_label = audio_reading.capture_signal.label().to_string();
             s.live_power_display_active = has_active_power_req;
+            s.live_audio_render_active = audio_reading.media.render_active;
+            s.live_audio_render_peak = audio_reading.media.render_peak;
+            s.live_audio_render_app = audio_reading.media.render_app.clone();
             s.live_battery_status = batt;
 
             // Update 120s rolling history
@@ -4384,25 +4447,26 @@ pub fn run_watchdog_loop(state: Arc<Mutex<SharedState>>, egui_ctx: Option<egui::
             is_diag_active = s.diag_session.active;
             if is_diag_active {
                 // Dynamic Watt Calculation from component specifications
-                let psu_eff = (s.watt_calc.psu_efficiency_pct / 100.0).clamp(0.60, 0.98);
-                let cpu_idle_w = s.watt_calc.cpu_idle_w;
-                let gpu_idle_w = s.watt_calc.gpu_idle_w;
-                let board_fans_w = s.watt_calc.mobo_ram_ssd_fans_w;
-                let extras_w = s.watt_calc.peripherals_w;
+                let is_laptop = s.detected_specs.is_laptop;
+                let psu_eff = if is_laptop { 0.90 } else { (s.watt_calc.psu_efficiency_pct / 100.0).clamp(0.60, 0.98) };
+                let cpu_idle_w = if is_laptop { 8.0 } else { s.watt_calc.cpu_idle_w };
+                let gpu_idle_w = if is_laptop { 0.0 } else { s.watt_calc.gpu_idle_w };
+                let board_fans_w = if is_laptop { 4.0 } else { s.watt_calc.mobo_ram_ssd_fans_w };
+                let extras_w = if is_laptop { 1.0 } else { s.watt_calc.peripherals_w };
                 let mon_count = s.watt_calc.monitor_count.max(1) as f32;
-                let mon_each_w = s.watt_calc.monitor_each_w.clamp(5.0, 250.0);
+                let mon_each_w = if is_laptop { 6.0 } else { s.watt_calc.monitor_each_w.clamp(5.0, 250.0) };
                 let monitors_active_w = mon_count * mon_each_w;
 
                 let dynamic_cpu_w = cpu_idle_w
                     + (whole_pc_cpu / 100.0)
-                        * (s.detected_specs.cpu_cores as f32 * 12.0).clamp(35.0, 150.0);
-                let dynamic_gpu_w = gpu_idle_w + (gpu_reading.util_pct / 100.0) * 110.0;
+                        * if is_laptop { 35.0 } else { (s.detected_specs.cpu_cores as f32 * 12.0).clamp(35.0, 150.0) };
+                let dynamic_gpu_w = gpu_idle_w + (gpu_reading.util_pct / 100.0) * if is_laptop { 30.0 } else { 110.0 };
                 let pc_internal_active_w = dynamic_cpu_w + dynamic_gpu_w + board_fans_w + extras_w;
                 let pc_wall_w = pc_internal_active_w / psu_eff;
                 let est_active_watts = pc_wall_w + monitors_active_w;
 
                 let est_display_off_watts = pc_wall_w + (mon_count * 0.5); // monitors in sleep draw ~0.5W
-                let est_sleep_watts = s.watt_calc.sleep_watts.clamp(1.0, 15.0);
+                let est_sleep_watts = if is_laptop { 2.0 } else { s.watt_calc.sleep_watts.clamp(1.0, 15.0) };
 
                 let display_off_condition_met = trigger_monitor_off;
                 let sleep_condition_met = trigger_sleep;
@@ -4428,21 +4492,35 @@ pub fn run_watchdog_loop(state: Arc<Mutex<SharedState>>, egui_ctx: Option<egui::
                     s.detected_specs.os_name.clone()
                 };
 
+                let gpu_display_str = if s.detected_specs.gpu_name.is_empty() {
+                    "Not detected (see hwscan.log)".to_string()
+                } else if s.detected_specs.gpu_vram_gb <= 0.0 {
+                    format!("{} (Shared System Memory)", s.detected_specs.gpu_name)
+                } else {
+                    format!("{} ({:.1} GB VRAM)", s.detected_specs.gpu_name, s.detected_specs.gpu_vram_gb)
+                };
+
+                let standby_label = if s.detected_specs.is_modern_standby {
+                    "Estimated S0 Modern Standby Power"
+                } else {
+                    "Estimated S3 Standby Power"
+                };
+
                 let specs_report = format!(
                     "- **OS:** {}\n\
                      - **Motherboard:** {}\n\
                      - **CPU:** {} ({} physical cores, {} threads)\n\
                      - **RAM:** {} (Total: {:.1} GB)\n\
-                     - **GPU:** {} ({:.1} GB VRAM)\n\
+                     - **GPU:** {}\n\
                      - **Storage Volumes:** {} (Summary: {})\n\
                      - **Connected Displays:** {} (Count: {})\n\
                      - **Estimated Active Power:** {:.1} W (PC: {:.1} W, Monitors: {:.1} W)\n\
                      - **Estimated Display-Off Power:** {:.1} W (Watt Drop: -{:.1} W)\n\
-                     - **Estimated S3 Standby Power:** {:.1} W (Watt Drop: -{:.1} W)\n\
+                     - **{}:** {:.1} W (Watt Drop: -{:.1} W)\n\
                      - **Cooling & Form Factor:** Fans: {}, ARGB: {}, Cooler: {}, Laptop: {}",
                     os_name,
                     if s.detected_specs.motherboard.is_empty() {
-                        "Standard Desktop Motherboard"
+                        "Not detected (see hwscan.log)"
                     } else {
                         &s.detected_specs.motherboard
                     },
@@ -4459,12 +4537,7 @@ pub fn run_watchdog_loop(state: Arc<Mutex<SharedState>>, egui_ctx: Option<egui::
                         s.detected_specs.ram_details.clone()
                     },
                     s.detected_specs.ram_gb,
-                    if s.detected_specs.gpu_name.is_empty() {
-                        "Standard GPU"
-                    } else {
-                        &s.detected_specs.gpu_name
-                    },
-                    s.detected_specs.gpu_vram_gb,
+                    gpu_display_str,
                     s.detected_specs.storage_drives.len(),
                     if s.detected_specs.storage_summary.is_empty() {
                         "Storage Volumes Detected"
@@ -4472,7 +4545,7 @@ pub fn run_watchdog_loop(state: Arc<Mutex<SharedState>>, egui_ctx: Option<egui::
                         &s.detected_specs.storage_summary
                     },
                     if s.detected_specs.monitors.is_empty() {
-                        "1 Display".to_string()
+                        "Not detected (see hwscan.log)".to_string()
                     } else {
                         s.detected_specs.monitors.join(", ")
                     },
@@ -4482,6 +4555,7 @@ pub fn run_watchdog_loop(state: Arc<Mutex<SharedState>>, egui_ctx: Option<egui::
                     monitors_active_w,
                     est_display_off_watts,
                     (est_active_watts - est_display_off_watts).max(0.0),
+                    standby_label,
                     est_sleep_watts,
                     (est_active_watts - est_sleep_watts).max(0.0),
                     s.watt_calc.case_fan_count,
@@ -4524,6 +4598,19 @@ pub fn run_watchdog_loop(state: Arc<Mutex<SharedState>>, egui_ctx: Option<egui::
                 let mic_active = audio_reading.capture_peak > 0.01;
                 let intent_display = s.intent.display_label();
 
+                let display_audit = match power_req_snap.health {
+                    crate::signal::ProbeHealth::Available => {
+                        if power_req_snap.display_active {
+                            crate::diag::DisplayRequestAuditState::Asserted
+                        } else {
+                            crate::diag::DisplayRequestAuditState::NotAsserted
+                        }
+                    }
+                    crate::signal::ProbeHealth::Unavailable(_) => {
+                        crate::diag::DisplayRequestAuditState::UnknownProbeUnavailable
+                    }
+                };
+
                 diag_action = s.diag_session.tick_1s(
                     idle_secs,
                     Some(decision.countdown_secs),
@@ -4534,7 +4621,7 @@ pub fn run_watchdog_loop(state: Arc<Mutex<SharedState>>, egui_ctx: Option<egui::
                     &audio_reading.media.render_app,
                     mic_active,
                     audio_reading.capture_peak,
-                    power_req_snap.display_active,
+                    display_audit,
                     power_req_snap.system_active,
                     whole_pc_cpu,
                     gpu_reading.util_pct,
@@ -5414,6 +5501,7 @@ struct PlatformHwDetails {
     usb_peripherals: Vec<String>,
     cabinet_cooling: Vec<String>,
     is_laptop_override: Option<bool>,
+    is_modern_standby: bool,
 }
 
 /// Move detected USB ARGB/RGB/fan controllers (e.g. Gigabyte ITE Device, Corsair, NZXT, Lian Li)
@@ -5452,145 +5540,182 @@ fn classify_rgb_and_cooling_peripherals(
 fn fetch_platform_hw_details(ram_gb: f32) -> PlatformHwDetails {
     let mut hw = PlatformHwDetails::default();
     let ps = r#"
+[Console]::OutputEncoding = [System.Text.Encoding]::UTF8;
+$OutputEncoding = [System.Text.Encoding]::UTF8;
 $ErrorActionPreference = 'SilentlyContinue'
 $out = [ordered]@{}
 
-$bb = Get-CimInstance Win32_BaseBoard | Select-Object -First 1 Manufacturer, Product
-if ($bb) {
-    $out.motherboard = ("$($bb.Manufacturer) $($bb.Product)").Trim()
-}
-
-$ddrMap = @{
-    20 = 'DDR'; 21 = 'DDR2'; 22 = 'DDR2'; 24 = 'DDR3';
-    26 = 'DDR4'; 27 = 'LPDDR'; 28 = 'LPDDR2'; 29 = 'LPDDR3';
-    30 = 'LPDDR4'; 34 = 'DDR5'; 35 = 'LPDDR5'
-}
-$out.ram_sticks = @(Get-CimInstance Win32_PhysicalMemory | ForEach-Object {
-    $gb = [math]::Round([double]$_.Capacity / 1GB, 1)
-    $spd = if ($_.ConfiguredClockSpeed -gt 0) { [int]$_.ConfiguredClockSpeed } else { [int]$_.Speed }
-    $gen = $ddrMap[[int]$_.SMBIOSMemoryType]
-    if (-not $gen) { $gen = '' }
-    [ordered]@{
-        gb = $gb
-        gen = $gen
-        speed = $spd
-        mfg = ("$($_.Manufacturer)").Trim()
-        part = ("$($_.PartNumber)").Trim()
-    }
-})
-
-$busMap = @{ 7='USB'; 8='RAID'; 11='SATA'; 12='SAS'; 17='NVMe' }
-$mediaMap = @{ 3='HDD'; 4='SSD'; 5='SCM' }
-$disks = @()
+# Section 1: Motherboard & System Model
 try {
-    $pd = @(Get-CimInstance -Namespace root\Microsoft\Windows\Storage -ClassName MSFT_PhysicalDisk)
-    foreach ($d in $pd) {
-        $gb = [math]::Round([double]$d.Size / 1GB, 0)
-        $bus = $busMap[[int]$d.BusType]
-        $med = $mediaMap[[int]$d.MediaType]
-        $kindStr = (@($bus, $med) | Where-Object { $_ }) -join ' '
-        $name = ("$($d.FriendlyName)").Trim()
-        if ($name -and $gb -gt 0 -and $name -notmatch 'Virtual Disk|Msft Virtual') {
-            if ($kindStr) { $disks += "$name ($kindStr, $gb GB)" } else { $disks += "$name ($gb GB)" }
-        }
+    $cs = Get-CimInstance Win32_ComputerSystem | Select-Object -First 1 Manufacturer, Model
+    $bb = Get-CimInstance Win32_BaseBoard | Select-Object -First 1 Manufacturer, Product
+    $mb = ""
+    if ($cs -and $cs.Model -and $cs.Model -notmatch 'System Product Name|To be filled by O.E.M.') {
+        $mb = ("$($cs.Manufacturer) $($cs.Model)").Trim()
+    } elseif ($bb) {
+        $mb = ("$($bb.Manufacturer) $($bb.Product)").Trim()
     }
+    if ($mb) { $out.motherboard = $mb }
 } catch {}
-if ($disks.Count -eq 0) {
-    foreach ($d in @(Get-CimInstance Win32_DiskDrive)) {
-        $gb = [math]::Round([double]$d.Size / 1GB, 0)
-        $name = ("$($d.Model)").Trim()
-        $iface = ("$($d.InterfaceType)").Trim()
-        if ($name -and $gb -gt 0 -and $name -notmatch 'Virtual Disk|Msft Virtual') {
-            if ($iface) { $disks += "$name ($iface, $gb GB)" } else { $disks += "$name ($gb GB)" }
-        }
-    }
-}
-$out.storage_drives = @($disks | Select-Object -Unique)
 
-$regVram = @{}
-Get-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\Class\{4d36e968-e325-11ce-bfc1-08002be10318}\0*' -ErrorAction SilentlyContinue | ForEach-Object {
-    $desc = "$($_.'DriverDesc')".Trim()
-    $qw = $_.'HardwareInformation.qwMemorySize'
-    if ($desc -and $qw -is [System.ValueType] -and [double]$qw -gt 0) {
-        $regVram[$desc] = [math]::Round([double]$qw / 1GB, 1)
-    }
-}
-$out.gpus = @(Get-CimInstance Win32_VideoController | ForEach-Object {
-    $gname = "$($_.Name)".Trim()
-    $vgb = if ($regVram.ContainsKey($gname)) { $regVram[$gname] } else { [math]::Round([double]$_.AdapterRAM / 1GB, 1) }
-    [ordered]@{ name = $gname; vram = $vgb }
-})
-
-$mons = @()
+# Section 2: RAM Sticks
 try {
-    foreach ($m in @(Get-CimInstance -Namespace root\wmi -ClassName WmiMonitorID)) {
-        $n = ($m.UserFriendlyName | Where-Object { $_ -ne 0 } | ForEach-Object { [char]$_ }) -join ''
-        if ($n.Trim()) { $mons += $n.Trim() }
+    $ddrMap = @{
+        20 = 'DDR'; 21 = 'DDR2'; 22 = 'DDR2'; 24 = 'DDR3';
+        26 = 'DDR4'; 27 = 'LPDDR'; 28 = 'LPDDR2'; 29 = 'LPDDR3';
+        30 = 'LPDDR4'; 34 = 'DDR5'; 35 = 'LPDDR5'
     }
+    $out.ram_sticks = @(Get-CimInstance Win32_PhysicalMemory | ForEach-Object {
+        $gb = [math]::Round([double]$_.Capacity / 1GB, 1)
+        $spd = if ($_.ConfiguredClockSpeed -gt 0) { [int]$_.ConfiguredClockSpeed } else { [int]$_.Speed }
+        $gen = $ddrMap[[int]$_.SMBIOSMemoryType]
+        if (-not $gen) { $gen = '' }
+        [ordered]@{
+            gb = $gb
+            gen = $gen
+            speed = $spd
+            mfg = ("$($_.Manufacturer)").Trim()
+            part = ("$($_.PartNumber)").Trim()
+        }
+    })
 } catch {}
-if ($mons.Count -eq 0) {
-    $mons = @(Get-CimInstance Win32_DesktopMonitor | ForEach-Object { "$($_.Name)".Trim() } | Where-Object { $_ })
-}
-$out.monitors = @($mons | Select-Object -Unique)
 
-$ch = (Get-CimInstance Win32_SystemEnclosure | Select-Object -First 1 -ExpandProperty ChassisTypes)
-$out.chassis = @($ch)
-
-$nets = @()
-Get-CimInstance Win32_NetworkAdapter | Where-Object {
-    $_.PhysicalAdapter -eq $true -and $_.Name -notmatch 'Virtual|Hyper-V|TAP|VPN|WAN Miniport|Bluetooth|Loopback|Kernel Debug'
-} | ForEach-Object {
-    $kind = if ($_.Name -match 'Wi-Fi|WiFi|Wireless|802\.11|WLAN|AX\d{3}|BE\d{3}' -or $_.NetConnectionID -match 'Wi-Fi|WLAN') { 'Wi-Fi' } else { 'LAN' }
-    $st = if ($_.NetConnectionStatus -eq 2) { 'Connected' } else { 'Idle' }
-    if ($_.Name) { $nets += "${kind}: $($_.Name.Trim()) [$st]" }
-}
-$out.network = @($nets | Select-Object -Unique)
-
-$bt = @()
-Get-CimInstance Win32_PnPEntity | Where-Object {
-    $_.Present -eq $true -and ($_.PNPClass -eq 'Bluetooth' -or $_.Service -match 'BTH|RFCOMM') -and
-    $_.Name -notmatch 'Enumerator|Transport|Protocol|Service|Profile|Device Identification|Avrcp|A2dp|Hands-Free|Standard Serial over Bluetooth|RFCOMM'
-} | ForEach-Object {
-    if ($_.Name) { $bt += $_.Name.Trim() }
-}
-$out.bluetooth = @($bt | Select-Object -Unique)
-
-$aud = @()
-Get-CimInstance Win32_SoundDevice | Where-Object { $_.Status -eq 'OK' } | ForEach-Object {
-    if ($_.Name -and $_.Name -notmatch 'Virtual|VB-Audio|FxSound|^High Definition Audio Device$|^USB Audio 2\.0$') { $aud += $_.Name.Trim() }
-}
-Get-CimInstance Win32_PnPEntity | Where-Object {
-    $_.Present -eq $true -and $_.PNPClass -eq 'AudioEndpoint' -and $_.Name -notmatch 'VB-Audio|FxSound'
-} | ForEach-Object {
-    if ($_.Name) { $aud += $_.Name.Trim() }
-}
-$out.audio = @($aud | Select-Object -Unique)
-
-$periph = @()
-Get-CimInstance Win32_PointingDevice | ForEach-Object {
-    if ($_.Name -and $_.Name -notmatch 'HID-compliant mouse|PS/2|USB Input Device') { $periph += "Mouse: $($_.Name.Trim())" }
-}
-Get-CimInstance Win32_Keyboard | ForEach-Object {
-    if ($_.Name -and $_.Name -notmatch 'Enhanced \(101|HID Keyboard Device|Standard PS/2') { $periph += "Keyboard: $($_.Name.Trim())" }
-}
-$usbParents = @(Get-PnpDevice -PresentOnly | Where-Object { $_.InstanceId -match '^USB\\VID_' -and $_.InstanceId -notmatch '&MI_' })
-$usbIds = @($usbParents | ForEach-Object { $_.InstanceId })
-if ($usbIds.Count -gt 0) {
-    Get-PnpDeviceProperty -InstanceId $usbIds -KeyName 'DEVPKEY_Device_BusReportedDeviceDesc' | ForEach-Object {
-        if ($_.Data) {
-            $d = "$($_.Data)".Trim()
-            if ($d -and $d -notmatch 'USB Mass Storage|USB Composite|Generic USB|Root Hub|Input Device|UASP') {
-                $periph += $d
+# Section 3: Storage
+try {
+    $busMap = @{ 7='USB'; 8='RAID'; 11='SATA'; 12='SAS'; 17='NVMe' }
+    $mediaMap = @{ 3='HDD'; 4='SSD'; 5='SCM' }
+    $disks = @()
+    try {
+        $pd = @(Get-CimInstance -Namespace root\Microsoft\Windows\Storage -ClassName MSFT_PhysicalDisk)
+        foreach ($d in $pd) {
+            $gb = [math]::Round([double]$d.Size / 1GB, 0)
+            $bus = $busMap[[int]$d.BusType]
+            $med = $mediaMap[[int]$d.MediaType]
+            $kindStr = (@($bus, $med) | Where-Object { $_ }) -join ' '
+            $name = ("$($d.FriendlyName)").Trim()
+            if ($name -and $gb -gt 0 -and $name -notmatch 'Virtual Disk|Msft Virtual') {
+                if ($kindStr) { $disks += "$name ($kindStr, $gb GB)" } else { $disks += "$name ($gb GB)" }
+            }
+        }
+    } catch {}
+    if ($disks.Count -eq 0) {
+        foreach ($d in @(Get-CimInstance Win32_DiskDrive)) {
+            $gb = [math]::Round([double]$d.Size / 1GB, 0)
+            $name = ("$($d.Model)").Trim()
+            $iface = ("$($d.InterfaceType)").Trim()
+            if ($name -and $gb -gt 0 -and $name -notmatch 'Virtual Disk|Msft Virtual') {
+                if ($iface) { $disks += "$name ($iface, $gb GB)" } else { $disks += "$name ($gb GB)" }
             }
         }
     }
-}
-Get-CimInstance Win32_PnPEntity | Where-Object {
-    $_.Present -eq $true -and ($_.PNPClass -eq 'Camera' -or $_.PNPClass -eq 'Image')
-} | ForEach-Object {
-    if ($_.Name) { $periph += "Camera: $($_.Name.Trim())" }
-}
-$out.peripherals = @($periph | Select-Object -Unique)
+    $out.storage_drives = @($disks | Select-Object -Unique)
+} catch {}
+
+# Section 4: GPU & VRAM
+try {
+    $regVram = @{}
+    Get-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\Class\{4d36e968-e325-11ce-bfc1-08002be10318}\0*' -ErrorAction SilentlyContinue | ForEach-Object {
+        $desc = "$($_.'DriverDesc')".Trim()
+        $qw = $_.'HardwareInformation.qwMemorySize'
+        if ($desc -and $qw -is [System.ValueType] -and [double]$qw -gt 0) {
+            $regVram[$desc] = [math]::Round([double]$qw / 1GB, 1)
+        }
+    }
+    $out.gpus = @(Get-CimInstance Win32_VideoController | ForEach-Object {
+        $gname = "$($_.Name)".Trim()
+        $vgb = if ($regVram.ContainsKey($gname)) { $regVram[$gname] } else { [math]::Round([double]$_.AdapterRAM / 1GB, 1) }
+        [ordered]@{ name = $gname; vram = $vgb }
+    })
+} catch {}
+
+# Section 5: Displays
+try {
+    $mons = @()
+    try {
+        foreach ($m in @(Get-CimInstance -Namespace root\wmi -ClassName WmiMonitorID)) {
+            $n = ($m.UserFriendlyName | Where-Object { $_ -ne 0 } | ForEach-Object { [char]$_ }) -join ''
+            if ($n.Trim()) { $mons += $n.Trim() }
+        }
+    } catch {}
+    if ($mons.Count -eq 0) {
+        $mons = @(Get-CimInstance Win32_DesktopMonitor | ForEach-Object { "$($_.Name)".Trim() } | Where-Object { $_ })
+    }
+    $out.monitors = @($mons | Select-Object -Unique)
+} catch {}
+
+# Section 6: Chassis & Standby Mode
+try {
+    $ch = (Get-CimInstance Win32_SystemEnclosure | Select-Object -First 1 -ExpandProperty ChassisTypes)
+    $out.chassis = @($ch)
+} catch {}
+try {
+    $a = & powercfg /a 2>$null
+    $out.is_modern_standby = ($a -match 'Standby \(S0 Low Power Idle\)')
+} catch {}
+
+# Section 7: Network & Bluetooth
+try {
+    $nets = @()
+    Get-CimInstance Win32_NetworkAdapter | Where-Object {
+        $_.PhysicalAdapter -eq $true -and $_.Name -notmatch 'Virtual|Hyper-V|TAP|VPN|WAN Miniport|Bluetooth|Loopback|Kernel Debug'
+    } | ForEach-Object {
+        $kind = if ($_.Name -match 'Wi-Fi|WiFi|Wireless|802\.11|WLAN|AX\d{3}|BE\d{3}' -or $_.NetConnectionID -match 'Wi-Fi|WLAN') { 'Wi-Fi' } else { 'LAN' }
+        $st = if ($_.NetConnectionStatus -eq 2) { 'Connected' } else { 'Idle' }
+        if ($_.Name) { $nets += "${kind}: $($_.Name.Trim()) [$st]" }
+    }
+    $out.network = @($nets | Select-Object -Unique)
+} catch {}
+try {
+    $bt = @()
+    Get-CimInstance Win32_PnPEntity | Where-Object {
+        $_.Present -eq $true -and ($_.PNPClass -eq 'Bluetooth' -or $_.Service -match 'BTH|RFCOMM') -and
+        $_.Name -notmatch 'Enumerator|Transport|Protocol|Service|Profile|Device Identification|Avrcp|A2dp|Hands-Free|Standard Serial over Bluetooth|RFCOMM'
+    } | ForEach-Object {
+        if ($_.Name) { $bt += $_.Name.Trim() }
+    }
+    $out.bluetooth = @($bt | Select-Object -Unique)
+} catch {}
+
+# Section 8: Audio & Peripherals
+try {
+    $aud = @()
+    Get-CimInstance Win32_SoundDevice | Where-Object { $_.Status -eq 'OK' } | ForEach-Object {
+        if ($_.Name -and $_.Name -notmatch 'Virtual|VB-Audio|FxSound|^High Definition Audio Device$|^USB Audio 2\.0$') { $aud += $_.Name.Trim() }
+    }
+    Get-CimInstance Win32_PnPEntity | Where-Object {
+        $_.Present -eq $true -and $_.PNPClass -eq 'AudioEndpoint' -and $_.Name -notmatch 'VB-Audio|FxSound'
+    } | ForEach-Object {
+        if ($_.Name) { $aud += $_.Name.Trim() }
+    }
+    $out.audio = @($aud | Select-Object -Unique)
+} catch {}
+try {
+    $periph = @()
+    Get-CimInstance Win32_PointingDevice | ForEach-Object {
+        if ($_.Name -and $_.Name -notmatch 'HID-compliant mouse|PS/2|USB Input Device') { $periph += "Mouse: $($_.Name.Trim())" }
+    }
+    Get-CimInstance Win32_Keyboard | ForEach-Object {
+        if ($_.Name -and $_.Name -notmatch 'Enhanced \(101|HID Keyboard Device|Standard PS/2') { $periph += "Keyboard: $($_.Name.Trim())" }
+    }
+    $usbParents = @(Get-PnpDevice -PresentOnly | Where-Object { $_.InstanceId -match '^USB\\VID_' -and $_.InstanceId -notmatch '&MI_' })
+    $usbIds = @($usbParents | ForEach-Object { $_.InstanceId })
+    if ($usbIds.Count -gt 0) {
+        Get-PnpDeviceProperty -InstanceId $usbIds -KeyName 'DEVPKEY_Device_BusReportedDeviceDesc' | ForEach-Object {
+            if ($_.Data) {
+                $d = "$($_.Data)".Trim()
+                if ($d -and $d -notmatch 'USB Mass Storage|USB Composite|Generic USB|Root Hub|Input Device|UASP') {
+                    $periph += $d
+                }
+            }
+        }
+    }
+    Get-CimInstance Win32_PnPEntity | Where-Object {
+        $_.Present -eq $true -and ($_.PNPClass -eq 'Camera' -or $_.PNPClass -eq 'Image')
+    } | ForEach-Object {
+        if ($_.Name) { $periph += "Camera: $($_.Name.Trim())" }
+    }
+    $out.peripherals = @($periph | Select-Object -Unique)
+} catch {}
 
 $out | ConvertTo-Json -Depth 4 -Compress
 "#;
@@ -5613,8 +5738,26 @@ $out | ConvertTo-Json -Depth 4 -Compress
         .creation_flags(CREATE_NO_WINDOW)
         .output()
     {
+        let stdout_str = String::from_utf8_lossy(&out.stdout);
+        let parse_result = serde_json::from_str::<serde_json::Value>(&stdout_str);
+
+        // Diagnostic logging: hwscan.log
+        let log_dir = get_config_path().parent().unwrap_or(&PathBuf::from(".")).join("logs");
+        let _ = std::fs::create_dir_all(&log_dir);
+        let log_file = log_dir.join("hwscan.log");
+        let log_entry = format!(
+            "[{:?}] ExitCode: {:?}, StdoutLen: {}, StderrLen: {}, ParseOk: {}\nStderr: {}\n",
+            std::time::SystemTime::now(),
+            out.status.code(),
+            out.stdout.len(),
+            out.stderr.len(),
+            parse_result.is_ok(),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let _ = std::fs::write(&log_file, log_entry);
+
         if out.status.success() {
-            if let Ok(v) = serde_json::from_slice::<serde_json::Value>(&out.stdout) {
+            if let Ok(v) = parse_result {
                 if let Some(mb) = v.get("motherboard").and_then(|x| x.as_str()) {
                     hw.motherboard = mb.trim().to_string();
                 }
@@ -5675,6 +5818,9 @@ $out | ConvertTo-Json -Depth 4 -Compress
                             }
                         }
                     }
+                }
+                if let Some(ms) = v.get("is_modern_standby").and_then(|x| x.as_bool()) {
+                    hw.is_modern_standby = ms;
                 }
             }
         }
@@ -6427,6 +6573,7 @@ pub fn trigger_spec_fetch_locked(s: &mut SharedState, state: Arc<Mutex<SharedSta
             usb_peripherals: hw.usb_peripherals,
             cabinet_cooling: hw.cabinet_cooling,
             is_laptop,
+            is_modern_standby: hw.is_modern_standby,
         };
 
         let mut s = state.lock().unwrap();
@@ -10858,6 +11005,55 @@ impl eframe::App for AgentPowerGuardApp {
 
                             ui.add_space(14.0);
 
+                            // Pre-Flight Audio Advisory Banner
+                            if s.live_audio_render_active {
+                                egui::Frame::new()
+                                    .fill(if dark { egui::Color32::from_rgb(60, 45, 10) } else { egui::Color32::from_rgb(254, 243, 199) })
+                                    .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(245, 158, 11)))
+                                    .corner_radius(8.0)
+                                    .inner_margin(egui::Margin::symmetric(12, 8))
+                                    .show(ui, |ui| {
+                                        ui.horizontal(|ui| {
+                                            draw_icon_inline(ui, 18.0, egui::Color32::from_rgb(245, 158, 11), UiIcon::Warning);
+                                            ui.vertical(|ui| {
+                                                ui.label(
+                                                    egui::RichText::new("Pre-Flight Advisory: Active Background Audio Detected")
+                                                        .strong()
+                                                        .size(12.5)
+                                                        .color(if dark { egui::Color32::from_rgb(253, 230, 138) } else { egui::Color32::from_rgb(146, 64, 14) }),
+                                                );
+                                                ui.label(
+                                                    egui::RichText::new(format!(
+                                                        "Audio session active from \"{}\" (Peak: {:.0}%). If running baseline idle tests, pause external media playback first to avoid inconclusive results.",
+                                                        if s.live_audio_render_app.is_empty() { "Media Player" } else { &s.live_audio_render_app },
+                                                        s.live_audio_render_peak * 100.0
+                                                    ))
+                                                    .size(11.0)
+                                                    .color(if dark { egui::Color32::from_rgb(254, 243, 199) } else { egui::Color32::from_rgb(120, 53, 15) }),
+                                                );
+                                            });
+                                        });
+                                    });
+                                ui.add_space(8.0);
+                            }
+
+                            // Hardware Spec Scan Lock Banner
+                            let spec_scan_busy = s.watt_calc.spec_fetch_in_progress;
+                            if spec_scan_busy {
+                                egui::Frame::new()
+                                    .fill(if dark { egui::Color32::from_rgb(30, 41, 59) } else { egui::Color32::from_rgb(241, 245, 249) })
+                                    .corner_radius(6.0)
+                                    .inner_margin(egui::Margin::symmetric(10, 6))
+                                    .show(ui, |ui| {
+                                        ui.label(
+                                            egui::RichText::new("Hardware specification scan is currently in progress... Please wait a few seconds before starting the diagnostic test.")
+                                                .size(11.5)
+                                                .color(if dark { egui::Color32::from_rgb(148, 163, 184) } else { egui::Color32::from_rgb(71, 85, 105) })
+                                        );
+                                    });
+                                ui.add_space(8.0);
+                            }
+
                             // Duration Preset Selection & Start Action Buttons
                             ui.vertical_centered(|ui| {
                                 ui.label(egui::RichText::new("Select Diagnostic Test Duration:").strong().size(13.0));
@@ -10865,51 +11061,57 @@ impl eframe::App for AgentPowerGuardApp {
 
                                 ui.horizontal_wrapped(|ui| {
                                     // 300s Deep Precision Button (Recommended)
-                                    let deep_btn = ui.add_sized(
-                                        [330.0, 48.0],
+                                    let deep_btn = ui.add_enabled(
+                                        !spec_scan_busy,
                                         egui::Button::new(
                                             egui::RichText::new("I Agree — Start 300s Deep Diagnostic (Recommended)")
                                                 .strong()
                                                 .size(13.5)
                                                 .color(egui::Color32::WHITE),
                                         )
-                                        .fill(egui::Color32::from_rgb(14, 165, 233))
+                                        .min_size(egui::vec2(330.0, 48.0))
+                                        .fill(if spec_scan_busy { egui::Color32::from_rgb(100, 116, 139) } else { egui::Color32::from_rgb(14, 165, 233) })
                                         .corner_radius(10.0),
                                     );
                                     if deep_btn.clicked() {
                                         if !s.detected_specs.fetched {
                                             trigger_spec_fetch_locked(&mut s, Arc::clone(&self.state));
+                                            s.set_toast("Hardware scan initiated. Please wait for completion before starting diagnostic.");
+                                        } else {
+                                            s.diag_session.start(now_epoch, crate::diag::DiagDurationMode::Deep300s);
+                                            if s.diag_session.input_shield_enabled {
+                                                crate::diag::InputShield::engage_shield(300);
+                                            }
+                                            s.set_toast("300s Deep Diagnostic started: Mouse & keyboard frozen!");
                                         }
-                                        s.diag_session.start(now_epoch, crate::diag::DiagDurationMode::Deep300s);
-                                        if s.diag_session.input_shield_enabled {
-                                            crate::diag::InputShield::engage_shield(300);
-                                        }
-                                        s.set_toast("300s Deep Diagnostic started: Mouse & keyboard frozen!");
                                     }
 
                                     ui.add_space(10.0);
 
                                     // 120s Rapid Button
-                                    let rapid_btn = ui.add_sized(
-                                        [250.0, 48.0],
+                                    let rapid_btn = ui.add_enabled(
+                                        !spec_scan_busy,
                                         egui::Button::new(
                                             egui::RichText::new("Start 120s Rapid Diagnostic")
                                                 .strong()
                                                 .size(13.5)
                                                 .color(egui::Color32::WHITE),
                                         )
-                                        .fill(egui::Color32::from_rgb(225, 29, 72))
+                                        .min_size(egui::vec2(250.0, 48.0))
+                                        .fill(if spec_scan_busy { egui::Color32::from_rgb(100, 116, 139) } else { egui::Color32::from_rgb(225, 29, 72) })
                                         .corner_radius(10.0),
                                     );
                                     if rapid_btn.clicked() {
                                         if !s.detected_specs.fetched {
                                             trigger_spec_fetch_locked(&mut s, Arc::clone(&self.state));
+                                            s.set_toast("Hardware scan initiated. Please wait for completion before starting diagnostic.");
+                                        } else {
+                                            s.diag_session.start(now_epoch, crate::diag::DiagDurationMode::Rapid120s);
+                                            if s.diag_session.input_shield_enabled {
+                                                crate::diag::InputShield::engage_shield(120);
+                                            }
+                                            s.set_toast("120s Rapid Diagnostic started: Mouse & keyboard frozen!");
                                         }
-                                        s.diag_session.start(now_epoch, crate::diag::DiagDurationMode::Rapid120s);
-                                        if s.diag_session.input_shield_enabled {
-                                            crate::diag::InputShield::engage_shield(120);
-                                        }
-                                        s.set_toast("120s Rapid Diagnostic started: Mouse & keyboard frozen!");
                                     }
                                 });
                             });
@@ -11356,7 +11558,9 @@ impl eframe::App for AgentPowerGuardApp {
                         // Quick Verification Summary Ribbon
                         ui.horizontal_wrapped(|ui| {
                             if s.diag_session.reverse_sleep_attempted {
-                                let (txt, col) = if s.diag_session.reverse_sleep_blocked_by_guard {
+                                let (txt, col) = if s.diag_session.reverse_sleep_inconclusive || s.diag_session.external_audio_polluted_baseline {
+                                    ("Reverse Sleep: INCONCLUSIVE (External Audio Active)", egui::Color32::from_rgb(251, 191, 36))
+                                } else if s.diag_session.reverse_sleep_blocked_by_guard {
                                     ("Reverse Sleep Test: PROTECTED (Guard Blocked Sleep)", egui::Color32::from_rgb(52, 211, 153))
                                 } else {
                                     ("Reverse Sleep Test: FAILED (Sleep Allowed During Workload)", egui::Color32::from_rgb(244, 63, 94))
@@ -11366,8 +11570,10 @@ impl eframe::App for AgentPowerGuardApp {
                             }
 
                             if s.diag_session.revert_pressure_triggered {
-                                let (txt, col) = if s.diag_session.revert_pressure_verified {
-                                    ("Revert Pressure: VERIFIED (Idle Restored <8% CPU)", egui::Color32::from_rgb(56, 189, 248))
+                                let (txt, col) = if s.diag_session.revert_pressure_inconclusive || s.diag_session.external_audio_polluted_baseline {
+                                    ("Revert Pressure: INCONCLUSIVE (External Audio Active)", egui::Color32::from_rgb(251, 191, 36))
+                                } else if s.diag_session.revert_pressure_verified {
+                                    ("Revert Pressure: VERIFIED (Idle Restored Promptly)", egui::Color32::from_rgb(56, 189, 248))
                                 } else {
                                     ("Revert Pressure: UNVERIFIED (Elevated Load Lingered)", egui::Color32::from_rgb(245, 158, 11))
                                 };
@@ -11479,8 +11685,8 @@ impl eframe::App for AgentPowerGuardApp {
                                     // 4. Generate safe compact prefilled issue URL
                                     let safe_url = s.diag_session.build_safe_github_issue_url(
                                         if s.detected_specs.os_name.is_empty() { "Windows 11 / Windows 10" } else { &s.detected_specs.os_name },
-                                        if s.detected_specs.cpu_brand.is_empty() { "Standard CPU" } else { &s.detected_specs.cpu_brand },
-                                        if s.detected_specs.gpu_name.is_empty() { "Standard GPU" } else { &s.detected_specs.gpu_name },
+                                        if s.detected_specs.cpu_brand.is_empty() { "Detected CPU" } else { &s.detected_specs.cpu_brand },
+                                        if s.detected_specs.gpu_name.is_empty() { "Integrated/Dedicated GPU" } else { &s.detected_specs.gpu_name },
                                     );
                                     open_browser_url(&safe_url);
                                 }
