@@ -706,27 +706,28 @@ The **Block History** tab shows what prevented sleep:
 
 ## <img src="assets/icons/activity.svg" width="22" height="22" align="absmiddle" alt="" /> Autonomous Power, Sleep & Media Diagnostic Engine
 
-The **Test & Report** tab runs an autonomous multi-phase diagnostic suite that validates sleep countdowns, tests audio render & microphone capture pipelines, inspects OS `DISPLAY` keep-awake assertions, detects zombie driver locks, and profiles real-time watt drops.
+The **Test & Report** tab runs an autonomous multi-phase diagnostic suite that validates sleep countdowns, tests audio render & microphone capture pipelines, inspects OS `DISPLAY` keep-awake assertions, ramps synthetic workload pressure, executes reverse sleep prevention tests, verifies revert pressure recovery, and profiles real-time watt drops.
 
 ### Diagnostic Duration Presets:
-- **120 Seconds (2 Minutes) Rapid Diagnostic:** Fast verification of idle baseline, primary video stream keep-awake assertions, audio endpoints, and sleep triggers.
-- **300 Seconds (5 Minutes) Deep Precision Diagnostic [Recommended]:** Full deep trace allowing complete idle timer decay, dual-tab media playback, background microphone & audio endpoint isolation, driver assertion deep-dive, and full watt drop curve.
+- **120 Seconds (2 Minutes) Rapid Diagnostic:** Fast verification of idle baseline, synthetic pressure, reverse sleep test, primary video stream keep-awake assertions, audio endpoints, and sleep triggers.
+- **300 Seconds (5 Minutes) Deep Precision Diagnostic [Recommended]:** Complete precision trace: idle baseline calibration, autonomous coding agent compilation & disk pressure, reverse sleep test, revert pressure recovery, dual-tab media playback, background microphone & audio endpoint isolation, driver assertion deep-dive, and full watt drop curve.
 
 ### Automated Test Phases:
 1. **Pre-Flight Consent & Arming:** Requires hands off mouse and keyboard to observe natural system idle behavior. Guaranteed safe: does NOT physically black out screens or suspend your PC; it captures real system-level trigger events (`display_off_simulated` and `sleep_simulated`) and queries power assertions.
 2. **Baseline Idle & Calibration:** Verifies 0 human input, monitors baseline CPU/GPU/Disk activity, and tracks sleep countdown progression.
-3. **Primary Media Stream Playback:** Automatically launches a 4K test video in your browser. Verifies whether CoreAudio/WASAPI render hooks and OS `DISPLAY` keep-awake requests activate. (Diagnoses why laptops sleep while watching movies!).
-4. **Secondary Background Media Stream:** Automatically opens a secondary background media stream (lofi radio) to test multi-stream audio mixing and background keep-awake retention.
-5. **Audio/Mic Release & Zombie Driver Check:** Tests audio pause/close. Verifies whether speakers and active microphone capture streams release cleanly without lingering zombie sleep locks.
-6. **Hardware Blocker & Dynamic Watt Profiling:** Isolates physical SSD/HDD throughput from browser cache IPC noise, queries `powercfg /requests`, and calculates live active watts, simulated display-off watt drops, and S3 standby sleep watt drops.
-7. **Synthesis & Root Cause Diagnosis:** Synthesizes sensor telemetry, classifies findings (`[CRITICAL]`, `[WARNING]`, `[OK]`), and generates an actionable Markdown report.
+3. **Synthetic Workload Pressure & Reverse Sleep Test:** Ramps controlled in-process synthetic pressure simulating an Autonomous AI Coding Agent (AST compilation bursts and scratch disk cache writes) and video rendering (Premiere Pro vector compute). Mid-phase, simulates an OS sleep request / zero-countdown condition and verifies that SmartGuard actively intercepts and refuses sleep, guaranteeing running builds and renders are never killed!
+4. **Revert Pressure & Recovery Check:** Terminates synthetic pressure and verifies that CPU/GPU drop back to baseline (<8%) and that the watchdog countdown resumes cleanly without orphaned threads or zombie locks.
+5. **Primary Media Stream Playback:** Automatically launches a 4K test video in your browser. Verifies whether CoreAudio/WASAPI render hooks and OS `DISPLAY` keep-awake requests activate. (Diagnoses why laptops sleep while watching movies!).
+6. **Secondary Background Media Stream:** Automatically opens a secondary background media stream (lofi radio) to test multi-stream audio mixing and background keep-awake retention.
+7. **Audio/Mic Release & Zombie Driver Check:** Tests audio pause/close. Verifies whether speakers and active microphone capture streams release cleanly without lingering zombie sleep locks.
+8. **Human Behavior vs Autonomous Agent Analysis & Synthesis:** Verifies that SmartGuard protects background agents purely via kernel process, CPU, and disk metrics without requiring artificial mouse jittering. Synthesizes sensor telemetry, classifies findings (`[CRITICAL]`, `[WARNING]`, `[OK]`), and generates an actionable Markdown report.
 
 ### Why Laptops Sleep While Watching Movies:
 Many web browsers and media players fail to call Windows `SetThreadExecutionState(ES_DISPLAY_REQUIRED)` while streaming video passively. Because you are watching without touching the mouse or keyboard, Windows assumes you walked away and abruptly puts your laptop to sleep mid-movie! **Agent Power Guard's Smart Guard** monitors active CoreAudio/WASAPI render sessions and SMTC tokens directly at the kernel level, ensuring media playback keeps your screen and machine awake even when players fail to assert power requests.
 
 ### Safe 1-Click GitHub Issue Reporting (Zero URL Length Limits):
 When the test completes, click **Report Issue on GitHub**:
-- The complete, unabridged Markdown diagnostic report (with detailed hardware profile, audio/mic devices, watt breakdown, and second-by-second timeline) is **automatically copied to your OS clipboard** and saved to disk (`agent-power-guard-diagnostic.md`).
+- The complete, unabridged Markdown diagnostic report (with detailed hardware profile, audio/mic devices, watt breakdown, reverse testing results, and second-by-second timeline) is **automatically copied to your OS clipboard** and saved to disk (`agent-power-guard-diagnostic.md`).
 - A safe, pre-formatted issue creation template opens in your browser (**no URL length errors, no PATs, and no API keys required**).
 - Simply press **Ctrl+V** (or **Cmd+V**) into the issue body to paste the complete diagnostic data! You can also copy the report directly via **Copy Diagnostic Report** or save it with **Save Report to File**.
 

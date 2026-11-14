@@ -10,7 +10,7 @@ if (!(Test-Path $candle) -or !(Test-Path $light)) {
 }
 
 $version = (Get-Content Cargo.toml | Select-String '^version = "(.*)"').Matches.Groups[1].Value
-if (!$version) { $version = "1.3.1" }
+if (!$version) { $version = "1.3.2" }
 
 $exePath = if (Test-Path "target\x86_64-pc-windows-msvc\release\agent-power-guard.exe") {
     (Resolve-Path "target\x86_64-pc-windows-msvc\release\agent-power-guard.exe").Path

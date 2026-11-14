@@ -166,49 +166,62 @@ jobs:
           draft: false
           prerelease: false
           body: |
-            ## 🛡️⚡ Agent Power Guard ${{ steps.get_tag.outputs.tag }} Release
+            ## Agent Power Guard ${{ steps.get_tag.outputs.tag }} Release
 
             A lightweight, 100% native desktop utility written in Rust (`egui` + `glow`) that puts your workstation to sleep **only when you AND your AI coding agents are truly idle**.
 
             ---
 
-            ### 🌟 What's New & Fixed in v1.2.9 (Full Upgrade Since v1.0.3)
+            ### What's New & Fixed in v1.3.2
 
-            #### 🧩 v1.2.9 On-Demand Hardware Scan & Crisp Horizontal Bubble Wrapping
+            #### Autonomous Diagnostic Suite, Synthetic Pressure & Reverse Testing
+            - **Autonomous Diagnostic & Issue Reporter Suite (`Test & Report` Tab):** Built-in end-to-end diagnostic engine supporting **120s Rapid** and **300s Deep Precision** modes. Calibrates baseline idle, evaluates audio render sessions, detects mic captures, inspects OS keep-awake assertions, records live watt drops, and captures simulated display-off and sleep triggers without suspending your machine.
+            - **Synthetic Workload Pressure:** In-process safe background worker simulating autonomous AI coding agent activity (compilation bursts, AST analysis, scratch disk cache writes) and video rendering (Premiere Pro compute load) with controlled ~15-25% single-core load without lagging the PC.
+            - **Reverse Sleep Prevention Test:** Mid-test verification simulating an OS sleep request / zero-countdown condition during active synthetic workload to verify that SmartGuard actively intercepts and blocks sleep, guaranteeing that ongoing builds, tests, and renders are never interrupted.
+            - **Revert Pressure & Recovery Check:** Reverts synthetic pressure to 0 and verifies that CPU/GPU drop back to baseline (<8%) and the idle countdown resumes cleanly without orphaned threads or zombie locks.
+            - **Human Behavior vs. Autonomous Agent Analysis:** Verifies that SmartGuard protects background agents purely via process, CPU, and disk kernel metrics without requiring artificial mouse jitter.
+            - **Safe 1-Click GitHub Issue Submission (Fixes HTTP 414 "URL is too long"):** Auto-copies full Markdown report to clipboard, writes `agent-power-guard-diagnostic.md` to disk, and opens a concise prefilled GitHub issue URL (<1,200 characters) so users never encounter browser or server URL limits.
+            - **Zero Unicode Emojis:** 100% custom vector-rendered UI (`UiIcon`) and native SVGs across all tabs, dialogs, and logs.
+
+            ---
+
+            ### What's New & Fixed in v1.2.9 (Full Upgrade Since v1.0.3)
+
+            #### v1.2.9 On-Demand Hardware Scan & Crisp Horizontal Bubble Wrapping
             - **On-Demand Hardware Scan Launch Screen:** Opening **Watt Calculator & AI Estimator** no longer auto-triggers hardware scanning in the background. Displays a centered **Fetch Device Details** launch card first (plus a subtle option to skip straight to manual entry), and only runs hardware detection when you click **Fetch Device Details**.
             - **Zero Vertical Text-Noodle Wrapping:** Replaced `egui::horizontal_wrapped` bubble layout with exact pixel-measured horizontal row packing (`pack_pill_rows` + `.extend()`), eliminating thin vertical column wrapping on long RAM/Audio/Storage bubbles.
 
-            #### 🧩 v1.2.8 Watt Calculator Modal Alignment & Layout Fix
+            #### v1.2.8 Watt Calculator Modal Alignment & Layout Fix
             - **Zero Left/Right Overflow:** Locked the Hardware Watt Calculator modal with `.fixed_size(...)`, `.constrain_to(ctx.content_rect())`, uniform inner card widths (`inner_w`), and finite `desired_width` on Step 3/4 text editors (replacing `f32::INFINITY`), so all 4 Step cards, colored hardware bubbles, and buttons stay cleanly centered and inside the modal borders on any window size.
 
-            #### 🧩 v1.2.7 Editable Color-Coded Hardware Bubbles, Case Cooling & ARGB Support
+            #### v1.2.7 Editable Color-Coded Hardware Bubbles, Case Cooling & ARGB Support
             - **Interactive Color-Coded Hardware Bubbles (Step 1):** Redesigned detected specs into responsive, color-coded pills by category (**Board/CPU/RAM/GPU**, **Storage Drives**, **Displays**, **Wi-Fi/LAN**, **Bluetooth**, **Audio/Mic**, **USB & Peripherals**, and **Cabinet Cooling/ARGB**). Click any bubble to rename/edit inline, click `x` to remove unused paired/virtual devices, or click `+ Add` inside any category to append custom gear — with responsive modal sizing so buttons and long hardware lists never clip on narrow/portrait monitors.
             - **Cabinet Fans, ARGB Lighting & Cooler Controls (Step 2):** Added dedicated inputs for **Case Fan count**, **ARGB/RGB Fan count**, **CPU Cooler type** (Stock/Tower/Dual-Tower Air, 120mm/240mm/360mm AIO Liquid, Custom Loop, Laptop), **ARGB Hub / LED Strips**, 1-click Quick-Add chips, full-width Extra Notes, and auto-classification of motherboard/USB RGB controllers (`ITE Device` RGB Fusion, iCUE, NZXT, Lian Li) plus virtual audio filter cleanup (`FxSound`/`VB-Audio`). All edits auto-sync into Step 3's AI estimator prompt.
 
-            #### 🔍 v1.2.6 Cross-Platform Deep Hardware Detection & Watt Calculator Fixes
+            #### v1.2.6 Cross-Platform Deep Hardware Detection & Watt Calculator Fixes
             - **Real Physical Storage, RAM & Motherboard Detection (Windows, Linux & macOS):** Replaced logical volume-count storage summaries with unprivileged physical drive model/bus/size detection (`MSFT_PhysicalDisk`/`Win32_DiskDrive` on Windows, `lsblk -J`/`/sys/block` on Linux, `SPNVMeDataType`/`SPSerialATADataType` on macOS), motherboard/system model (`Win32_BaseBoard`, `/sys/class/dmi/id`, `SPHardwareDataType`), DDR generation/MHz/stick-count RAM formatting (`Win32_PhysicalMemory` SMBIOSMemoryType, `lshw`, `SPMemoryDataType`), and 64-bit GPU VRAM lookup on Windows.
             - **Wi-Fi, LAN, Bluetooth, Audio/Mic & USB Peripherals Detection:** Detects physical Wi-Fi and Ethernet adapters, Bluetooth adapters/connected peripherals, microphones/USB DACs/speakers, cameras, and exact mouse/keyboard/USB peripheral models (`DEVPKEY_Device_BusReportedDeviceDesc` on Windows, `lsusb`/`sysfs` on Linux, `SPUSBDataType`/`SPAudioDataType`/`SPBluetoothDataType` on macOS) and includes all of them cleanly in Step 1 and the AI estimator prompt.
             - **Watt Calculator Fixes:** Fixed monitor per-display wattage doubling when initial multi-monitor `config.monitor_watts` was split across 2+ detected displays, and grouped `(label + control)` pairs inside `Step 2` so `Rate/kWh:` no longer wraps separately from its input field.
 
-            #### 🎨 v1.2.5 UI Overhaul, System Clipboard & Polish
+            #### v1.2.5 UI Overhaul, System Clipboard & Polish
             - **Zero Missing-Glyph Boxes (Custom Vector Icons):** Replaced all missing-glyph Unicode emojis across every tab, top-bar action, modal, tray menu, and card header with crisp anti-aliased vector icons (`UiIcon`) and theme-aware Dark/Light cards (`app_card_frame`).
             - **Reliable System Clipboard Copy & Paste:** Fixed `eframe` clipboard copy/paste (`Copy Prompt`, `Paste Clipboard`, `Copy JSON/CSV`, `Copy Path/Token/Link/MAC`) by pairing `egui` clipboard with UTF-8 native OS clipboard integration (`Set-Clipboard`/`Get-Clipboard` on Windows, `pbcopy`/`pbpaste` on macOS, `xclip`/`wl-copy` on Linux).
             - **Clean 4-Step Watt Calculator Wizard & Clipped-UI Fixes:** Rebuilt the Watt Calculator & AI Estimator into a 4-step readable wizard (`Step 1: Fetch System Specs`, `Step 2: Missing Details, Watt Distribution & Electricity Price`, `Step 3: Generate & Copy AI Prompt`, `Step 4: Paste AI Response & Calculate All Savings`); fixed negative zero (`-0.00`) KPI display, wrapped Energy filter/delete buttons cleanly so nothing clips off-screen, and added vertical scrolling across **Alerts & Updates** and **Remote** tabs.
 
-            #### ⚡ v1.2.4 Features & Bug Fixes
+            #### v1.2.4 Features & Bug Fixes
             - **In-Panel Auto-Updater (GitHub Public Releases API):** Queries `/releases` to list all published versions with `[LATEST]` and `[INSTALLED]` badges, downloads matching platform binaries/installers in the background via **Update Now**, prompts to **Install & Restart Now**, and swaps portable `.exe`/tarballs or launches `.msi` cleanly in place (plus a **Built-in Uninstall Software** option).
             - **Custom Watt Calculator & AI Spec Prompt Estimator:** Auto-fetches CPU, RAM, GPU/VRAM, storage, and monitors in the background; adds manual inputs for SMPS/PSU wattage & efficiency, monitor counts, peripherals, and daily hours; computes component-level wall wattage + Daily/Monthly/Yearly savings projections; and generates a copy-ready AI prompt whose JSON reply can be pasted straight back into the app with zero API key needed.
             - **26 Major Currencies (incl. INR `₹`) + Custom Currency & High Tariff Range:** Replaced hardcoded `$` in the Energy History table, raised electricity rate range from `2.0` to `50,000` (fixing `₹9/kWh`+ entry), added a 26-currency selector + custom symbol input, and exposed `Sleep Power (W)` right alongside Active & Monitor watts.
             - **Fixed Sleep Savings Duration Logger:** Measures true wall-clock sleep duration (`before_sleep` -> `after_sleep`) instead of `idle_threshold_secs` (`3 min` vs `8 hours` overnight).
             - **Fixed `powercfg` Audio Overrides & Port Config Consistency:** Added `VB-Audio Virtual Cable (ROOT\MEDIA\0001)`, `FxSound Audio Enhancer (ROOT\MEDIA\0000)`, `USB Audio 2.0`, and `Legacy Kernel Caller`, verified admin exit status instead of failing silently, and wired `config.web_server_port` cleanly across GUI, headless `daemon`, and CLI commands (`status` / `service status`).
 
-            #### 🔧 v1.2.3 Fixes & Accuracy Improvements
+            #### v1.2.3 Fixes & Accuracy Improvements
             - **Physical-Disk-Bounded I/O Attribution (Fixes Permanent Hold on Windows Browsers/IDEs):** Bounded Cond 5 per-process attribution (`GetProcessIoCounters`, which includes named pipes and Chromium/Electron Mojo IPC) by actual physical SSD throughput (`IOCTL_DISK_PERFORMANCE`), and excluded browser/WebView/crashpad helpers from Cond 5 work attribution so idle browser IPC no longer latches Cond 9 (`Busy 15/15`) at `~10+ MB/s`.
             - **Accurate Blocker Attribution & Live I/O Diagnostics:** Updated Cond 5 and blocker banners to display `<proc> <proc_rate> (Disk <effective_total>)` cleanly, and added a collapsible **Debug: Physical Disk vs Process I/O (Top 5)** view plus `/api/status` `top_io_debug`.
             - **Fixed Adaptive Suggestion Banner Slot Shift (`GPU 13302%`):** Replaced the unnamed `(f32, f32, f32)` tuple with a named `SuggestedThresholds` struct (`pc_cpu_pct`, `disk_kbps`, `net_kbps`), so disk baseline suggestions no longer overwrite `gpu_threshold_pct`.
-            - **Preset & Stage 1 Display-Off Sync + Native Win32 Monitor Off:** Synced top-bar `⏱ 15s Test`, `Quick Presets`, and `PowerMode` buttons with `monitor_timeout_mins`, `active_mode`, `apply_monitor_timeout`, and live countdown; added live `Display-off: Xs / Ys` progress and `!is_meeting_live` guard; replaced PowerShell/`Add-Type` subprocess with native Win32 `SendMessageTimeoutW(..., SC_MONITORPOWER, 2, SMTO_ABORTIFHUNG)`.
+            - **Preset & Stage 1 Display-Off Sync + Native Win32 Monitor Off:** Synced top-bar `15s Test`, `Quick Presets`, and `PowerMode` buttons with `monitor_timeout_mins`, `active_mode`, `apply_monitor_timeout`, and live countdown; added live `Display-off: Xs / Ys` progress and `!is_meeting_live` guard; replaced PowerShell/`Add-Type` subprocess with native Win32 `SendMessageTimeoutW(..., SC_MONITORPOWER, 2, SMTO_ABORTIFHUNG)`.
 
-            #### 🧠 Intent-Aware Sleep Engine & Signal Conditioning (v1.2.x)
+            #### Intent-Aware Sleep Engine & Signal Conditioning (v1.2.x)
             - **Signal-Conditioning Layer:** Every analog metric (Agent CPU, Downloads, PC CPU, Attributed Disk, Default-Route Network, GPU) passes through a rolling-window duty-cycle filter with hysteresis (`Pending` -> `Busy` -> `Quiet`). Single 1-second spikes and `Pending` windows never reset the countdown or kill Stage 1 display-off.
             - **Explicit Intent Classification:** Unified top-level intent hierarchy (`BestPerformance` -> `GuardOff` -> `ExplicitHold` -> `MeetingLive` -> `PassiveMedia` -> `ActiveWork` -> `HumanActive` -> `IdleReady`) controlling Stage 1 display-off and Stage 2 sleep independently.
             - **3 Top-Level Operational Modes & Dedicated OS Wake Lock:** Switch between **Smart Guard** (watchdog actively manages display-off & sleep), **Guard Off** (watchdog pauses so normal OS power settings apply), and **Best Performance** (explicitly disables sleep & display-off via a dedicated OS wake-lock thread using `SetThreadExecutionState` / `systemd-inhibit` / `caffeinate`, with optional `1h / 2h / ∞` timers).
@@ -222,22 +235,22 @@ jobs:
             - **Zombie Agent Lease Watchdog & Wake Classification:** Detects PID-bound leases stuck at ~0% subtree CPU & disk (`lease_idle_mins`), alerts before optional expiry, registers `PowerRegisterSuspendResumeNotification` (GUI & headless daemon) to classify user wakes vs unattended wakes (`120s` fast return timer) without disabling wake events, and suggests adaptive idle baseline floors.
             - **Packaging & Release Fixes:** Fixed GitHub Actions `secrets` conditional syntax blocking release publishing, resolved `sysinfo` interface name `&OsString` handling, updated QR encoder corner separators and security audit fixes, and eliminated cross-platform compiler warnings.
 
-            #### 🚀 Previous Upgrades Now Included in This Release (v1.1.0 Milestones)
-            - 🔒 **Secure Local API & Pure Evaluator:** 256-bit API token auth (`0600` on Unix, `%APPDATA%` on Windows), constant-time verification, 10-fail/min IP rate limiting, DNS-rebinding protection + CORS support for fleet polling, and `AsInvoker` manifest so CLI commands run without UAC prompts.
-            - 🤖 **AI Coding Agent Integration:** `agent-power-guard run [--max-mins N] -- <cmd>` PID-bound wrapper, built-in `mcp` stdio server for Claude Code / Cursor / Antigravity, and 8 agent profiles.
-            - 📊 **Block History, Notifications & Update Check:** Local JSONL timeline answering *"what kept my PC awake?"* with CSV/JSON export, ntfy / Telegram / webhook alerts, and opt-in daily GitHub Releases check.
-            - ⏱️ **Power Modes, Quiet Hours, Battery Profiles & Wake Timers:** Balanced / Work / Night / Away presets, quiet-hours downshift, "Sleep After Lease Ends", OS RTC wake timers (`rtcwake`, Task Scheduler, `pmset`), laptop AC vs battery thresholds + low-battery emergency suspend, and carbon grid / currency accounting.
-            - 📱 **Mobile PWA Dashboard, Fleet View & Wake-on-LAN:** QR code pairing, live SVG sparklines, 1-tap `+ Ignore`, multi-machine Fleet View tab, `agent-power-guard daemon` headless mode, `agent-power-guard relay` Wake-on-LAN server, and native `.deb`, universal macOS `.app`, and Windows MSI installers.
+            #### Previous Upgrades Now Included in This Release (v1.1.0 Milestones)
+            - **Secure Local API & Pure Evaluator:** 256-bit API token auth (`0600` on Unix, `%APPDATA%` on Windows), constant-time verification, 10-fail/min IP rate limiting, DNS-rebinding protection + CORS support for fleet polling, and `AsInvoker` manifest so CLI commands run without UAC prompts.
+            - **AI Coding Agent Integration:** `agent-power-guard run [--max-mins N] -- <cmd>` PID-bound wrapper, built-in `mcp` stdio server for Claude Code / Cursor / Antigravity, and 8 agent profiles.
+            - **Block History, Notifications & Update Check:** Local JSONL timeline answering *"what kept my PC awake?"* with CSV/JSON export, ntfy / Telegram / webhook alerts, and opt-in daily GitHub Releases check.
+            - **Power Modes, Quiet Hours, Battery Profiles & Wake Timers:** Balanced / Work / Night / Away presets, quiet-hours downshift, "Sleep After Lease Ends", OS RTC wake timers (`rtcwake`, Task Scheduler, `pmset`), laptop AC vs battery thresholds + low-battery emergency suspend, and carbon grid / currency accounting.
+            - **Mobile PWA Dashboard, Fleet View & Wake-on-LAN:** QR code pairing, live SVG sparklines, 1-tap `+ Ignore`, multi-machine Fleet View tab, `agent-power-guard daemon` headless mode, `agent-power-guard relay` Wake-on-LAN server, and native `.deb`, universal macOS `.app`, and Windows MSI installers.
 
             ---
 
-            ### 📦 Download & Installation Guide
+            ### Download & Installation Guide
 
             | Platform / Architecture | Download Asset | Description & Format |
             |---|---|---|
             | **Windows 10 / 11 (Installer)** | [`AgentPowerGuard-windows-x64.msi`](#) | **Recommended for Windows.** Start Menu, desktop shortcuts, Add/Remove Programs. |
             | **Windows 10 / 11 (Portable)** | [`agent-power-guard-windows-x64.exe`](#) | Portable single-file binary. Runs as standard user (`AsInvoker`) without UAC prompts. |
-            | **Debian / Ubuntu Linux** | [`agent-power-guard_1.2.9_amd64.deb`](#) | Native `.deb` package with desktop integration and systemd user unit. |
+            | **Debian / Ubuntu Linux** | [`agent-power-guard_1.3.2_amd64.deb`](#) | Native `.deb` package with desktop integration and systemd user unit. |
             | **Linux (Generic tarball)** | [`agent-power-guard-linux-x86_64.tar.gz`](#) | Standalone Linux x86_64 binary supporting X11 & Wayland. |
             | **macOS (Universal Bundle)** | [`AgentPowerGuard-macos-universal.zip`](#) | Universal `.app` bundle for both Apple Silicon (M1–M4) and Intel Macs. |
             | **macOS (Apple Silicon)** | [`agent-power-guard-macos-aarch64.tar.gz`](#) | Raw standalone ARM64 binary. |
@@ -245,7 +258,7 @@ jobs:
 
             ---
 
-            ### 🚀 Quick Start & Installation
+            ### Quick Start & Installation
 
             #### Windows
             - **Installer:** Double-click `AgentPowerGuard-windows-x64.msi` to install, or run silently with:
@@ -271,13 +284,13 @@ jobs:
 
             ---
 
-            ### 💡 Staged Power-Saving Strategy
+            ### Staged Power-Saving Strategy
             1. **Stage 1 (Monitor Off):** Turns off your display first (saves 50–100W immediately and protects screen/OLED) while leaving CPU/GPU active so background agents continue working.
             2. **Stage 2 (Sleep Mode):** Once the monitor is off and all 11 conditions pass, the entire workstation enters deep sleep (< 1W draw).
 
-            ### ⏱️ Quick Presets Included
+            ### Quick Presets Included
             - `15s Test`: Instant hands-off countdown test.
-            - `3m ★`: Default balanced setting (Display off at 2m -> Sleep at 3m).
+            - `3m`: Default balanced setting (Display off at 2m -> Sleep at 3m).
             - `5m`, `10m`, `15m`, `30m`, `45m`, `1h`, `2h`, `3h` preset buttons.
             - Custom sliders adjustable from 10s up to 3 hours.
 

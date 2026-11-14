@@ -3859,6 +3859,7 @@ pub fn run_watchdog_loop(state: Arc<Mutex<SharedState>>, egui_ctx: Option<egui::
     let mut cached_default_nics = probes::query_default_route_nic_names();
     let mut last_nic_refresh = Instant::now();
     let mut last_best_perf_notif = 0u64;
+    let mut workload_mgr = crate::diag::SyntheticWorkloadManager::new();
 
     loop {
         let loop_start = Instant::now();
@@ -3912,7 +3913,10 @@ pub fn run_watchdog_loop(state: Arc<Mutex<SharedState>>, egui_ctx: Option<egui::
 
         let trigger_sleep;
         let mut trigger_monitor_off = false;
-        let mut launch_diag_media = crate::diag::DiagLaunchMedia::None;
+        let mut diag_action = crate::diag::DiagTickAction {
+            media: crate::diag::DiagLaunchMedia::None,
+            workload: crate::diag::DiagWorkloadCommand::None,
+        };
         let is_diag_active;
         let hold_os_wake_lock;
         let mut wake_sleep_stabilize = false;
@@ -4518,7 +4522,7 @@ pub fn run_watchdog_loop(state: Arc<Mutex<SharedState>>, egui_ctx: Option<egui::
                 let mic_active = audio_reading.capture_peak > 0.01;
                 let intent_display = s.intent.display_label();
 
-                launch_diag_media = s.diag_session.tick_1s(
+                diag_action = s.diag_session.tick_1s(
                     idle_secs,
                     Some(decision.countdown_secs),
                     &intent_display,
@@ -4553,7 +4557,7 @@ pub fn run_watchdog_loop(state: Arc<Mutex<SharedState>>, egui_ctx: Option<egui::
             }
         } // unlock state
 
-        match launch_diag_media {
+        match diag_action.media {
             crate::diag::DiagLaunchMedia::Primary => {
                 open_browser_url("https://www.youtube.com/watch?v=aqz-KE-bpKQ");
             }
@@ -4561,6 +4565,21 @@ pub fn run_watchdog_loop(state: Arc<Mutex<SharedState>>, egui_ctx: Option<egui::
                 open_browser_url("https://www.youtube.com/watch?v=jfKfPfyJRdk");
             }
             crate::diag::DiagLaunchMedia::None => {}
+        }
+
+        match diag_action.workload {
+            crate::diag::DiagWorkloadCommand::StartPressure(mode) => {
+                workload_mgr.start(mode);
+            }
+            crate::diag::DiagWorkloadCommand::RevertPressure => {
+                workload_mgr.stop();
+            }
+            crate::diag::DiagWorkloadCommand::None => {}
+        }
+
+        // Safety guarantee: stop synthetic workload if diagnostic is not active
+        if !is_diag_active && workload_mgr.is_active() {
+            workload_mgr.stop();
         }
 
         // Sync OS wake-lock thread (Best Performance mode)
@@ -10717,11 +10736,13 @@ impl eframe::App for AgentPowerGuardApp {
                             // Test Scope Steps
                             let phases_info = [
                                 ("1. Baseline Idle & Calibration", "Validates user input is 0, monitors baseline CPU/GPU/Disk, and checks sleep countdown continuity."),
-                                ("2. Primary Media Stream Playback", "Automatically triggers a 4K test video in your browser. Verifies whether CoreAudio/WASAPI render hooks and OS DISPLAY requests activate. (Diagnoses why laptops sleep while watching movies!)."),
-                                ("3. Secondary Background Media Stream", "Launches a secondary background tab (lofi stream) to verify multi-stream audio mixing and background keep-awake behavior."),
-                                ("4. Audio/Mic Release & Zombie Driver Check", "Evaluates audio stop/close. Verifies whether speakers and microphones release sound pipelines without zombie locks."),
-                                ("5. Hardware Blocker, Disk & Watt Profiling", "Isolates physical disk writes, evaluates driver assertions, and measures live active vs standby watt drops."),
-                                ("6. Synthesis & Safe GitHub Issue Generation", "Compiles full Markdown report with hardware specs, auto-copies to clipboard, and builds safe 1-click GitHub issue."),
+                                ("2. Synthetic Workload Pressure & Reverse Sleep Test", "Ramps controlled synthetic pressure (Autonomous Coding Agent AST compile bursts & scratch disk writes, Premiere Pro render stress). Executes Reverse Sleep Prevention Test to verify SmartGuard blocks sleep and protects active work!"),
+                                ("3. Revert Pressure & Recovery Check", "Reverts synthetic pressure to 0. Verifies CPU/GPU drops back to baseline (<8%) and confirms sleep countdown resumes without zombie driver locks."),
+                                ("4. Primary Media Stream Playback", "Automatically triggers a 4K test video in your browser. Verifies whether CoreAudio/WASAPI render hooks and OS DISPLAY requests activate. (Diagnoses why laptops sleep while watching movies!)."),
+                                ("5. Secondary Background Media Stream", "Launches a secondary background tab (lofi stream) to verify multi-stream audio mixing and background keep-awake behavior."),
+                                ("6. Audio/Mic Release & Zombie Driver Check", "Evaluates audio stop/close. Verifies whether speakers and microphones release sound pipelines without zombie locks."),
+                                ("7. Human Behavior vs Autonomous Agent Analysis", "Verifies autonomous coding agent background persistence without artificial mouse jitter."),
+                                ("8. Synthesis, Watt Profiling & Safe GitHub Issue Generation", "Compiles full Markdown report with hardware specs, auto-copies to clipboard, and builds safe 1-click GitHub issue."),
                             ];
 
                             for (title, desc) in phases_info {
@@ -10866,7 +10887,7 @@ impl eframe::App for AgentPowerGuardApp {
                         ui.label(egui::RichText::new("Live Telemetry, System Triggers & Watt Meter:").strong().size(12.5));
                         ui.add_space(4.0);
 
-                        let card_w = ((ui.available_width() - 32.0) / 5.0).max(120.0);
+                        let card_w = ((ui.available_width() - 40.0) / 6.0).max(110.0);
 
                         let last_smp = s.diag_session.samples.last();
                         let live_idle = last_smp.map(|sm| sm.idle_secs).unwrap_or(s.live_idle_secs);
@@ -10954,15 +10975,43 @@ impl eframe::App for AgentPowerGuardApp {
                                     let mic_pct = (live_mic_peak * 100.0).round();
                                     ui.label(egui::RichText::new(format!("Mic Peak: {:.0}%", mic_pct)).weak().size(10.5));
                                 });
+
+                            // Card 6: Synthetic Workload & Reverse Sleep Prevention
+                            egui::Frame::new()
+                                .fill(if dark { egui::Color32::from_rgb(20, 27, 38) } else { egui::Color32::from_rgb(241, 245, 249) })
+                                .corner_radius(8.0)
+                                .inner_margin(egui::Margin::symmetric(10, 8))
+                                .show(ui, |ui| {
+                                    ui.set_width(card_w);
+                                    ui.label(egui::RichText::new("Workload & Guard").weak().size(11.0));
+                                    let (wk_txt, wk_col) = if s.diag_session.workload_active {
+                                        ("Pressure: ON", egui::Color32::from_rgb(244, 63, 94))
+                                    } else if s.diag_session.revert_pressure_verified {
+                                        ("Revert: Pass", egui::Color32::from_rgb(52, 211, 153))
+                                    } else {
+                                        ("Idle / Standby", egui::Color32::from_rgb(148, 163, 184))
+                                    };
+                                    ui.label(egui::RichText::new(wk_txt).strong().size(15.0).color(wk_col));
+                                    let rev_txt = if s.diag_session.reverse_sleep_attempted {
+                                        if s.diag_session.reverse_sleep_blocked_by_guard {
+                                            "Reverse: Protected"
+                                        } else {
+                                            "Reverse: Failed"
+                                        }
+                                    } else {
+                                        "Reverse: Pending"
+                                    };
+                                    ui.label(egui::RichText::new(rev_txt).weak().size(10.5));
+                                });
                         });
 
                         ui.add_space(8.0);
 
-                        // Simulated System Triggers Status Row
-                        ui.horizontal(|ui| {
+                        // Simulated System Triggers & Reverse Testing Status Row
+                        ui.horizontal_wrapped(|ui| {
                             let disp_msg = match s.diag_session.display_off_simulated_at {
-                                Some(at) => format!("Display-Off Status: [TRIGGERED at {}s, Saved -{:.1}W]", at, s.diag_session.display_off_watt_drop),
-                                None => "Display-Off Status: [Evaluating Countdown...]".to_string(),
+                                Some(at) => format!("Display-Off: [TRIGGERED at {}s, Saved -{:.1}W]", at, s.diag_session.display_off_watt_drop),
+                                None => "Display-Off: [Evaluating Countdown...]".to_string(),
                             };
                             let disp_color = if s.diag_session.display_off_simulated_at.is_some() {
                                 egui::Color32::from_rgb(52, 211, 153)
@@ -10971,11 +11020,11 @@ impl eframe::App for AgentPowerGuardApp {
                             };
                             ui.label(egui::RichText::new(disp_msg).strong().color(disp_color).size(12.0));
 
-                            ui.add_space(16.0);
+                            ui.add_space(14.0);
 
                             let sleep_msg = match s.diag_session.sleep_simulated_at {
-                                Some(at) => format!("Standby Sleep Status: [TRIGGERED at {}s, Saved -{:.1}W]", at, s.diag_session.sleep_watt_drop),
-                                None => "Standby Sleep Status: [Evaluating Countdown...]".to_string(),
+                                Some(at) => format!("Standby Sleep: [TRIGGERED at {}s, Saved -{:.1}W]", at, s.diag_session.sleep_watt_drop),
+                                None => "Standby Sleep: [Evaluating Countdown...]".to_string(),
                             };
                             let sleep_color = if s.diag_session.sleep_simulated_at.is_some() {
                                 egui::Color32::from_rgb(56, 189, 248)
@@ -10983,6 +11032,46 @@ impl eframe::App for AgentPowerGuardApp {
                                 egui::Color32::from_rgb(148, 163, 184)
                             };
                             ui.label(egui::RichText::new(sleep_msg).strong().color(sleep_color).size(12.0));
+
+                            ui.add_space(14.0);
+
+                            let rev_msg = if s.diag_session.reverse_sleep_attempted {
+                                if s.diag_session.reverse_sleep_blocked_by_guard {
+                                    "Reverse Sleep Test: [GUARD BLOCKED SLEEP - PASS]".to_string()
+                                } else {
+                                    "Reverse Sleep Test: [FAILED - SLEEP NOT BLOCKED]".to_string()
+                                }
+                            } else {
+                                "Reverse Sleep Test: [Standing By]".to_string()
+                            };
+                            let rev_color = if s.diag_session.reverse_sleep_attempted {
+                                if s.diag_session.reverse_sleep_blocked_by_guard {
+                                    egui::Color32::from_rgb(52, 211, 153)
+                                } else {
+                                    egui::Color32::from_rgb(244, 63, 94)
+                                }
+                            } else {
+                                egui::Color32::from_rgb(148, 163, 184)
+                            };
+                            ui.label(egui::RichText::new(rev_msg).strong().color(rev_color).size(12.0));
+
+                            ui.add_space(14.0);
+
+                            let rev_rec_msg = if s.diag_session.revert_pressure_triggered {
+                                if s.diag_session.revert_pressure_verified {
+                                    "Revert Recovery: [VERIFIED - BASELINE <8%]".to_string()
+                                } else {
+                                    "Revert Recovery: [MONITORING RESUME...]".to_string()
+                                }
+                            } else {
+                                "Revert Recovery: [Standing By]".to_string()
+                            };
+                            let rev_rec_color = if s.diag_session.revert_pressure_verified {
+                                egui::Color32::from_rgb(52, 211, 153)
+                            } else {
+                                egui::Color32::from_rgb(148, 163, 184)
+                            };
+                            ui.label(egui::RichText::new(rev_rec_msg).strong().color(rev_rec_color).size(12.0));
                         });
 
                         ui.add_space(10.0);
@@ -11058,7 +11147,42 @@ impl eframe::App for AgentPowerGuardApp {
 
                         ui.add_space(8.0);
 
-                        // Findings & Diagnosis Cards
+                        // Quick Verification Summary Ribbon
+                        ui.horizontal_wrapped(|ui| {
+                            if s.diag_session.reverse_sleep_attempted {
+                                let (txt, col) = if s.diag_session.reverse_sleep_blocked_by_guard {
+                                    ("Reverse Sleep Test: PROTECTED (Guard Blocked Sleep)", egui::Color32::from_rgb(52, 211, 153))
+                                } else {
+                                    ("Reverse Sleep Test: FAILED (Sleep Allowed During Workload)", egui::Color32::from_rgb(244, 63, 94))
+                                };
+                                ui.label(egui::RichText::new(txt).strong().size(11.5).color(col));
+                                ui.add_space(12.0);
+                            }
+
+                            if s.diag_session.revert_pressure_triggered {
+                                let (txt, col) = if s.diag_session.revert_pressure_verified {
+                                    ("Revert Pressure: VERIFIED (Idle Restored <8% CPU)", egui::Color32::from_rgb(56, 189, 248))
+                                } else {
+                                    ("Revert Pressure: UNVERIFIED (Elevated Load Lingered)", egui::Color32::from_rgb(245, 158, 11))
+                                };
+                                ui.label(egui::RichText::new(txt).strong().size(11.5).color(col));
+                                ui.add_space(12.0);
+                            }
+
+                            if s.diag_session.display_off_simulated_at.is_some() || s.diag_session.sleep_simulated_at.is_some() {
+                                ui.label(
+                                    egui::RichText::new(format!(
+                                        "Watt Drops: Disp -{:.0}W | Sleep -{:.0}W",
+                                        s.diag_session.display_off_watt_drop, s.diag_session.sleep_watt_drop
+                                    ))
+                                    .strong()
+                                    .size(11.5)
+                                    .color(egui::Color32::from_rgb(251, 191, 36)),
+                                );
+                            }
+                        });
+
+                        ui.add_space(6.0);
                         app_card_frame(ui).show(ui, |ui| {
                             ui.set_width((ui.available_width() - 4.0).max(280.0));
                             icon_card_title(
