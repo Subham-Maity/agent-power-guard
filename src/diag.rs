@@ -1391,10 +1391,13 @@ pub fn open_diag_media_url(url: &str) -> (bool, bool) {
 pub fn close_diag_media_tabs() -> usize {
     #[cfg(windows)]
     {
-        use windows_sys::Win32::Foundation::{BOOL, HWND, LPARAM, TRUE};
+        use windows_sys::Win32::Foundation::{HWND, LPARAM};
         use windows_sys::Win32::UI::WindowsAndMessaging::{
             EnumWindows, GetWindowTextW, PostMessageW, WM_CLOSE,
         };
+
+        type BOOL = i32;
+        const TRUE: BOOL = 1;
 
         unsafe extern "system" fn enum_proc(hwnd: HWND, lparam: LPARAM) -> BOOL {
             let mut buf = [0u16; 512];
