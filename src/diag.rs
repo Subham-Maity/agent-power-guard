@@ -468,7 +468,7 @@ impl DiagnosticSession {
         self.media_tabs_open = false;
         self.media_close_requested = false;
         self.chrome_detected = find_chrome_executable().is_some();
-        self.input_shield_active = false;
+        self.input_shield_active = self.input_shield_enabled;
         self.input_shield_nudges_filtered = 0;
         self.current_phase_sec_remaining = if mode.total_seconds() <= 120 { 5 } else { 10 };
         self.bg_activity_desc = "Arming & Calibrating: Hands off keyboard & mouse...".to_string();
@@ -483,6 +483,7 @@ impl DiagnosticSession {
         self.media_tabs_open = false;
         self.media_close_requested = true;
         close_diag_media_tabs();
+        InputShield::release_shield();
         self.bg_activity_desc = "Diagnostic cancelled: all media tabs closed & workloads halted.".to_string();
         self.status_banner = format!("Diagnostic cancelled: {}", reason);
     }
@@ -855,6 +856,7 @@ impl DiagnosticSession {
         // On completion, synthesize findings and generate markdown report
         if self.phase == DiagnosticPhase::Completed {
             self.active = false;
+            InputShield::release_shield();
             if self.media_tabs_open {
                 self.media_tabs_open = false;
                 close_diag_media_tabs();
@@ -1528,40 +1530,44 @@ mod win_input_shield {
         pub dw_extra_info: usize,
     }
 
+    #[repr(C)]
+    #[derive(Clone, Copy)]
+    pub struct RECT {
+        pub left: i32,
+        pub top: i32,
+        pub right: i32,
+        pub bottom: i32,
+    }
+
     #[link(name = "user32")]
     extern "system" {
         pub fn SetWindowsHookExW(id_hook: i32, lpfn: Option<HOOKPROC>, hmod: HINSTANCE, dw_thread_id: u32) -> HHOOK;
         pub fn UnhookWindowsHookEx(hhk: HHOOK) -> BOOL;
         pub fn CallNextHookEx(hhk: HHOOK, n_code: i32, wparam: usize, lparam: isize) -> isize;
         pub fn GetMessageW(lpmsg: *mut MSG, hwnd: HWND, wmsgfiltermin: u32, wmsgfiltermax: u32) -> BOOL;
+        pub fn PeekMessageW(lpmsg: *mut MSG, hwnd: HWND, wmsgfiltermin: u32, wmsgfiltermax: u32, wremovemsg: u32) -> BOOL;
         pub fn TranslateMessage(lpmsg: *const MSG) -> BOOL;
         pub fn DispatchMessageW(lpmsg: *const MSG) -> isize;
         pub fn PostThreadMessageW(id_thread: u32, msg: u32, wparam: usize, lparam: isize) -> BOOL;
         pub fn WindowFromPoint(point: POINT) -> HWND;
         pub fn GetWindowThreadProcessId(hwnd: HWND, lpdwprocessid: *mut u32) -> u32;
+        pub fn GetCursorPos(lpPoint: *mut POINT) -> BOOL;
+        pub fn ClipCursor(lpRect: *const RECT) -> BOOL;
     }
 
     #[link(name = "kernel32")]
     extern "system" {
         pub fn GetCurrentThreadId() -> u32;
+        pub fn GetModuleHandleW(lpModuleName: *const u16) -> HINSTANCE;
     }
+
+    const WM_KEYDOWN: usize = 0x0100;
+    const WM_SYSKEYDOWN: usize = 0x0104;
 
     pub unsafe extern "system" fn low_level_mouse_proc(code: i32, wparam: usize, lparam: isize) -> isize {
         if code >= 0 && SHIELD_ACTIVE.load(Ordering::Relaxed) {
-            let ms = lparam as *const MSLLHOOKSTRUCT;
-            if !ms.is_null() {
-                let pt = (*ms).pt;
-                let hwnd = WindowFromPoint(pt);
-                let mut target_pid: u32 = 0;
-                GetWindowThreadProcessId(hwnd, &mut target_pid);
-                let app_pid = SHIELD_APP_PID.load(Ordering::Relaxed);
-                // Allow mouse clicks inside Agent Power Guard window so user can click Cancel / Release buttons!
-                if app_pid != 0 && target_pid == app_pid {
-                    return CallNextHookEx(std::ptr::null_mut(), code, wparam, lparam);
-                }
-            }
             SHIELD_NUDGES.fetch_add(1, Ordering::Relaxed);
-            // Swallow external/background mouse events
+            // Completely swallow mouse movement and clicks so Windows never moves cursor or resets idle!
             return 1;
         }
         CallNextHookEx(std::ptr::null_mut(), code, wparam, lparam)
@@ -1570,9 +1576,10 @@ mod win_input_shield {
     pub unsafe extern "system" fn low_level_kbd_proc(code: i32, wparam: usize, lparam: isize) -> isize {
         if code >= 0 && SHIELD_ACTIVE.load(Ordering::Relaxed) {
             let kbd = lparam as *const KBDLLHOOKSTRUCT;
-            if !kbd.is_null() {
+            if !kbd.is_null() && (wparam == WM_KEYDOWN || wparam == WM_SYSKEYDOWN) {
                 let vk = (*kbd).vk_code;
-                if vk == VK_ESCAPE {
+                // ESC or Space key emergency escape (3 quick presses within 1.5s)
+                if vk == VK_ESCAPE || vk == 0x20 {
                     let now_ms = SystemTime::now()
                         .duration_since(UNIX_EPOCH)
                         .unwrap_or_default()
@@ -1581,8 +1588,9 @@ mod win_input_shield {
                     if now_ms.saturating_sub(last_ms) <= 1500 {
                         let count = SHIELD_ESC_COUNT.fetch_add(1, Ordering::SeqCst) + 1;
                         if count >= 3 {
-                            // Emergency escape: 3x ESC within 1.5 seconds immediately unhooks!
+                            // Emergency escape sequence triggered! (3x ESC / 3x Space)
                             SHIELD_ACTIVE.store(false, Ordering::SeqCst);
+                            ClipCursor(std::ptr::null());
                             let tid = SHIELD_TID.load(Ordering::SeqCst);
                             if tid != 0 {
                                 PostThreadMessageW(tid, WM_QUIT, 0, 0);
@@ -1595,7 +1603,7 @@ mod win_input_shield {
                 }
             }
             SHIELD_NUDGES.fetch_add(1, Ordering::Relaxed);
-            // Swallow external keystrokes
+            // Completely swallow all keystrokes during test
             return 1;
         }
         CallNextHookEx(std::ptr::null_mut(), code, wparam, lparam)
@@ -1639,7 +1647,8 @@ impl InputShield {
         }
     }
 
-    pub fn engage(&mut self, total_duration_secs: u32) {
+    /// Freezes the mouse cursor on screen and swallows all keyboard strokes immediately.
+    pub fn engage_shield(total_duration_secs: u32) {
         #[cfg(windows)]
         {
             if SHIELD_ACTIVE.load(Ordering::SeqCst) {
@@ -1655,11 +1664,37 @@ impl InputShield {
                 let tid = unsafe { GetCurrentThreadId() };
                 SHIELD_TID.store(tid, Ordering::SeqCst);
 
+                // 1. Force Win32 message queue creation on this thread
+                let mut dummy: MSG = unsafe { std::mem::zeroed() };
+                unsafe { PeekMessageW(&mut dummy, std::ptr::null_mut(), 0, 0, 0) };
+
+                // 2. Lock mouse cursor at current point using ClipCursor
+                let mut pt = POINT { x: 0, y: 0 };
+                unsafe { GetCursorPos(&mut pt) };
+                let lock_rect = RECT {
+                    left: pt.x,
+                    top: pt.y,
+                    right: pt.x + 1,
+                    bottom: pt.y + 1,
+                };
+                unsafe { ClipCursor(&lock_rect) };
+
+                // 3. Keep cursor clipped in a 30ms reinforcement loop so no window switch can unclip it
+                std::thread::spawn(move || {
+                    while SHIELD_ACTIVE.load(Ordering::Relaxed) {
+                        unsafe { ClipCursor(&lock_rect) };
+                        std::thread::sleep(Duration::from_millis(30));
+                    }
+                    unsafe { ClipCursor(std::ptr::null()) };
+                });
+
+                // 4. Install hooks with real process module handle
+                let hmod = unsafe { GetModuleHandleW(std::ptr::null()) };
                 let h_mouse = unsafe {
                     SetWindowsHookExW(
                         WH_MOUSE_LL,
                         Some(low_level_mouse_proc),
-                        std::ptr::null_mut(),
+                        hmod,
                         0,
                     )
                 };
@@ -1667,7 +1702,7 @@ impl InputShield {
                     SetWindowsHookExW(
                         WH_KEYBOARD_LL,
                         Some(low_level_kbd_proc),
-                        std::ptr::null_mut(),
+                        hmod,
                         0,
                     )
                 };
@@ -1680,6 +1715,7 @@ impl InputShield {
                     if SHIELD_ACTIVE.load(Ordering::SeqCst) {
                         SHIELD_ACTIVE.store(false, Ordering::SeqCst);
                         unsafe {
+                            ClipCursor(std::ptr::null());
                             PostThreadMessageW(safety_tid, WM_QUIT, 0, 0);
                         }
                     }
@@ -1695,6 +1731,7 @@ impl InputShield {
                 }
 
                 // Cleanup hooks on thread exit
+                unsafe { ClipCursor(std::ptr::null()) };
                 if !h_mouse.is_null() {
                     unsafe {
                         UnhookWindowsHookEx(h_mouse);
@@ -1711,19 +1748,15 @@ impl InputShield {
         }
         #[cfg(not(windows))]
         {
-            self.active.store(true, Ordering::SeqCst);
-            self.nudges_filtered.store(0, Ordering::SeqCst);
-            let active = Arc::clone(&self.active);
-            std::thread::spawn(move || {
-                std::thread::sleep(Duration::from_secs((total_duration_secs + 5) as u64));
-                active.store(false, Ordering::SeqCst);
-            });
+            let _ = total_duration_secs;
         }
     }
 
-    pub fn release(&mut self) {
+    /// Releases the mouse cursor and unhooks all keyboard filters immediately.
+    pub fn release_shield() {
         #[cfg(windows)]
         {
+            unsafe { win_input_shield::ClipCursor(std::ptr::null()) };
             if SHIELD_ACTIVE.swap(false, Ordering::SeqCst) {
                 let tid = SHIELD_TID.swap(0, Ordering::SeqCst);
                 if tid != 0 {
@@ -1734,9 +1767,15 @@ impl InputShield {
             }
         }
         #[cfg(not(windows))]
-        {
-            self.active.store(false, Ordering::SeqCst);
-        }
+        {}
+    }
+
+    pub fn engage(&mut self, total_duration_secs: u32) {
+        Self::engage_shield(total_duration_secs);
+    }
+
+    pub fn release(&mut self) {
+        Self::release_shield();
     }
 }
 

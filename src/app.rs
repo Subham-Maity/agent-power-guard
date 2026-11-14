@@ -10880,7 +10880,10 @@ impl eframe::App for AgentPowerGuardApp {
                                             trigger_spec_fetch_locked(&mut s, Arc::clone(&self.state));
                                         }
                                         s.diag_session.start(now_epoch, crate::diag::DiagDurationMode::Deep300s);
-                                        s.set_toast("300s Deep Diagnostic started: Please release keyboard and mouse!");
+                                        if s.diag_session.input_shield_enabled {
+                                            crate::diag::InputShield::engage_shield(300);
+                                        }
+                                        s.set_toast("300s Deep Diagnostic started: Mouse & keyboard frozen!");
                                     }
 
                                     ui.add_space(10.0);
@@ -10902,7 +10905,10 @@ impl eframe::App for AgentPowerGuardApp {
                                             trigger_spec_fetch_locked(&mut s, Arc::clone(&self.state));
                                         }
                                         s.diag_session.start(now_epoch, crate::diag::DiagDurationMode::Rapid120s);
-                                        s.set_toast("120s Rapid Diagnostic started: Please release keyboard and mouse!");
+                                        if s.diag_session.input_shield_enabled {
+                                            crate::diag::InputShield::engage_shield(120);
+                                        }
+                                        s.set_toast("120s Rapid Diagnostic started: Mouse & keyboard frozen!");
                                     }
                                 });
                             });
@@ -11066,6 +11072,7 @@ impl eframe::App for AgentPowerGuardApp {
                                     {
                                         s.diag_session.input_shield_active = false;
                                         s.diag_session.input_shield_enabled = false;
+                                        crate::diag::InputShield::release_shield();
                                         s.set_toast("Input shield released. Keyboard and mouse restored.");
                                     }
                                 } else {
