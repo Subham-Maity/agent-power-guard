@@ -714,6 +714,9 @@ impl DiagnosticSession {
             }
         }
 
+        let mut display_off_fired = false;
+        let mut sleep_fired = false;
+
         // In Phase 1 Baseline Idle: evaluate simulated display-off and sleep triggers
         let baseline_idle_healthy = cpu_pct <= 12.0 && disk_write_kbps <= 3000.0 && !audio_render_active && !mic_capture_active;
         let disp_target_sec = if total <= 120 { 16 } else { 32 };
