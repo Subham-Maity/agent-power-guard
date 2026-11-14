@@ -4115,6 +4115,7 @@ pub fn run_watchdog_loop(state: Arc<Mutex<SharedState>>, egui_ctx: Option<egui::
                 on_battery: batt.has_battery && !batt.on_ac_power,
                 battery_pct: batt.percent,
                 stay_awake_until: s.config.stay_awake_until_epoch_secs,
+                is_laptop: s.detected_specs.is_laptop,
                 gpu_power_mw: gpu_reading.power_mw,
                 gpu_health: gpu_reading.health,
                 attributed_disk_kbps: Some(enriched.attributed_disk_kbps),

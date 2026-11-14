@@ -202,6 +202,7 @@ pub struct Metrics {
     pub stay_awake_until: Option<u64>,
     pub local_hour: u32,
     pub local_min: u32,
+    pub is_laptop: bool,
 
     // Intent-aware enriched probe inputs
     pub gpu_power_mw: Option<u32>,
