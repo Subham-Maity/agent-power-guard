@@ -183,7 +183,7 @@ pub fn dedupe_clean_list(items: Vec<String>) -> Vec<String> {
     out
 }
 
-/// Group identical RAM modules (e.g. `16.0 GB DDR4-3000 (CMK16...) + 2x 8.0 GB DDR4-3000`).
+/// Group identical RAM modules (e.g. `16.0 GB DDR4-3200 (MOD16G) + 2x 8.0 GB DDR4-3200 (MOD8G)`).
 pub fn format_ram_sticks_summary(total_gb: f32, sticks: &[(f32, String, u32, String)]) -> String {
     if sticks.is_empty() {
         return if total_gb > 0.0 {
@@ -807,66 +807,66 @@ mod tests {
     fn test_ai_prompt_and_markdown_fenced_json_parser() {
         let specs = DetectedSystemSpecs {
             fetched: true,
-            os_name: "Windows 11".to_string(),
-            motherboard: "Gigabyte B550M DS3H R2".to_string(),
-            cpu_brand: "Ryzen 5 5600".to_string(),
-            cpu_cores: 6,
-            cpu_logical_threads: 12,
+            os_name: "Generic OS 64-bit".to_string(),
+            motherboard: "Standard ATX Motherboard".to_string(),
+            cpu_brand: "Generic 8-Core Processor".to_string(),
+            cpu_cores: 8,
+            cpu_logical_threads: 16,
             ram_gb: 32.0,
-            ram_details: "32.0 GB total [16 GB DDR4-3000 + 2x 8 GB DDR4-3000]".to_string(),
-            gpu_name: "RTX 3060".to_string(),
-            gpu_vram_gb: 12.0,
-            gpu_live_power_w: Some(14.5),
-            storage_summary: "1x 1TB NVMe".to_string(),
-            storage_drives: vec!["WD Blue SN570 1TB (NVMe SSD, 932 GB)".to_string()],
-            monitors: vec!["Acer VG240Y (1920x1080)".to_string()],
-            network_adapters: vec!["LAN: Realtek PCIe GbE [Connected]".to_string()],
-            bluetooth_devices: vec!["TP-Link Bluetooth USB Adapter".to_string()],
-            audio_devices: vec!["Microphone (Blue Snowball)".to_string()],
-            usb_peripherals: vec!["Dell KB216 Wired Keyboard".to_string()],
-            cabinet_cooling: vec!["3x 120mm ARGB Case Fans".to_string()],
+            ram_details: "32.0 GB total [2x 16 GB DDR5-5600]".to_string(),
+            gpu_name: "Generic Dedicated GPU".to_string(),
+            gpu_vram_gb: 8.0,
+            gpu_live_power_w: Some(15.0),
+            storage_summary: "1x 1TB NVMe SSD".to_string(),
+            storage_drives: vec!["Generic NVMe SSD 1TB".to_string()],
+            monitors: vec!["Generic 27-inch Display (2560x1440)".to_string()],
+            network_adapters: vec!["Gigabit Ethernet Adapter".to_string()],
+            bluetooth_devices: vec!["Generic Bluetooth Adapter".to_string()],
+            audio_devices: vec!["USB Audio Interface".to_string()],
+            usb_peripherals: vec!["Standard USB Keyboard".to_string()],
+            cabinet_cooling: vec!["3x 120mm Case Fans".to_string()],
             is_laptop: false,
         };
         let mut calc = WattCalculatorState::default();
-        calc.case_fan_count = 4;
+        calc.case_fan_count = 3;
         calc.argb_fan_count = 3;
-        calc.cooler_type = "240mm AIO Liquid Cooler".to_string();
-        let prompt = build_ai_watt_prompt(&specs, &calc, "₹", 9.0);
-        assert!(prompt.contains("Ryzen 5 5600"));
-        assert!(prompt.contains("Gigabyte B550M DS3H R2"));
-        assert!(prompt.contains("WD Blue SN570 1TB"));
-        assert!(prompt.contains("Blue Snowball"));
+        calc.cooler_type = "Tower Air Cooler".to_string();
+        let prompt = build_ai_watt_prompt(&specs, &calc, "$", 0.15);
+        assert!(prompt.contains("Generic 8-Core Processor"));
+        assert!(prompt.contains("Standard ATX Motherboard"));
+        assert!(prompt.contains("Generic NVMe SSD 1TB"));
+        assert!(prompt.contains("USB Audio Interface"));
         assert!(prompt.contains("ARGB/RGB Fans: 3"));
-        assert!(prompt.contains("240mm AIO Liquid Cooler"));
-        assert!(prompt.contains("₹9.00/kWh"));
+        assert!(prompt.contains("Tower Air Cooler"));
+        assert!(prompt.contains("$0.15/kWh"));
 
-        let ai_reply = "Here is your estimated breakdown:\n```json\n{\n  \"active_watts\": 115,\n  \"monitor_watts\": 25,\n  \"sleep_watts\": 3,\n  \"currency_symbol\": \"INR\",\n  \"electricity_rate_kwh\": 9.0,\n  \"notes\": \"Ryzen 5600 + RTX 3060 idle + Acer VG240Y\"\n}\n```\nHope this helps!";
+        let ai_reply = "Here is your estimated breakdown:\n```json\n{\n  \"active_watts\": 120,\n  \"monitor_watts\": 30,\n  \"sleep_watts\": 2,\n  \"currency_symbol\": \"$\",\n  \"electricity_rate_kwh\": 0.15,\n  \"notes\": \"Standard Desktop Estimate\"\n}\n```\nHope this helps!";
         let parsed = parse_ai_watt_response(ai_reply).expect("should parse fenced JSON");
-        assert_eq!(parsed.active_watts, Some(115.0));
-        assert_eq!(parsed.monitor_watts, Some(25.0));
-        assert_eq!(parsed.sleep_watts, Some(3.0));
-        assert_eq!(parsed.currency_symbol.as_deref(), Some("₹"));
-        assert_eq!(parsed.electricity_rate_kwh, Some(9.0));
+        assert_eq!(parsed.active_watts, Some(120.0));
+        assert_eq!(parsed.monitor_watts, Some(30.0));
+        assert_eq!(parsed.sleep_watts, Some(2.0));
+        assert_eq!(parsed.currency_symbol.as_deref(), Some("$"));
+        assert_eq!(parsed.electricity_rate_kwh, Some(0.15));
     }
 
     #[test]
     fn test_ram_formatter_and_dedupe_clean_list() {
         let sticks = vec![
-            (16.0, "DDR4".to_string(), 3000, "CMK16GX4".to_string()),
-            (8.0, "DDR4".to_string(), 3000, "CMK8GX4".to_string()),
-            (8.0, "DDR4".to_string(), 3000, "CMK8GX4".to_string()),
+            (16.0, "DDR4".to_string(), 3200, "MOD16G".to_string()),
+            (8.0, "DDR4".to_string(), 3200, "MOD8G".to_string()),
+            (8.0, "DDR4".to_string(), 3200, "MOD8G".to_string()),
         ];
-        let summary = format_ram_sticks_summary(31.9, &sticks);
-        assert!(summary.contains("31.9 GB total"));
-        assert!(summary.contains("16 GB DDR4-3000 (CMK16GX4)"));
-        assert!(summary.contains("2x 8 GB DDR4-3000 (CMK8GX4)"));
+        let summary = format_ram_sticks_summary(32.0, &sticks);
+        assert!(summary.contains("32.0 GB total"));
+        assert!(summary.contains("16 GB DDR4-3200 (MOD16G)"));
+        assert!(summary.contains("2x 8 GB DDR4-3200 (MOD8G)"));
 
         let cleaned = dedupe_clean_list(vec![
-            "  Blue   Snowball ".to_string(),
+            "  USB   Microphone ".to_string(),
             "".to_string(),
-            "blue snowball".to_string(),
-            "Dell KB216".to_string(),
+            "usb microphone".to_string(),
+            "Standard Keyboard".to_string(),
         ]);
-        assert_eq!(cleaned, vec!["Blue Snowball", "Dell KB216"]);
+        assert_eq!(cleaned, vec!["USB Microphone", "Standard Keyboard"]);
     }
 }
